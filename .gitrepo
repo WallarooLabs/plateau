@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = plateau
-	branch = slog
-	commit = aa51b49603a3f54f098afc8d6ff54861267570aa
-	parent = 10851ff865823eea1b524354d071c3d102503567
+	branch = manifest
+	commit = a08d4b774bfbd71204a654b7972b1754682baa62
+	parent = 4fe2345b1aec4a02c569a88dc1ca29f7a8b54336
 	method = merge
 	cmdver = 0.4.3
