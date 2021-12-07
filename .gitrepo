@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = plateau
-	branch = manifest
-	commit = a08d4b774bfbd71204a654b7972b1754682baa62
-	parent = 4fe2345b1aec4a02c569a88dc1ca29f7a8b54336
+	branch = partition
+	commit = 4106c0c0125da529d1421050aa17a03ee7868a16
+	parent = 795d5388c352e0e6ece245232d01d1d2c8dedff7
 	method = merge
 	cmdver = 0.4.3
