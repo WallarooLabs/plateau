@@ -14,6 +14,7 @@ use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{Executor, Row};
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
@@ -104,6 +105,11 @@ pub struct SegmentData {
 fn row_to_option_segment(row: SqliteRow) -> Option<SegmentIndex> {
     row.get::<Option<i64>, _>(0)
         .map(|v| SegmentIndex(usize::try_from(v).unwrap()))
+}
+
+fn row_get_option_record(row: &SqliteRow, index: usize) -> Option<RecordIndex> {
+    row.get::<Option<i64>, _>(index)
+        .map(|v| RecordIndex(usize::try_from(v).unwrap()))
 }
 
 impl SegmentIndex {
@@ -285,6 +291,31 @@ impl Manifest {
         self.get_ordered_segment(id, "ASC").await
     }
 
+    pub async fn get_partition_range(&self, id: &PartitionId) -> Option<Range<RecordIndex>> {
+        sqlx::query(
+            "
+            SELECT MIN(index_start), MAX(index_end) FROM segments
+            WHERE topic = ?1 AND partition = ?2
+            GROUP BY partition
+        ",
+        )
+        .bind(&id.topic())
+        .bind(&id.partition())
+        .map(|row| {
+            match (
+                row_get_option_record(&row, 0),
+                row_get_option_record(&row, 1),
+            ) {
+                (Some(start), Some(end)) => Some(start..end),
+                _ => None,
+            }
+        })
+        .fetch_optional(&self.pool)
+        .await
+        .unwrap()
+        .flatten()
+    }
+
     /// Remove the identified segment from the manifest.
     pub async fn remove_segment(&self, id: SegmentId<&PartitionId>) {
         sqlx::query(
@@ -319,6 +350,20 @@ impl Manifest {
         .flatten()
     }
 
+    pub async fn get_partitions(&self, topic: &str) -> Vec<String> {
+        sqlx::query(
+            "
+            SELECT DISTINCT partition FROM segments
+            WHERE topic = ?1
+        ",
+        )
+        .bind(topic)
+        .map(|row: SqliteRow| row.get::<String, _>(0))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap()
+    }
+
     /// Find the "open index" of a given partition.
     /// The open index is the lowest index for a record that is not durably
     /// stored on disk.
@@ -336,6 +381,8 @@ impl Manifest {
 
 mod test {
     use super::*;
+    use std::collections::HashSet;
+    use std::iter::FromIterator;
     use std::time::SystemTime;
     use tempfile::tempdir;
 
@@ -435,11 +482,26 @@ mod test {
                 b.segment_id(SegmentIndex(0)),
                 &SegmentData {
                     time,
-                    index: RecordIndex(0)..RecordIndex(20),
+                    index: RecordIndex(0)..RecordIndex(15),
                     size: 12,
                 },
             )
             .await;
+
+        assert_eq!(state.get_size(&a).await, Some(35));
+        assert_eq!(state.get_size(&b).await, Some(12));
+        assert_eq!(
+            state.get_partition_range(&a).await.unwrap(),
+            RecordIndex(0)..RecordIndex(20)
+        );
+        assert_eq!(
+            state.get_partition_range(&b).await.unwrap(),
+            RecordIndex(0)..RecordIndex(15)
+        );
+        assert_eq!(
+            state.get_partitions(a.topic()).await,
+            vec!["a".to_string(), "b".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -497,6 +559,10 @@ mod test {
             state.get_segment_for_ix(&id, RecordIndex(15)).await,
             Some(SegmentIndex(1))
         );
+        assert_eq!(
+            state.get_partition_range(&id).await,
+            Some(RecordIndex(10)..RecordIndex(20))
+        );
         assert_eq!(state.get_min_segment(&id).await, Some(SegmentIndex(1)));
         assert_eq!(state.get_max_segment(&id).await, Some(SegmentIndex(1)));
         assert_eq!(state.get_size(&id).await, Some(13));
@@ -507,5 +573,6 @@ mod test {
         assert_eq!(state.get_min_segment(&id).await, None);
         assert_eq!(state.get_max_segment(&id).await, None);
         assert_eq!(state.get_size(&id).await, None);
+        assert_eq!(state.get_partition_range(&id).await, None);
     }
 }

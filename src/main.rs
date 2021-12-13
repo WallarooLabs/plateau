@@ -10,8 +10,10 @@ use parquet::data_type::ByteArray;
 use rweb::*;
 use serde::{Deserialize, Serialize};
 use slog::RecordIndex;
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::catalog::Catalog;
@@ -43,9 +45,25 @@ struct Inserted {
 }
 
 #[derive(Schema, Serialize)]
+struct Partitions {
+    partitions: HashMap<Arc<String>, Span>,
+}
+
+#[derive(Schema, Serialize)]
 struct Records {
+    span: Span,
     records: Vec<String>,
 }
+
+#[derive(Schema, Deserialize)]
+struct RecordQuery {
+    start: usize,
+    limit: Option<usize>,
+}
+
+#[derive(Debug)]
+struct InvalidQuery;
+impl warp::reject::Reject for InvalidQuery {}
 
 #[tokio::main]
 async fn main() {
@@ -54,7 +72,11 @@ async fn main() {
     pretty_env_logger::init();
     let log = warp::log("plateau::http");
 
-    let (spec, filter) = openapi::spec().build(move || topic_append(catalog));
+    let (spec, filter) = openapi::spec().build(move || {
+        topic_append(catalog.clone())
+            .or(topic_get_partitions(catalog.clone()))
+            .or(topic_get_records(catalog))
+    });
 
     serve(filter.or(openapi_docs(spec)).with(log))
         .run(([127, 0, 0, 1], 3030))
@@ -91,5 +113,45 @@ async fn topic_append(
 
     Ok(Json::from(Inserted {
         span: Span::from_range(r),
+    }))
+}
+
+#[get("/topic/{topic_name}")]
+#[openapi(id = "topic.get_partitions")]
+async fn topic_get_partitions(
+    topic_name: String,
+    #[data] catalog: Catalog,
+) -> Result<Json<Partitions>, Rejection> {
+    let topic = catalog.get_topic(&topic_name).await;
+    Ok(Json::from(Partitions {
+        partitions: topic
+            .get_partitions()
+            .await
+            .into_iter()
+            .map(|(partition, range)| (Arc::new(partition), Span::from_range(range)))
+            .collect(),
+    }))
+}
+
+#[get("/topic/{topic_name}/{partition_name}/records")]
+#[openapi(id = "topic.get_records")]
+async fn topic_get_records(
+    topic_name: String,
+    partition_name: String,
+    query: Query<RecordQuery>,
+    #[data] catalog: Catalog,
+) -> Result<Json<Records>, Rejection> {
+    let query = query.into_inner();
+    let topic = catalog.get_topic(&topic_name).await;
+    let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
+    let (range, rs) = topic
+        .get_records(&partition_name, RecordIndex(query.start), limit)
+        .await;
+    Ok(Json::from(Records {
+        span: Span::from_range(range),
+        records: rs
+            .into_iter()
+            .map(|r| String::from_utf8(r.message.data().to_vec()).unwrap())
+            .collect(),
     }))
 }

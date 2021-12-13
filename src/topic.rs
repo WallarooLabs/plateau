@@ -7,6 +7,9 @@ pub use crate::partition::{Retention, Rolling};
 pub use crate::segment::Record;
 pub use crate::slog::Index;
 use crate::slog::RecordIndex;
+use futures::future::FutureExt;
+use futures::stream;
+use futures::stream::StreamExt;
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
@@ -47,6 +50,22 @@ impl Topic {
 
     fn partition_root(root: &PathBuf, name: &str) -> PathBuf {
         root.join(name)
+    }
+
+    pub async fn get_partitions(&self) -> HashMap<String, Range<RecordIndex>> {
+        let active: Vec<String> = { self.partitions.read().await.keys().cloned().collect() };
+        let stored = self.manifest.get_partitions(&self.name).await;
+        stream::iter(active.iter().chain(stored.iter()))
+            .flat_map(|name| {
+                self.get_partition(name)
+                    .then(move |l| async move {
+                        let r = l.get_active_range().await;
+                        (name.clone(), r)
+                    })
+                    .into_stream()
+            })
+            .collect()
+            .await
     }
 
     async fn get_partition(&self, partition_name: &str) -> RwLockReadGuard<'_, Partition> {
@@ -90,6 +109,16 @@ impl Topic {
         partition.get_record_by_index(index).await
     }
 
+    pub(crate) async fn get_records(
+        &self,
+        partition_name: &str,
+        start: RecordIndex,
+        limit: usize,
+    ) -> (Range<RecordIndex>, Vec<Record>) {
+        let partition = self.get_partition(partition_name).await;
+        partition.get_records(start, limit).await
+    }
+
     pub async fn commit(&self) {
         for (_, part) in self.partitions.read().await.iter() {
             part.commit().await;
@@ -100,12 +129,118 @@ impl Topic {
 mod test {
     use super::*;
     use parquet::data_type::ByteArray;
+    use std::collections::HashSet;
     use std::convert::TryFrom;
+    use std::iter::FromIterator;
     use std::ops::Deref;
     use std::thread;
     use std::time::{Duration, Instant, SystemTime};
     use tempfile::tempdir;
     use tokio::sync::mpsc::channel;
+
+    #[tokio::test]
+    async fn test_independence() {
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        let topic = Topic::attach(
+            root.clone(),
+            manifest.clone(),
+            String::from("testing"),
+            PartitionConfig::default(),
+        )
+        .await;
+
+        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
+            .into_iter()
+            .map(|message| Record {
+                time: SystemTime::UNIX_EPOCH,
+                message: ByteArray::from(message),
+            })
+            .collect();
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("partition-{}", ix % 3);
+            topic.append(&name, &vec![record.clone()]).await;
+        }
+
+        topic.commit().await;
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("partition-{}", ix % 3);
+            assert_eq!(
+                topic.get_record_by_index(&name, RecordIndex(ix / 3)).await,
+                Some(record.clone())
+            );
+        }
+
+        let topic = Topic::attach(
+            root,
+            manifest,
+            String::from("testing"),
+            PartitionConfig::default(),
+        )
+        .await;
+        assert_eq!(
+            topic.get_partitions().await,
+            HashMap::<_, _>::from_iter([
+                ("partition-0".to_string(), RecordIndex(0)..RecordIndex(2)),
+                ("partition-1".to_string(), RecordIndex(0)..RecordIndex(2)),
+                ("partition-2".to_string(), RecordIndex(0)..RecordIndex(2)),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_active_segments() {
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        let topic = Topic::attach(
+            root.clone(),
+            manifest.clone(),
+            String::from("testing"),
+            PartitionConfig::default(),
+        )
+        .await;
+
+        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
+            .into_iter()
+            .map(|message| Record {
+                time: SystemTime::UNIX_EPOCH,
+                message: ByteArray::from(message),
+            })
+            .collect();
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("partition-{}", ix % 3);
+            topic.append(&name, &vec![record.clone()]).await;
+        }
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("partition-{}", ix % 3);
+            assert_eq!(
+                topic.get_record_by_index(&name, RecordIndex(ix / 3)).await,
+                Some(record.clone())
+            );
+        }
+        assert_eq!(
+            topic.get_records("partition-0", RecordIndex(0), 1000).await,
+            (
+                RecordIndex(0)..RecordIndex(2),
+                vec![records[0].clone(), records[3].clone()]
+            )
+        );
+
+        assert_eq!(
+            topic.get_partitions().await,
+            HashMap::<_, _>::from_iter([
+                ("partition-0".to_string(), RecordIndex(0)..RecordIndex(2)),
+                ("partition-1".to_string(), RecordIndex(0)..RecordIndex(2)),
+                ("partition-2".to_string(), RecordIndex(0)..RecordIndex(2)),
+            ])
+        );
+    }
 
     #[ignore]
     #[tokio::test]
