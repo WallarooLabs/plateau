@@ -5,8 +5,8 @@
 ;
 [subrepo]
 	remote = plateau
-	branch = query
-	commit = 46c22ecf1f46e97e5f8352211666772cc2143534
-	parent = 796e0dbad82d02687cc371f293db24431b8a989d
+	branch = query-time
+	commit = 588cb999f048d9812b3868b5a51bf508ec8fb7bc
+	parent = 9a9843394ea88a52f159ea8e3090dbbf809fb7ca
 	method = merge
 	cmdver = 0.4.3
