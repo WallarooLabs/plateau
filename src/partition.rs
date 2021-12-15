@@ -27,6 +27,7 @@ use futures::stream::{Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
 use log::info;
+use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::ops::{Range, RangeInclusive};
@@ -283,6 +284,12 @@ impl Partition {
         let retain = &self.config.retain;
 
         let size = self.manifest.get_size(&self.id).await.unwrap_or(0);
+        gauge!(
+            "partition_size_bytes",
+            size as f64,
+            "topic" => String::from(self.id.topic()),
+            "partition" => String::from(self.id.partition())
+        );
         if size > retain.max_bytes {
             info!("over limit {}: current size is {}", self.id, size);
             return true;
@@ -300,8 +307,18 @@ impl Partition {
                 .get_min_segment(&self.id)
                 .await
                 .unwrap_or(SegmentIndex(0));
-            info!("over limit {}: {:?}..={:?}", self.id, min, max);
-            return (max.0 - min.0 + 1) > count;
+
+            let segments = max.0 - min.0 + 1;
+            gauge!(
+                "partition_size_segments",
+                segments as f64,
+                "topic" => String::from(self.id.topic()),
+                "partition" => String::from(self.id.partition())
+            );
+            if segments > count {
+                info!("over limit {}: {:?}..={:?}", self.id, min, max);
+                return true;
+            }
         }
 
         false
@@ -413,6 +430,12 @@ impl State {
                         // TODO ensure we handle failure if this call
                         self.messages.destroy(ix);
                         info!("retain {}: destroyed {:?}", partition.id, ix);
+                        counter!(
+                            "partition_segments_destroyed",
+                            1,
+                            "topic" => String::from(partition.id.topic()),
+                            "partition" => String::from(partition.id.partition())
+                        );
                         // succeeds but this does not complete e.g. due to node failure
                         partition
                             .manifest

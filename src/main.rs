@@ -1,5 +1,6 @@
 mod catalog;
 mod manifest;
+mod metrics;
 mod partition;
 mod segment;
 mod slog;
@@ -79,6 +80,7 @@ impl warp::reject::Reject for InvalidQuery {}
 async fn main() {
     let catalog = Catalog::attach(PathBuf::from("./data")).await;
 
+    metrics::start_metrics();
     pretty_env_logger::init();
     let log = warp::log("plateau::http");
 
@@ -89,7 +91,7 @@ async fn main() {
     });
 
     serve(filter.or(openapi_docs(spec)).with(log))
-        .run(([127, 0, 0, 1], 3030))
+        .run(([0, 0, 0, 0], 3030))
         .await;
 }
 

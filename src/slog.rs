@@ -21,6 +21,7 @@ use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use futures::{future, stream, Stream};
+use metrics::counter;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::fs;
@@ -190,6 +191,7 @@ impl Slog {
     }
 
     pub(crate) async fn roll(&self, start: RecordIndex) -> bool {
+        counter!("slog_roll", 1, "name" => self.name.clone());
         self.state.write().await.roll(start).await
     }
 }
@@ -271,9 +273,11 @@ fn spawn_slog_thread(root: PathBuf, name: String) -> (mpsc::Sender<WriteRequest>
                     records,
                 }) => {
                     let mut writer = Slog::segment_from_name(&root, &name, segment).create();
-                    let end = RecordIndex(start.0 + records.len());
+                    let count = records.len();
+                    let end = RecordIndex(start.0 + count);
                     let index = start..end;
                     writer.log(records);
+                    counter!("slog_thread_records_written", u64::try_from(count).unwrap(), "name" => name.clone());
                     let size = usize::try_from(writer.close()).unwrap();
                     let response = WriteResult {
                         segment,
