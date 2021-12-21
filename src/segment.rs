@@ -111,10 +111,16 @@ impl SegmentWriter {
         self.writer.close_row_group(row_group_writer).unwrap();
     }
 
-    pub(crate) fn close(mut self) -> u64 {
+    /// Return an estimate of the on-disk size of this file. Note that this
+    /// will _not_ include the final metadata footer.
+    pub(crate) fn size_estimate(&self) -> usize {
+        fs::metadata(&self.path).unwrap().len() as usize
+    }
+
+    pub(crate) fn close(mut self) -> usize {
         self.writer.close().unwrap();
         self.file.sync_data().unwrap();
-        fs::metadata(self.path).unwrap().len()
+        self.size_estimate()
     }
 }
 
@@ -191,11 +197,12 @@ mod test {
         let root = tempdir().unwrap();
         let path = root.path().join("testing.parquet");
         let s = Segment::at(PathBuf::from(path));
-        let records: Vec<_> = vec!["abc", "def", "ghi"]
+        let records: Vec<_> = (0..100)
             .into_iter()
+            .map(|ix| format!("message-{}", ix))
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: ByteArray::from(message.as_str()),
             })
             .collect();
 
@@ -203,7 +210,8 @@ mod test {
         for r in records.iter() {
             w.log(vec![r.clone()]);
         }
-        w.close();
+        let size = w.close();
+        assert!(size > 0);
 
         let r = s.read();
         assert_eq!(r.read_all(), records);

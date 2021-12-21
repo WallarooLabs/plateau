@@ -5,7 +5,6 @@ pub use crate::partition::Config as PartitionConfig;
 use crate::partition::{Partition, PartitionId};
 pub use crate::partition::{Retention, Rolling};
 pub use crate::segment::Record;
-pub use crate::slog::Index;
 use crate::slog::RecordIndex;
 use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
@@ -106,6 +105,14 @@ impl Topic {
                 map.get(partition_name).unwrap()
             })
         }
+    }
+
+    pub async fn checkpoint(&self) {
+        self.map_partitions::<_, _, ()>(|partition| async move {
+            partition.checkpoint().await;
+            None
+        })
+        .await;
     }
 
     pub async fn append(&self, partition_name: &str, rs: &[Record]) -> Range<RecordIndex> {

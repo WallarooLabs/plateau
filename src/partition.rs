@@ -19,7 +19,7 @@
 use crate::manifest::Manifest;
 pub use crate::manifest::{PartitionId, SegmentData};
 pub use crate::segment::Record;
-pub use crate::slog::{Index, RecordIndex};
+pub use crate::slog::{InternalIndex, RecordIndex};
 use crate::slog::{SegmentIndex, SegmentRecordIndex, Slog};
 use chrono::{DateTime, Utc};
 use futures::future::OptionFuture;
@@ -84,7 +84,7 @@ pub struct State {
     open_index: RecordIndex,
     last_roll: Instant,
     messages: Slog,
-    commits: watch::Receiver<SegmentIndex>,
+    commits: watch::Receiver<RecordIndex>,
 }
 
 fn merge_ranges<T: Ord>(a: Range<T>, b: Range<T>) -> Range<T> {
@@ -101,14 +101,23 @@ impl Partition {
         if !Path::exists(&root) {
             fs::create_dir(&root).unwrap();
         }
-        let segment = manifest
-            .get_max_segment(&id)
-            .await
-            .map(|s| s.next())
-            .unwrap_or(SegmentIndex(0));
-        let (messages, mut writes) = Slog::attach(root.clone(), Partition::slog_name(&id), segment);
+        let current = manifest.get_max_segment(&id).await;
+        let record = OptionFuture::from(current.map(|ix| {
+            manifest
+                .get_segment_data(id.segment_id(ix))
+                .map(|data| data.unwrap().index.end)
+        }))
+        .await
+        .unwrap_or(RecordIndex(0));
+        let segment = current.map(|s| s.next()).unwrap_or(SegmentIndex(0));
+        let checkpoint = InternalIndex {
+            segment,
+            record: SegmentRecordIndex(0),
+        };
+        let (messages, mut writes) =
+            Slog::attach(root.clone(), Partition::slog_name(&id), checkpoint, record);
 
-        let (commit_writer, commits) = watch::channel(segment);
+        let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
         let commit_id = id.clone();
         tokio::spawn(async move {
@@ -117,7 +126,7 @@ impl Partition {
                     .update(commit_id.segment_id(r.segment), &r.data)
                     .await;
                 // ok if no receivers, that means nothing is awaiting a commit
-                commit_writer.send(r.segment).ok();
+                commit_writer.send(r.data.index.end).ok();
             }
         });
 
@@ -155,12 +164,16 @@ impl Partition {
         self.state.write().await.commit(&self).await;
     }
 
-    pub(crate) async fn get_record_full_index(&self, index: RecordIndex) -> Option<Index> {
+    pub(crate) async fn checkpoint(&self) {
+        self.state.write().await.messages.checkpoint().await;
+    }
+
+    pub(crate) async fn get_record_full_index(&self, index: RecordIndex) -> Option<InternalIndex> {
         let state = self.state.read().await;
         let open = state.open_index;
         let manifest = &self.manifest;
         if index >= open {
-            Some(Index {
+            Some(InternalIndex {
                 record: SegmentRecordIndex(index.0 - open.0),
                 segment: state.messages.current_segment_ix().await,
             })
@@ -171,7 +184,7 @@ impl Partition {
                     OptionFuture::from(s.map(|segment| {
                         manifest
                             .get_segment_data(self.id.segment_id(segment))
-                            .map(move |data| Index {
+                            .map(move |data| InternalIndex {
                                 record: SegmentRecordIndex(index.0 - data.unwrap().index.start.0),
                                 segment,
                             })
@@ -211,7 +224,11 @@ impl Partition {
                 .map(|data| vec![(active_segment, data)])
                 .unwrap_or(vec![]),
         );
-        stored.chain(active)
+        // due to checkpoints, the active segment may already be stored in the
+        // manifest
+        stored
+            .take_while(move |(index, _)| future::ready(*index != active_segment))
+            .chain(active)
     }
 
     pub(crate) async fn get_records(
@@ -333,7 +350,7 @@ impl Partition {
 impl State {
     async fn roll(&mut self, partition: &Partition) {
         let record_count = self.messages.current_len().await;
-        self.messages.roll(self.open_index).await;
+        self.messages.roll().await;
         self.last_roll = Instant::now();
         self.open_index = RecordIndex(self.open_index.0 + record_count);
         self.retain(partition).await;
@@ -447,21 +464,12 @@ impl State {
     }
 
     pub(crate) async fn commit(&mut self, partition: &Partition) {
-        let current = self.messages.current_segment_ix().await;
-        let target = if let Some(time) = self.messages.current_time_range().await {
-            // flush remaining messages
-            let start = self.open_index;
-            self.roll(partition).await;
-            Some(current)
-        } else {
-            current.prev()
-        };
+        let target = self.open_index + self.messages.current_len().await;
+        self.roll(partition).await;
 
-        if let Some(target) = target {
+        self.commits.changed().await.expect("commit watcher ended");
+        while *self.commits.borrow() < target {
             self.commits.changed().await.expect("commit watcher ended");
-            while *self.commits.borrow() < target {
-                self.commits.changed().await.expect("commit watcher ended");
-            }
         }
     }
 }
@@ -616,7 +624,9 @@ mod test {
             for (ix, record) in records.iter().enumerate() {
                 assert_eq!(
                     t.get_record_by_index(RecordIndex(ix)).await,
-                    Some(record.clone())
+                    Some(record.clone()),
+                    "record {}",
+                    ix
                 );
             }
             assert_eq!(
@@ -645,6 +655,7 @@ mod test {
                     max_segment_count: Some(1),
                     ..Retention::default()
                 },
+                ..Config::default()
             },
         )
         .await;

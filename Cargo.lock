@@ -1503,6 +1503,7 @@ dependencies = [
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]

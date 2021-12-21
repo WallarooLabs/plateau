@@ -8,6 +8,9 @@ mod topic;
 
 use ::log::info;
 use chrono::{DateTime, Utc};
+use futures::future::BoxFuture;
+use futures::stream::StreamExt;
+use futures::{future, stream};
 use parquet::data_type::ByteArray;
 use rweb::*;
 use serde::{Deserialize, Serialize};
@@ -16,7 +19,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use std::time::SystemTime;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::time;
+use tokio_stream::wrappers::{IntervalStream, SignalStream};
 
 use crate::catalog::Catalog;
 use crate::topic::Record;
@@ -76,6 +83,10 @@ struct RecordQuery {
 struct InvalidQuery;
 impl warp::reject::Reject for InvalidQuery {}
 
+fn signal_stream(k: SignalKind) -> impl Stream<Item = ()> {
+    SignalStream::new(signal(k).unwrap())
+}
+
 #[tokio::main]
 async fn main() {
     let catalog = Catalog::attach(PathBuf::from("./data")).await;
@@ -84,15 +95,39 @@ async fn main() {
     pretty_env_logger::init();
     let log = warp::log("plateau::http");
 
+    let mut exit = stream::select_all(vec![
+        signal_stream(SignalKind::interrupt()),
+        signal_stream(SignalKind::terminate()),
+        signal_stream(SignalKind::quit()),
+    ]);
+
+    let mut checkpoints = time::interval(Duration::from_secs(1));
+    checkpoints.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+    let catalog_checkpoint = catalog.clone();
+    let stream = IntervalStream::new(checkpoints)
+        .take_until(exit.next())
+        .for_each(|_| async {
+            info!("begin full catalog checkpoint");
+            let start = SystemTime::now();
+            catalog_checkpoint.clone().checkpoint().await;
+            if let Ok(duration) = SystemTime::now().duration_since(start) {
+                info!("finished full catalog checkpoint in {:?}", duration);
+            } else {
+                info!("finished full catalog checkpoint");
+            }
+        });
+
     let (spec, filter) = openapi::spec().build(move || {
         topic_append(catalog.clone())
             .or(topic_get_partitions(catalog.clone()))
             .or(topic_get_records(catalog))
     });
 
-    serve(filter.or(openapi_docs(spec)).with(log))
-        .run(([0, 0, 0, 0], 3030))
-        .await;
+    future::select(
+        Box::pin(stream),
+        Box::pin(serve(filter.or(openapi_docs(spec)).with(log)).run(([0, 0, 0, 0], 3030))),
+    )
+    .await;
 }
 
 #[post("/topic/{topic_name}/{partition_name}")]

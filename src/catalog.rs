@@ -25,6 +25,12 @@ impl Catalog {
         }
     }
 
+    pub async fn checkpoint(&self) {
+        for (_, topic) in self.topics.read().await.iter() {
+            topic.checkpoint().await
+        }
+    }
+
     pub async fn get_topic(&self, name: &str) -> RwLockReadGuard<'_, Topic> {
         let read = self.topics.read().await;
         let v = RwLockReadGuard::try_map(read, |m| m.get(name));
