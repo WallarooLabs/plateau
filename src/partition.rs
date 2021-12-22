@@ -81,7 +81,6 @@ pub struct Partition {
 }
 
 pub struct State {
-    open_index: RecordIndex,
     last_roll: Instant,
     messages: Slog,
     commits: watch::Receiver<RecordIndex>,
@@ -131,7 +130,6 @@ impl Partition {
         });
 
         let state = State {
-            open_index: manifest.open_index(&id).await,
             last_roll: Instant::now(),
             messages,
             commits,
@@ -151,13 +149,13 @@ impl Partition {
 
     pub(crate) async fn append(&self, rs: &[Record]) -> Range<RecordIndex> {
         let mut state = self.state.write().await;
-        let start = state.open_index;
+        let start = state.messages.next_record_ix().await;
         for r in rs {
             state.messages.append(r).await;
             state.roll_when_needed(&self).await;
         }
 
-        start..RecordIndex(start.0 + rs.len())
+        start..(start + rs.len())
     }
 
     pub(crate) async fn commit(&self) {
@@ -168,32 +166,6 @@ impl Partition {
         self.state.write().await.messages.checkpoint().await;
     }
 
-    pub(crate) async fn get_record_full_index(&self, index: RecordIndex) -> Option<InternalIndex> {
-        let state = self.state.read().await;
-        let open = state.open_index;
-        let manifest = &self.manifest;
-        if index >= open {
-            Some(InternalIndex {
-                record: SegmentRecordIndex(index.0 - open.0),
-                segment: state.messages.current_segment_ix().await,
-            })
-        } else {
-            manifest
-                .get_segment_for_ix(&self.id, index)
-                .then(|s| {
-                    OptionFuture::from(s.map(|segment| {
-                        manifest
-                            .get_segment_data(self.id.segment_id(segment))
-                            .map(move |data| InternalIndex {
-                                record: SegmentRecordIndex(index.0 - data.unwrap().index.start.0),
-                                segment,
-                            })
-                    }))
-                })
-                .await
-        }
-    }
-
     async fn min_segment<'a>(&self) -> SegmentIndex {
         self.manifest
             .get_min_segment(&self.id)
@@ -201,34 +173,19 @@ impl Partition {
             .unwrap_or(SegmentIndex(0))
     }
 
-    async fn active_segment_data(&self) -> Option<SegmentData> {
-        let state = self.state.read().await;
-
-        let end = RecordIndex(state.open_index.0 + state.messages.current_len().await);
-        let size = state.messages.current_size().await;
-        state.messages.current_time_range().await.map(|time| {
-            let index = state.open_index..end;
-            SegmentData { time, index, size }
-        })
-    }
-
     async fn stream_with_active<'a>(
         &self,
         stored: impl Stream<Item = (SegmentIndex, SegmentData)> + 'a,
     ) -> impl Stream<Item = (SegmentIndex, SegmentData)> + 'a {
         let state = self.state.read().await;
-        let active_segment = state.messages.current_segment_ix().await;
-        let active = stream::iter(
-            self.active_segment_data()
-                .await
-                .map(|data| vec![(active_segment, data)])
-                .unwrap_or(vec![]),
-        );
-        // due to checkpoints, the active segment may already be stored in the
-        // manifest
+        let cached = state.messages.cached_segment_data().await;
+        let cached_segments: Vec<SegmentIndex> = cached.iter().map(|(ix, _)| ix.clone()).collect();
+        // due to checkpoints, segment data for the active / pending segment may
+        // already be stored in the manifest. we want to always only use
+        // in-memory data as it is fresher.
         stored
-            .take_while(move |(index, _)| future::ready(*index != active_segment))
-            .chain(active)
+            .take_while(move |(index, _)| future::ready(!cached_segments.contains(&index)))
+            .chain(stream::iter(cached.into_iter()))
     }
 
     pub(crate) async fn get_records(
@@ -237,9 +194,8 @@ impl Partition {
         limit: usize,
     ) -> (Option<Range<RecordIndex>>, Vec<Record>) {
         let state = self.state.read().await;
-        let min_segment = self.min_segment().await;
         let segments = self
-            .stream_with_active(self.manifest.stream_segments(&self.id, min_segment))
+            .stream_with_active(self.manifest.stream_segments(&self.id, start))
             .await;
 
         state
@@ -254,12 +210,8 @@ impl Partition {
         limit: usize,
     ) -> (Option<Range<RecordIndex>>, Vec<Record>) {
         let state = self.state.read().await;
-        let min_segment = self.min_segment().await;
         let segments = self
-            .stream_with_active(
-                self.manifest
-                    .stream_time_segments(&self.id, min_segment, &times),
-            )
+            .stream_with_active(self.manifest.stream_time_segments(&self.id, start, &times))
             .await;
 
         state
@@ -272,29 +224,26 @@ impl Partition {
     }
 
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
-        let state = self.state.read().await;
-        let slog_index = self.get_record_full_index(index).await;
-        OptionFuture::from(slog_index.map(|ix| state.messages.get_record(ix)))
-            .await
-            .flatten()
+        let (range, records) = self.get_records(index, 1).await;
+
+        if range.filter(|r| r.start == index).is_some() {
+            records.into_iter().next()
+        } else {
+            None
+        }
     }
 
-    async fn active_range(&self) -> Range<RecordIndex> {
+    pub(crate) async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
         let read = self.state.read().await;
-        let active_start = read.open_index;
-        read.open_index..RecordIndex(active_start.0 + read.messages.current_len().await)
-    }
+        let stored = self.manifest.get_partition_range(&self.id).await;
 
-    pub(crate) async fn readable_ids(&self) -> Range<RecordIndex> {
-        let read = self.state.read().await;
-        let active = self.active_range().await;
-        let stored = self
-            .manifest
-            .get_partition_range(&self.id)
+        read.messages
+            .cached_segment_data()
             .await
-            .unwrap_or(active.start..active.end);
-
-        merge_ranges(active, stored)
+            .iter()
+            .map(|(_, data)| data.index.clone())
+            .chain(stored.into_iter())
+            .reduce(|merged, range| merge_ranges(merged, range))
     }
 
     async fn over_retention_limit(&self) -> bool {
@@ -349,15 +298,15 @@ impl Partition {
 
 impl State {
     async fn roll(&mut self, partition: &Partition) {
-        let record_count = self.messages.current_len().await;
-        self.messages.roll().await;
-        self.last_roll = Instant::now();
-        self.open_index = RecordIndex(self.open_index.0 + record_count);
-        self.retain(partition).await;
+        if let Some(_) = self.messages.active_segment_data().await {
+            self.messages.roll().await;
+            self.last_roll = Instant::now();
+            self.retain(partition).await;
+        }
     }
 
     async fn roll_when_needed(&mut self, partition: &Partition) {
-        if let Some(time) = self.messages.current_time_range().await {
+        if let Some(data) = self.messages.active_segment_data().await {
             let roll = &partition.config.roll;
             if let Some(d) = roll.max_segment_duration {
                 let dt = Instant::now() - self.last_roll;
@@ -371,15 +320,14 @@ impl State {
                 }
             }
 
-            let current_len = self.messages.current_len().await;
+            let current_len = data.index.end.0 - data.index.start.0;
             if current_len > roll.max_segment_index {
                 info!("rolling {}: length is {}", partition.id, current_len);
                 return self.roll(partition).await;
             }
 
-            let current_size = self.messages.current_size().await;
-            if current_size > roll.max_segment_size {
-                info!("rolling {}: current size is {}", partition.id, current_size);
+            if data.size > roll.max_segment_size {
+                info!("rolling {}: current size is {}", partition.id, data.size);
                 return self.roll(partition).await;
             }
         }
@@ -464,12 +412,13 @@ impl State {
     }
 
     pub(crate) async fn commit(&mut self, partition: &Partition) {
-        let target = self.open_index + self.messages.current_len().await;
-        self.roll(partition).await;
+        if let Some(target) = self.messages.next_record_ix().await.rewind(1) {
+            self.roll(partition).await;
 
-        self.commits.changed().await.expect("commit watcher ended");
-        while *self.commits.borrow() < target {
             self.commits.changed().await.expect("commit watcher ended");
+            while *self.commits.borrow() < target {
+                self.commits.changed().await.expect("commit watcher ended");
+            }
         }
     }
 }
@@ -505,7 +454,9 @@ mod test {
         for (ix, record) in records.iter().enumerate() {
             assert_eq!(
                 t.get_record_by_index(RecordIndex(ix)).await,
-                Some(record.clone())
+                Some(record.clone()),
+                "mismatch at {}",
+                ix
             );
         }
         assert_eq!(
@@ -514,8 +465,7 @@ mod test {
         );
     }
 
-    #[tokio::test]
-    async fn test_rolling_get() {
+    async fn test_rolling_get(commit: bool) {
         let id = PartitionId::new("topic", "testing-roll");
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -545,7 +495,10 @@ mod test {
         for record in records.iter() {
             t.append(&vec![record.clone()]).await;
         }
-        t.commit().await;
+
+        if commit {
+            t.commit().await;
+        }
 
         for (ix, record) in records.iter().enumerate() {
             assert_eq!(
@@ -569,6 +522,17 @@ mod test {
                 )
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_rolling_get_committed() {
+        test_rolling_get(true).await;
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_rolling_get_cached() {
+        test_rolling_get(false).await;
     }
 
     #[tokio::test]

@@ -12,7 +12,7 @@ metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 
 openssl = { version = "*", features = ["vendored"] }
-parquet = "5.5"
+parquet = "6.4"
 pretty_env_logger = "0.4"
 rweb = { version = "0.15", features = ["openapi"] }
 serde_json = "1.0"

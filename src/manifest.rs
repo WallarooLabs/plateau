@@ -311,12 +311,12 @@ impl Manifest {
     pub fn stream_segments<'a>(
         &'a self,
         id: &'a PartitionId,
-        start: SegmentIndex,
+        start: RecordIndex,
     ) -> impl futures::Stream<Item = (SegmentIndex, SegmentData)> + 'a {
         sqlx::query(
             "
                 SELECT segment_id, time_start, time_end, index_start, index_end, size FROM segments
-                WHERE topic = ?1 AND partition = ?2 AND segment_id >= ?3
+                WHERE topic = ?1 AND partition = ?2 AND index_end > ?3
                 ORDER BY segment_id ASC
             ",
         )
@@ -336,7 +336,7 @@ impl Manifest {
     pub fn stream_time_segments<'a>(
         &'a self,
         id: &'a PartitionId,
-        start: SegmentIndex,
+        start: RecordIndex,
         times: &'a RangeInclusive<DateTime<Utc>>,
     ) -> impl futures::Stream<Item = (SegmentIndex, SegmentData)> + 'a {
         // see discussion on finding the intersection of intervals here:
@@ -349,7 +349,7 @@ impl Manifest {
                 WHERE (
                     topic = ?1 AND partition = ?2
                     AND ?3 <= time_end AND time_start <= ?4
-                    AND segment_id >= ?5
+                    AND index_end > ?5
                 )
                 ORDER BY segment_id ASC
             ",
@@ -695,7 +695,7 @@ mod test {
             let times = Utc.timestamp(*times.start(), 0)..=Utc.timestamp(*times.end(), 0);
             assert_eq!(
                 state
-                    .stream_time_segments(id, SegmentIndex(start), &times)
+                    .stream_time_segments(id, RecordIndex(start), &times)
                     .map(|data| data.0)
                     .collect::<Vec<_>>()
                     .await,
@@ -742,15 +742,15 @@ mod test {
         verify_stream(&state, &id, 0, 501..=520, vec![0]).await;
         verify_stream(&state, &id, 0, 501..=585, vec![0, 1]).await;
         verify_stream(&state, &id, 0, 501..=700, vec![0, 1, 3]).await;
-        verify_stream(&state, &id, 2, 501..=700, vec![3]).await;
+        verify_stream(&state, &id, 22, 501..=700, vec![3]).await;
         verify_stream(&state, &id, 0, 820..=850, vec![2]).await;
         verify_stream(&state, &id, 0, 601..=700, vec![1, 3]).await;
 
         // ranges: start within record range, end after
         verify_stream(&state, &id, 0, 500..=1000, vec![0, 1, 2, 3]).await;
-        verify_stream(&state, &id, 1, 500..=1000, vec![1, 2, 3]).await;
+        verify_stream(&state, &id, 12, 500..=1000, vec![1, 2, 3]).await;
         verify_stream(&state, &id, 0, 520..=1000, vec![0, 1, 2, 3]).await;
-        verify_stream(&state, &id, 2, 520..=1000, vec![2, 3]).await;
+        verify_stream(&state, &id, 20, 520..=1000, vec![2, 3]).await;
         verify_stream(&state, &id, 0, 705..=1000, vec![1, 2, 3]).await;
         verify_stream(&state, &id, 0, 850..=1000, vec![2]).await;
 

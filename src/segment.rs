@@ -141,7 +141,11 @@ impl SegmentReader {
             let row_group_metadata = metadata.row_group(i);
             let rows = usize::try_from(row_group_metadata.num_rows()).unwrap();
             let mut tvs = vec![0; rows];
-            let mut arrs: Vec<ByteArray> = vec![ByteArray::from(vec![0; 1024])]
+
+            // NOTE - this buffer is dynamically resized by the reader when the
+            // on-disk size exceeds the allocated space, see the large_records
+            // test below for proof
+            let mut arrs: Vec<ByteArray> = vec![ByteArray::from(vec![0; 128])]
                 .into_iter()
                 .cycle()
                 .take(rows)
@@ -150,14 +154,13 @@ impl SegmentReader {
             let mut column_reader = row_group_reader.get_column_reader(0).unwrap();
             match column_reader {
                 ColumnReader::Int64ColumnReader(ref mut typed_reader) => {
-                    typed_reader
-                        .read_batch(
-                            rows, // batch size
-                            Some(&mut def_levels),
-                            Some(&mut rep_levels),
-                            &mut tvs,
-                        )
-                        .expect("batch read");
+                    let mut read = 0;
+                    while read < rows {
+                        let batch = typed_reader
+                            .read_batch(rows, None, None, &mut tvs.as_mut_slice()[read..])
+                            .expect("batch read");
+                        read += batch.0;
+                    }
                 }
                 _ => panic!("invalid column type"),
             };
@@ -165,15 +168,18 @@ impl SegmentReader {
             let mut column_reader = row_group_reader.get_column_reader(1).unwrap();
             match column_reader {
                 ColumnReader::ByteArrayColumnReader(ref mut typed_reader) => {
-                    // TODO: arbitrary message sizes
-                    typed_reader
-                        .read_batch(
-                            rows,
-                            Some(&mut def_levels),
-                            Some(&mut rep_levels),
-                            &mut arrs,
-                        )
-                        .expect("batch read");
+                    let mut read = 0;
+                    while read < rows {
+                        let batch = typed_reader
+                            .read_batch(
+                                rows,
+                                Some(&mut def_levels),
+                                Some(&mut rep_levels),
+                                &mut arrs.as_mut_slice()[read..],
+                            )
+                            .expect("batch read");
+                        read += batch.0;
+                    }
                 }
                 _ => panic!("invalid column type"),
             };
@@ -192,24 +198,50 @@ mod test {
     use super::*;
     use tempfile::tempdir;
 
+    fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
+        it.map(|(ix, message)| Record {
+            time: Utc.timestamp(ix, 0),
+            message: ByteArray::from(message.as_str()),
+        })
+        .collect()
+    }
+
     #[test]
     fn round_trip() {
         let root = tempdir().unwrap();
         let path = root.path().join("testing.parquet");
         let s = Segment::at(PathBuf::from(path));
-        let records: Vec<_> = (0..100)
-            .into_iter()
-            .map(|ix| format!("message-{}", ix))
-            .map(|message| Record {
-                time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message.as_str()),
-            })
-            .collect();
+        let records: Vec<_> = build_records(
+            (0..20)
+                .into_iter()
+                .map(|ix| (ix, format!("message-{}", ix))),
+        );
 
         let mut w = s.create();
-        for r in records.iter() {
-            w.log(vec![r.clone()]);
-        }
+        w.log(records[0..10].to_vec());
+        w.log(records[10..].to_vec());
+        let size = w.close();
+        assert!(size > 0);
+
+        let r = s.read();
+        assert_eq!(r.read_all(), records);
+    }
+
+    #[test]
+    fn large_records() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(PathBuf::from(path));
+        let large: String = (0..100 * 1024).map(|_| "x").collect();
+        let records: Vec<_> = build_records(
+            (0..20)
+                .into_iter()
+                .map(|ix| (ix, format!("message-{}-{}", ix, large))),
+        );
+
+        let mut w = s.create();
+        w.log(records[0..10].to_vec());
+        w.log(records[10..].to_vec());
         let size = w.close();
         assert!(size > 0);
 

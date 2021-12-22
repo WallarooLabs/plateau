@@ -70,7 +70,7 @@ pub struct RecordIndex(pub usize);
 
 impl RecordIndex {
     pub fn rewind(&self, count: usize) -> Option<Self> {
-        if count >= self.0 {
+        if self.0 >= count {
             Some(RecordIndex(self.0 - count))
         } else {
             None
@@ -105,11 +105,10 @@ pub struct State {
     active: Vec<Record>,
     active_checkpoint: InternalIndex,
     active_first_record_ix: RecordIndex,
-    active_size: usize,
+    active_data: Option<SegmentData>,
     writer: mpsc::Sender<AppendRequest>,
     handle: Option<JoinHandle<()>>,
-    pending: Option<Vec<Record>>,
-    time_range: Option<RangeInclusive<DateTime<Utc>>>,
+    pending: Option<((SegmentIndex, SegmentData), Vec<Record>)>,
 }
 
 struct AppendRequest {
@@ -139,11 +138,10 @@ impl Slog {
         let (writer, rx, handle) = spawn_slog_thread(root.clone(), name.clone());
         let state = State {
             active_checkpoint,
-            active_first_record_ix,
             active: vec![],
-            active_size: 0,
+            active_first_record_ix,
+            active_data: None,
             pending: None,
-            time_range: None,
             writer,
             handle: Some(handle),
         };
@@ -213,20 +211,26 @@ impl Slog {
         fs::remove_file(Slog::segment_path(&self.root, &self.name, segment_ix)).unwrap()
     }
 
+    pub(crate) async fn cached_segment_data(&self) -> Vec<(SegmentIndex, SegmentData)> {
+        self.state.read().await.cached_segment_data()
+    }
+
     pub(crate) async fn current_segment_ix(&self) -> SegmentIndex {
         self.state.read().await.active_checkpoint.segment
     }
 
-    pub(crate) async fn current_len(&self) -> usize {
-        self.state.read().await.active.len()
+    pub(crate) async fn next_record_ix(&self) -> RecordIndex {
+        let state = self.state.read().await;
+        let active_size = state
+            .active_data
+            .as_ref()
+            .map(|d| d.index.end.0 - d.index.start.0)
+            .unwrap_or(0);
+        state.active_first_record_ix + active_size
     }
 
-    pub(crate) async fn current_size(&self) -> usize {
-        self.state.read().await.active_size
-    }
-
-    pub(crate) async fn current_time_range(&self) -> Option<RangeInclusive<DateTime<Utc>>> {
-        self.state.read().await.time_range.clone()
+    pub(crate) async fn active_segment_data(&self) -> Option<SegmentData> {
+        self.state.read().await.active_data.clone()
     }
 
     pub(crate) async fn roll(&self) -> bool {
@@ -242,13 +246,17 @@ impl Slog {
 impl State {
     pub(crate) async fn append(&mut self, r: &Record) -> InternalIndex {
         let record = SegmentRecordIndex(self.active.len());
-        self.active_size += r.message.len();
+        let first = self.active_first_record_ix;
+        let data = self.active_data.get_or_insert_with(|| SegmentData {
+            size: 0,
+            index: first..first,
+            time: r.time..=r.time,
+        });
+        data.size += r.message.len();
+        data.index.end += 1;
+        data.time = min(*data.time.start(), r.time)..=max(*data.time.end(), r.time);
         self.active.push(r.clone());
-        self.time_range = self
-            .time_range
-            .clone()
-            .map(|range| (min(*range.start(), r.time)..=max(*range.end(), r.time)))
-            .or(Some(r.time..=r.time));
+
         InternalIndex {
             segment: self.active_checkpoint.segment,
             record,
@@ -260,9 +268,7 @@ impl State {
             Some(&self.active)
         } else {
             match &self.pending {
-                Some(pending) if ix.next() == self.active_checkpoint.segment => {
-                    self.pending.as_ref()
-                }
+                Some(pending) if ix.next() == self.active_checkpoint.segment => Some(&pending.1),
                 _ => None,
             }
         }
@@ -272,6 +278,19 @@ impl State {
         self.get_segment(ix.segment)
             .await
             .and_then(|rs| rs.get(ix.record.0).cloned())
+    }
+
+    pub(crate) fn cached_segment_data(&self) -> Vec<(SegmentIndex, SegmentData)> {
+        self.pending
+            .iter()
+            .map(|p| p.0.clone())
+            .chain(
+                self.active_data
+                    .iter()
+                    .cloned()
+                    .map(|data| (self.active_checkpoint.segment, data)),
+            )
+            .collect()
     }
 
     /// Checkpoints make an `AppendRequest` to the writer thread for for all
@@ -286,7 +305,7 @@ impl State {
         if append_indices.end - append_indices.start == 0 {
             return true;
         }
-        if let Some(time_range) = &self.time_range {
+        if let Some(data) = &self.active_data {
             // TODO make timeout configurable
             if timeout(
                 Duration::from_millis(100),
@@ -294,7 +313,7 @@ impl State {
                     seal,
                     segment: self.active_checkpoint.segment,
                     index,
-                    time: time_range.clone(),
+                    time: data.time.clone(),
                     append_records: self.active[append_indices.clone()]
                         .into_iter()
                         .cloned()
@@ -315,16 +334,21 @@ impl State {
     }
 
     pub(crate) async fn roll(&mut self) -> bool {
-        if self.checkpoint(true).await {
-            self.active_checkpoint.segment = self.active_checkpoint.segment.next();
-            self.active_checkpoint.record = SegmentRecordIndex(0);
-            self.active_first_record_ix += self.active.len();
-            self.active_size = 0;
-            self.pending = Some(std::mem::replace(&mut self.active, vec![]));
-            self.time_range = None;
-            true
+        if let Some(pending_data) = self.active_data.clone() {
+            if self.checkpoint(true).await {
+                let segment = self.active_checkpoint.segment;
+                self.active_checkpoint.segment = segment.next();
+                self.active_checkpoint.record = SegmentRecordIndex(0);
+                self.active_first_record_ix += self.active.len();
+                self.active_data = None;
+                let pending_records = std::mem::replace(&mut self.active, vec![]);
+                self.pending = Some(((segment, pending_data), pending_records));
+                true
+            } else {
+                panic!("log overrun")
+            }
         } else {
-            panic!("log overrun")
+            true
         }
     }
 }

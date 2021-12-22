@@ -1,9 +1,11 @@
 //! The catalog indexes all currently attached topics.
 //! It is used to route reads and writes to the correct topic / partition.
 use ::log::info;
+use metrics::gauge;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::manifest::Manifest;
@@ -26,8 +28,19 @@ impl Catalog {
     }
 
     pub async fn checkpoint(&self) {
+        info!("begin full catalog checkpoint");
+        let start = SystemTime::now();
         for (_, topic) in self.topics.read().await.iter() {
             topic.checkpoint().await
+        }
+        if let Ok(duration) = SystemTime::now().duration_since(start) {
+            info!("finished full catalog checkpoint in {:?}", duration);
+            gauge!(
+                "catalog_checkpoint_ms",
+                (duration.as_micros() as f64) / 1000.0
+            );
+        } else {
+            info!("finished full catalog checkpoint");
         }
     }
 

@@ -60,7 +60,7 @@ struct Inserted {
 
 #[derive(Schema, Serialize)]
 struct Partitions {
-    partitions: HashMap<Arc<String>, Span>,
+    partitions: HashMap<String, Span>,
 }
 
 #[derive(Schema, Serialize)]
@@ -107,14 +107,7 @@ async fn main() {
     let stream = IntervalStream::new(checkpoints)
         .take_until(exit.next())
         .for_each(|_| async {
-            info!("begin full catalog checkpoint");
-            let start = SystemTime::now();
             catalog_checkpoint.clone().checkpoint().await;
-            if let Ok(duration) = SystemTime::now().duration_since(start) {
-                info!("finished full catalog checkpoint in {:?}", duration);
-            } else {
-                info!("finished full catalog checkpoint");
-            }
         });
 
     let (spec, filter) = openapi::spec().build(move || {
@@ -185,7 +178,7 @@ async fn topic_get_partitions(
     Ok(Json::from(Partitions {
         partitions: indices
             .into_iter()
-            .map(|(partition, range)| (Arc::new(partition), Span::from_range(range)))
+            .map(|(partition, range)| (partition, Span::from_range(range)))
             .collect(),
     }))
 }

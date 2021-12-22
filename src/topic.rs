@@ -53,7 +53,7 @@ impl Topic {
     }
 
     pub async fn readable_ids(&self) -> HashMap<String, Range<RecordIndex>> {
-        self.map_partitions(|partition| async move { Some(partition.readable_ids().await) })
+        self.map_partitions(|partition| async move { partition.readable_ids().await })
             .await
     }
 
