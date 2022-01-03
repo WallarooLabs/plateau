@@ -44,6 +44,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "anyhow"
+version = "1.0.51"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b26702f315f53b6071259e15dd9d64528213b44d61de1ec926eca7715d62203"
+
+[[package]]
 name = "arrow"
 version = "6.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1497,6 +1503,7 @@ checksum = "12295df4f294471248581bc09bef3c38a5e46f1e36d6a37353621a0c6c357e1f"
 name = "plateau"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "futures",
  "itermore",
@@ -1511,6 +1518,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tempfile",
+ "thiserror",
  "tokio",
  "tokio-stream",
 ]

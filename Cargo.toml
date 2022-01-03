@@ -6,10 +6,12 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
+anyhow = "1"
 futures = "*"
 log = "0.4"
 metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
+thiserror = "1"
 
 openssl = { version = "*", features = ["vendored"] }
 parquet = "6.4"

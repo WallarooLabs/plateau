@@ -6,6 +6,7 @@ use crate::partition::{Partition, PartitionId};
 pub use crate::partition::{Retention, Rolling};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream;
@@ -115,11 +116,12 @@ impl Topic {
         .await;
     }
 
-    pub async fn append(&self, partition_name: &str, rs: &[Record]) -> Range<RecordIndex> {
+    pub async fn append(&self, partition_name: &str, rs: &[Record]) -> Result<Range<RecordIndex>> {
         let partition = self.get_partition(partition_name).await;
         partition.append(rs).await
     }
 
+    #[cfg(test)]
     pub async fn get_record_by_index(
         &self,
         partition_name: &str,
@@ -150,28 +152,28 @@ impl Topic {
         partition.get_records_by_time(start, times, limit).await
     }
 
-    pub async fn commit(&self) {
+    #[cfg(test)]
+    pub async fn commit(&self) -> Result<()> {
         for (_, part) in self.partitions.read().await.iter() {
-            part.commit().await;
+            part.commit().await?
         }
+        Ok(())
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
-    use std::collections::HashSet;
     use std::convert::TryFrom;
     use std::iter::FromIterator;
-    use std::ops::Deref;
-    use std::thread;
-    use std::time::{Duration, Instant, SystemTime};
+    use std::time::Instant;
     use tempfile::tempdir;
     use tokio::sync::mpsc::channel;
 
     #[tokio::test]
-    async fn test_independence() {
+    async fn test_independence() -> Result<()> {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
@@ -193,10 +195,10 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.append(&name, &vec![record.clone()]).await;
+            topic.append(&name, &vec![record.clone()]).await?;
         }
 
-        topic.commit().await;
+        topic.commit().await?;
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
@@ -221,10 +223,12 @@ mod test {
                 ("partition-2".to_string(), RecordIndex(0)..RecordIndex(2)),
             ])
         );
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_active_segments() {
+    async fn test_active_segments() -> Result<()> {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
@@ -246,7 +250,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.append(&name, &vec![record.clone()]).await;
+            topic.append(&name, &vec![record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -272,6 +276,8 @@ mod test {
                 ("partition-2".to_string(), RecordIndex(0)..RecordIndex(2)),
             ])
         );
+
+        Ok(())
     }
 
     #[ignore]
@@ -333,14 +339,14 @@ mod test {
                         })
                         .collect();
 
-                    t.append(&p, &rs).await;
+                    t.append(&p, &rs).await.unwrap();
                     if let Some(prev_ix) = prev {
                         tx.send(ix - prev_ix).await.unwrap();
                     }
                     prev = Some(ix);
                     ix += rs.len();
                 }
-                t.commit().await;
+                t.commit().await.unwrap();
                 tx.send(total - prev.unwrap_or(0)).await.unwrap();
             });
             handles.push(handle);

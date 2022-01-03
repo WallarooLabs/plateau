@@ -8,7 +8,6 @@ mod topic;
 
 use ::log::info;
 use chrono::{DateTime, Utc};
-use futures::future::BoxFuture;
 use futures::stream::StreamExt;
 use futures::{future, stream};
 use parquet::data_type::ByteArray;
@@ -16,16 +15,17 @@ use rweb::*;
 use serde::{Deserialize, Serialize};
 use slog::RecordIndex;
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
-use std::time::SystemTime;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time;
 use tokio_stream::wrappers::{IntervalStream, SignalStream};
+use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
+use crate::slog::SlogError;
 use crate::topic::Record;
 
 #[derive(Deserialize)]
@@ -79,9 +79,19 @@ struct RecordQuery {
     end_time: Option<String>,
 }
 
+#[derive(Schema, Serialize)]
+struct ErrorMessage {
+    message: String,
+    code: u16,
+}
+
 #[derive(Debug)]
-struct InvalidQuery;
-impl warp::reject::Reject for InvalidQuery {}
+enum ErrorReply {
+    WriterBusy,
+    InvalidQuery,
+    Unknown,
+}
+impl warp::reject::Reject for ErrorReply {}
 
 fn signal_stream(k: SignalKind) -> impl Stream<Item = ()> {
     SignalStream::new(signal(k).unwrap())
@@ -118,7 +128,10 @@ async fn main() {
 
     future::select(
         Box::pin(stream),
-        Box::pin(serve(filter.or(openapi_docs(spec)).with(log)).run(([0, 0, 0, 0], 3030))),
+        Box::pin(
+            serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error))
+                .run(([0, 0, 0, 0], 3030)),
+        ),
     )
     .await;
 }
@@ -138,7 +151,7 @@ async fn topic_append(
         if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
             time.with_timezone(&Utc)
         } else {
-            return Err(warp::reject::custom(InvalidQuery {}));
+            return Err(warp::reject::custom(ErrorReply::InvalidQuery));
         }
     } else {
         Utc::now()
@@ -162,7 +175,12 @@ async fn topic_append(
     let r = topic.append(&partition_name, &rs).await;
 
     Ok(Json::from(Inserted {
-        span: Span::from_range(r),
+        span: Span::from_range(r.map_err(|e| {
+            warp::reject::custom(match e.downcast_ref::<SlogError>() {
+                Some(SlogError::WriterThreadBusy) => ErrorReply::WriterBusy,
+                None => ErrorReply::Unknown,
+            })
+        })?),
     }))
 }
 
@@ -205,10 +223,10 @@ async fn topic_get_records(
                     .get_records_by_time(&partition_name, start_record, times, limit)
                     .await
             } else {
-                return Err(warp::reject::custom(InvalidQuery {}));
+                return Err(warp::reject::custom(ErrorReply::InvalidQuery));
             }
         } else {
-            return Err(warp::reject::custom(InvalidQuery {}));
+            return Err(warp::reject::custom(ErrorReply::InvalidQuery));
         }
     } else {
         topic
@@ -223,4 +241,19 @@ async fn topic_get_records(
             .map(|r| String::from_utf8(r.message.data().to_vec()).unwrap())
             .collect(),
     }))
+}
+
+async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
+    let (code, message) = match err.find::<ErrorReply>() {
+        Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query"),
+        Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy"),
+        Some(ErrorReply::Unknown) | None => (StatusCode::INTERNAL_SERVER_ERROR, "unknown error"),
+    };
+
+    let json = warp::reply::json(&ErrorMessage {
+        code: code.as_u16(),
+        message: message.into(),
+    });
+
+    Ok(warp::reply::with_status(json, code))
 }

@@ -68,17 +68,18 @@ impl Catalog {
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use crate::partition::RecordIndex;
     use crate::segment::Record;
+    use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
-    use std::thread;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_independence() {
+    async fn test_independence() -> Result<()> {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
         let catalog = Catalog::attach(root).await;
@@ -97,7 +98,7 @@ mod test {
                 .get_topic(&name)
                 .await
                 .append("default", &vec![record.clone()])
-                .await;
+                .await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -110,5 +111,7 @@ mod test {
                 Some(record.clone())
             );
         }
+
+        Ok(())
     }
 }

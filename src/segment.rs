@@ -1,8 +1,9 @@
 //! A segment contains a bundle of time and logically indexed records.
 //!
 //! Currently, the only supported segment format is local Parquet files.
+use anyhow::{bail, Result};
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::{fs, path::PathBuf, sync::Arc};
 
 use parquet::{
@@ -36,7 +37,7 @@ impl Segment {
         &self.path
     }
 
-    pub(crate) fn create(&self) -> SegmentWriter {
+    pub(crate) fn create(&self) -> Result<SegmentWriter> {
         // TODO: better schema for timestamps.
         // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
         let message_type = "
@@ -45,29 +46,27 @@ impl Segment {
             REQUIRED BYTE_ARRAY message (UTF8);
         }
         ";
-        // TODO: fix all these unwraps()
-        let schema = Arc::new(parse_message_type(message_type).unwrap());
+        let schema = Arc::new(parse_message_type(message_type)?);
         let props = Arc::new(WriterProperties::builder().build());
 
         let file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&self.path)
-            .unwrap();
-        let writer = SerializedFileWriter::new(file.try_clone().unwrap(), schema, props).unwrap();
+            .open(&self.path)?;
+        let writer = SerializedFileWriter::new(file.try_clone()?, schema, props)?;
 
-        SegmentWriter {
+        Ok(SegmentWriter {
             path: self.path.clone(),
             file,
             writer,
-        }
+        })
     }
 
-    pub(crate) fn read(&self) -> SegmentReader {
-        let file = fs::File::open(&self.path).unwrap();
-        let reader = SerializedFileReader::new(file).unwrap();
-        SegmentReader { reader }
+    pub(crate) fn read(&self) -> Result<SegmentReader> {
+        let file = fs::File::open(&self.path)?;
+        let reader = SerializedFileReader::new(file)?;
+        Ok(SegmentReader { reader })
     }
 }
 
@@ -78,8 +77,8 @@ pub(crate) struct SegmentWriter {
 }
 
 impl SegmentWriter {
-    pub(crate) fn log(&mut self, mut record: Vec<Record>) {
-        let mut row_group_writer = self.writer.next_row_group().unwrap();
+    pub(crate) fn log(&mut self, mut record: Vec<Record>) -> Result<()> {
+        let mut row_group_writer = self.writer.next_row_group()?;
 
         let mut times = vec![];
         let mut messages = vec![];
@@ -89,37 +88,39 @@ impl SegmentWriter {
             messages.push(r.message);
         }
 
-        if let Some(mut col_writer) = row_group_writer.next_column().unwrap() {
+        if let Some(mut col_writer) = row_group_writer.next_column()? {
             match col_writer {
                 ColumnWriter::Int64ColumnWriter(ref mut typed_writer) => {
-                    typed_writer.write_batch(&times, None, None).unwrap();
+                    typed_writer.write_batch(&times, None, None)?;
                 }
-                _ => panic!("invalid column type"),
+                _ => bail!("invalid column type"),
             };
-            row_group_writer.close_column(col_writer).unwrap();
+            row_group_writer.close_column(col_writer)?;
         }
 
-        if let Some(mut col_writer) = row_group_writer.next_column().unwrap() {
+        if let Some(mut col_writer) = row_group_writer.next_column()? {
             match col_writer {
                 ColumnWriter::ByteArrayColumnWriter(ref mut typed_writer) => {
-                    typed_writer.write_batch(&messages, None, None).unwrap();
+                    typed_writer.write_batch(&messages, None, None)?;
                 }
-                _ => panic!("invalid column type"),
+                _ => bail!("invalid column type"),
             };
-            row_group_writer.close_column(col_writer).unwrap();
+            row_group_writer.close_column(col_writer)?;
         }
-        self.writer.close_row_group(row_group_writer).unwrap();
+
+        self.writer.close_row_group(row_group_writer)?;
+        Ok(())
     }
 
     /// Return an estimate of the on-disk size of this file. Note that this
     /// will _not_ include the final metadata footer.
-    pub(crate) fn size_estimate(&self) -> usize {
-        fs::metadata(&self.path).unwrap().len() as usize
+    pub(crate) fn size_estimate(&self) -> Result<usize> {
+        Ok(usize::try_from(fs::metadata(&self.path)?.len())?)
     }
 
-    pub(crate) fn close(mut self) -> usize {
-        self.writer.close().unwrap();
-        self.file.sync_data().unwrap();
+    pub(crate) fn close(mut self) -> Result<usize> {
+        self.writer.close()?;
+        self.file.sync_data()?;
         self.size_estimate()
     }
 }
@@ -129,7 +130,7 @@ pub(crate) struct SegmentReader {
 }
 
 impl SegmentReader {
-    pub(crate) fn read_all(&self) -> Vec<Record> {
+    pub(crate) fn read_all(&self) -> Result<Vec<Record>> {
         let metadata = self.reader.metadata();
 
         let mut results = vec![];
@@ -137,9 +138,9 @@ impl SegmentReader {
         let mut rep_levels = vec![0; 8];
 
         for i in 0..metadata.num_row_groups() {
-            let row_group_reader = self.reader.get_row_group(i).unwrap();
+            let row_group_reader = self.reader.get_row_group(i)?;
             let row_group_metadata = metadata.row_group(i);
-            let rows = usize::try_from(row_group_metadata.num_rows()).unwrap();
+            let rows = usize::try_from(row_group_metadata.num_rows())?;
             let mut tvs = vec![0; rows];
 
             // NOTE - this buffer is dynamically resized by the reader when the
@@ -151,37 +152,38 @@ impl SegmentReader {
                 .take(rows)
                 .collect();
 
-            let mut column_reader = row_group_reader.get_column_reader(0).unwrap();
+            let mut column_reader = row_group_reader.get_column_reader(0)?;
             match column_reader {
                 ColumnReader::Int64ColumnReader(ref mut typed_reader) => {
                     let mut read = 0;
                     while read < rows {
-                        let batch = typed_reader
-                            .read_batch(rows, None, None, &mut tvs.as_mut_slice()[read..])
-                            .expect("batch read");
+                        let batch = typed_reader.read_batch(
+                            rows,
+                            None,
+                            None,
+                            &mut tvs.as_mut_slice()[read..],
+                        )?;
                         read += batch.0;
                     }
                 }
-                _ => panic!("invalid column type"),
+                _ => bail!("invalid column type"),
             };
 
-            let mut column_reader = row_group_reader.get_column_reader(1).unwrap();
+            let mut column_reader = row_group_reader.get_column_reader(1)?;
             match column_reader {
                 ColumnReader::ByteArrayColumnReader(ref mut typed_reader) => {
                     let mut read = 0;
                     while read < rows {
-                        let batch = typed_reader
-                            .read_batch(
-                                rows,
-                                Some(&mut def_levels),
-                                Some(&mut rep_levels),
-                                &mut arrs.as_mut_slice()[read..],
-                            )
-                            .expect("batch read");
+                        let batch = typed_reader.read_batch(
+                            rows,
+                            Some(&mut def_levels),
+                            Some(&mut rep_levels),
+                            &mut arrs.as_mut_slice()[read..],
+                        )?;
                         read += batch.0;
                     }
                 }
-                _ => panic!("invalid column type"),
+                _ => bail!("invalid column type"),
             };
 
             results.extend(tvs.into_iter().zip(arrs.into_iter()).map(|(tv, message)| {
@@ -190,10 +192,11 @@ impl SegmentReader {
             }));
         }
 
-        results
+        Ok(results)
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use tempfile::tempdir;
@@ -207,8 +210,8 @@ mod test {
     }
 
     #[test]
-    fn round_trip() {
-        let root = tempdir().unwrap();
+    fn round_trip() -> Result<()> {
+        let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(PathBuf::from(path));
         let records: Vec<_> = build_records(
@@ -217,19 +220,20 @@ mod test {
                 .map(|ix| (ix, format!("message-{}", ix))),
         );
 
-        let mut w = s.create();
-        w.log(records[0..10].to_vec());
-        w.log(records[10..].to_vec());
-        let size = w.close();
+        let mut w = s.create()?;
+        w.log(records[0..10].to_vec())?;
+        w.log(records[10..].to_vec())?;
+        let size = w.close()?;
         assert!(size > 0);
 
-        let r = s.read();
-        assert_eq!(r.read_all(), records);
+        let r = s.read()?;
+        assert_eq!(r.read_all()?, records);
+        Ok(())
     }
 
     #[test]
-    fn large_records() {
-        let root = tempdir().unwrap();
+    fn large_records() -> Result<()> {
+        let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(PathBuf::from(path));
         let large: String = (0..100 * 1024).map(|_| "x").collect();
@@ -239,13 +243,15 @@ mod test {
                 .map(|ix| (ix, format!("message-{}-{}", ix, large))),
         );
 
-        let mut w = s.create();
-        w.log(records[0..10].to_vec());
-        w.log(records[10..].to_vec());
-        let size = w.close();
+        let mut w = s.create()?;
+        w.log(records[0..10].to_vec())?;
+        w.log(records[10..].to_vec())?;
+        let size = w.close()?;
         assert!(size > 0);
 
-        let r = s.read();
-        assert_eq!(r.read_all(), records);
+        let r = s.read()?;
+        assert_eq!(r.read_all()?, records);
+
+        Ok(())
     }
 }

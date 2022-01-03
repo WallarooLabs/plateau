@@ -21,6 +21,7 @@ pub use crate::manifest::{PartitionId, SegmentData};
 pub use crate::segment::Record;
 pub use crate::slog::{InternalIndex, RecordIndex};
 use crate::slog::{SegmentIndex, SegmentRecordIndex, Slog};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::OptionFuture;
 use futures::stream::{Stream, StreamExt};
@@ -33,7 +34,7 @@ use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, RwLock, RwLockReadGuard};
+use tokio::sync::{watch, RwLock};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rolling {
@@ -146,30 +147,24 @@ impl Partition {
         format!("{}-{}", id.topic(), id.partition())
     }
 
-    pub(crate) async fn append(&self, rs: &[Record]) -> Range<RecordIndex> {
+    pub(crate) async fn append(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
         let mut state = self.state.write().await;
         let start = state.messages.next_record_ix().await;
         for r in rs {
+            state.roll_when_needed(&self).await?;
             state.messages.append(r).await;
-            state.roll_when_needed(&self).await;
         }
 
-        start..(start + rs.len())
+        Ok(start..(start + rs.len()))
     }
 
-    pub(crate) async fn commit(&self) {
-        self.state.write().await.commit(&self).await;
+    #[cfg(test)]
+    pub(crate) async fn commit(&self) -> Result<()> {
+        self.state.write().await.commit(&self).await
     }
 
     pub(crate) async fn checkpoint(&self) {
         self.state.write().await.messages.checkpoint().await;
-    }
-
-    async fn min_segment<'a>(&self) -> SegmentIndex {
-        self.manifest
-            .get_min_segment(&self.id)
-            .await
-            .unwrap_or(SegmentIndex(0))
     }
 
     async fn stream_with_active<'a>(
@@ -223,6 +218,7 @@ impl Partition {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
         let (range, records) = self.get_records(index, 1).await;
 
@@ -290,6 +286,7 @@ impl Partition {
         false
     }
 
+    #[cfg(test)]
     pub(crate) async fn compact(&self) {
         let mut state = self.state.write().await;
         state.retain(&self).await;
@@ -297,10 +294,10 @@ impl Partition {
 }
 
 impl State {
-    async fn roll(&mut self, partition: &Partition) {
+    async fn roll(&mut self, partition: &Partition) -> Result<()> {
         if let Some(_) = self.messages.active_segment_data().await {
             let pending = self.messages.pending_segment_data().await;
-            self.messages.roll().await;
+            self.messages.roll().await?;
             // without this wait, a rare race condition can occur:
             //
             // - partition.append(&rs).await;
@@ -324,9 +321,11 @@ impl State {
             self.last_roll = Instant::now();
             self.retain(partition).await;
         }
+
+        Ok(())
     }
 
-    async fn roll_when_needed(&mut self, partition: &Partition) {
+    async fn roll_when_needed(&mut self, partition: &Partition) -> Result<()> {
         if let Some(data) = self.messages.active_segment_data().await {
             let roll = &partition.config.roll;
             if let Some(d) = roll.max_segment_duration {
@@ -352,6 +351,8 @@ impl State {
                 return self.roll(partition).await;
             }
         }
+
+        Ok(())
     }
 
     async fn get_records_from_segments<'a>(
@@ -376,7 +377,7 @@ impl State {
                 self.messages
                     .get_records_for_segment(data.index)
                     .into_stream()
-                    .flat_map(|rs| stream::iter(rs.into_iter()))
+                    .flat_map(|rs| stream::iter(rs.expect("records from segment").into_iter()))
                     .enumerate()
                     .map(move |(ix, r)| (RecordIndex(data.records.start.0 + ix), r))
             })
@@ -407,28 +408,22 @@ impl State {
 
     async fn retain(&mut self, partition: &Partition) {
         while partition.over_retention_limit().await {
-            OptionFuture::from(
+            if let Some(ix) = partition.manifest.get_min_segment(&partition.id).await {
+                // TODO ensure we handle failure if this call
                 partition
                     .manifest
-                    .get_min_segment(&partition.id)
-                    .await
-                    .map(|ix| {
-                        // TODO ensure we handle failure if this call
-                        self.messages.destroy(ix);
-                        info!("retain {}: destroyed {:?}", partition.id, ix);
-                        counter!(
-                            "partition_segments_destroyed",
-                            1,
-                            "topic" => String::from(partition.id.topic()),
-                            "partition" => String::from(partition.id.partition())
-                        );
-                        // succeeds but this does not complete e.g. due to node failure
-                        partition
-                            .manifest
-                            .remove_segment(partition.id.segment_id(ix))
-                    }),
-            )
-            .await;
+                    .remove_segment(partition.id.segment_id(ix))
+                    .await;
+                // succeeds but this does not complete e.g. due to node failure
+                self.messages.destroy(ix).expect("segment destroyed");
+                info!("retain {}: destroyed {:?}", partition.id, ix);
+                counter!(
+                    "partition_segments_destroyed",
+                    1,
+                    "topic" => String::from(partition.id.topic()),
+                    "partition" => String::from(partition.id.partition())
+                )
+            }
         }
     }
 
@@ -440,26 +435,27 @@ impl State {
         }
     }
 
-    pub(crate) async fn commit(&mut self, partition: &Partition) {
-        if let Some(target) = self.messages.next_record_ix().await.rewind(1) {
-            self.roll(partition).await;
-            self.wait_for_record(target).await;
-        }
+    #[cfg(test)]
+    pub(crate) async fn commit(&mut self, partition: &Partition) -> Result<()> {
+        let target = self.messages.next_record_ix().await;
+        self.roll(partition).await?;
+        self.wait_for_record(target).await;
+        Ok(())
     }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
     use std::convert::TryInto;
-    use std::thread;
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn test_append_get() {
+    async fn test_append_get() -> Result<()> {
         let id = PartitionId::new("topic", "testing");
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
         let t = Partition::attach(root, manifest, id, Config::default()).await;
@@ -473,7 +469,7 @@ mod test {
             .collect();
 
         for record in records.iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -488,9 +484,11 @@ mod test {
             t.get_record_by_index(RecordIndex(records.len())).await,
             None
         );
+
+        Ok(())
     }
 
-    async fn test_rolling_get(commit: bool) {
+    async fn test_rolling_get(commit: bool) -> Result<()> {
         let id = PartitionId::new("topic", "testing-roll");
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -518,11 +516,11 @@ mod test {
             .collect();
 
         for record in records.iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
 
         if commit {
-            t.commit().await;
+            t.commit().await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -547,20 +545,21 @@ mod test {
                 )
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_rolling_get_committed() {
-        test_rolling_get(true).await;
+    async fn test_rolling_get_committed() -> Result<()> {
+        test_rolling_get(true).await
     }
 
     #[tokio::test]
-    async fn test_rolling_get_cached() {
-        test_rolling_get(false).await;
+    async fn test_rolling_get_cached() -> Result<()> {
+        test_rolling_get(false).await
     }
 
     #[tokio::test]
-    async fn test_durability() {
+    async fn test_durability() -> Result<()> {
         let id = PartitionId::new("topic", "testing-roll");
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -588,9 +587,9 @@ mod test {
             .await;
 
             for record in records.iter() {
-                t.append(&vec![record.clone()]).await;
+                t.append(&vec![record.clone()]).await?;
             }
-            t.commit().await;
+            t.commit().await?;
         }
 
         {
@@ -622,10 +621,12 @@ mod test {
                 None
             );
         }
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_get_after_compaction() {
+    async fn test_get_after_compaction() -> Result<()> {
         let id = PartitionId::new("topic", "testing-roll");
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -658,16 +659,16 @@ mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
-        t.commit().await;
+        t.commit().await?;
 
         // this compaction will destroy the first segment
         t.compact().await;
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
 
         assert_eq!(
@@ -699,10 +700,12 @@ mod test {
             )
         );
         assert_eq!(t.get_records(RecordIndex(8), 2).await, (None, vec![]));
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_unordered_time() {
+    async fn test_unordered_time() -> Result<()> {
         let id = PartitionId::new("topic", "testing-time");
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -733,13 +736,13 @@ mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
-        t.commit().await;
+        t.commit().await?;
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.append(&vec![record.clone()]).await;
+            t.append(&vec![record.clone()]).await?;
         }
 
         let min_time = times.iter().cloned().min().unwrap();
@@ -770,5 +773,7 @@ mod test {
                 }
             }
         }
+
+        Ok(())
     }
 }

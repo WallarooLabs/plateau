@@ -16,12 +16,10 @@ use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{ColumnIndex, Executor, Row};
-use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::time::SystemTime;
 
 use crate::slog::{RecordIndex, SegmentIndex};
 
@@ -85,10 +83,6 @@ impl<P: Deref<Target = PartitionId>> SegmentId<P> {
     pub fn partition(&self) -> &str {
         &self.partition_id.partition
     }
-
-    pub fn segment(&self) -> SegmentIndex {
-        self.segment
-    }
 }
 
 #[derive(Clone)]
@@ -106,7 +100,7 @@ pub struct SegmentData {
 }
 
 fn row_to_segment_data(row: SqliteRow) -> SegmentData {
-    let index = row_get_segment(&row, "segment_index");
+    let index = SegmentIndex::from_row(&row, "segment_index");
     let t_start: DateTime<Utc> = row.get("time_start");
     let t_end: DateTime<Utc> = row.get("time_end");
     SegmentData {
@@ -116,13 +110,6 @@ fn row_to_segment_data(row: SqliteRow) -> SegmentData {
             ..RecordIndex::from_row(&row, "record_end"),
         size: usize::try_from(row.get::<i64, _>("size")).unwrap(),
     }
-}
-
-fn row_get_segment<I>(row: &SqliteRow, index: I) -> SegmentIndex
-where
-    I: ColumnIndex<SqliteRow>,
-{
-    SegmentIndex(usize::try_from(row.get::<i64, _>(index)).unwrap())
 }
 
 fn row_to_option_segment(row: SqliteRow) -> Option<SegmentIndex> {
@@ -265,27 +252,6 @@ impl Manifest {
             .await
             .unwrap()
             .flatten()
-    }
-
-    /// Find the segment a record is stored within via sequential partition index.
-    pub async fn get_segment_for_ix(
-        &self,
-        id: &PartitionId,
-        ix: RecordIndex,
-    ) -> Option<SegmentIndex> {
-        self.get_segment(
-            sqlx::query(
-                "
-                SELECT segment_index FROM segments
-                WHERE topic = ?1 AND partition = ?2 AND record_start <= ?3
-                ORDER BY segment_index DESC LIMIT 1
-            ",
-            )
-            .bind(&id.topic)
-            .bind(&id.partition)
-            .bind(ix.to_row()),
-        )
-        .await
     }
 
     async fn get_ordered_segment(&self, id: &PartitionId, order: &str) -> Option<SegmentIndex> {
@@ -437,29 +403,35 @@ impl Manifest {
         .await
         .unwrap()
     }
-
-    /// Find the "open index" of a given partition.
-    /// The open index is the lowest index for a record that is not durably
-    /// stored on disk.
-    pub async fn open_index(&self, id: &PartitionId) -> RecordIndex {
-        match self.get_max_segment(id).await {
-            Some(segment_ix) => self
-                .get_segment_data(id.segment_id(segment_ix))
-                .await
-                .map(|span| span.records.end),
-            None => None,
-        }
-        .unwrap_or(RecordIndex(0))
-    }
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use chrono::TimeZone;
-    use std::collections::HashSet;
-    use std::iter::FromIterator;
-    use std::time::SystemTime;
     use tempfile::tempdir;
+
+    impl Manifest {
+        async fn get_segment_for_ix(
+            &self,
+            id: &PartitionId,
+            ix: RecordIndex,
+        ) -> Option<SegmentIndex> {
+            self.get_segment(
+                sqlx::query(
+                    "
+                    SELECT segment_index FROM segments
+                    WHERE topic = ?1 AND partition = ?2 AND record_start <= ?3
+                    ORDER BY segment_index DESC LIMIT 1
+                ",
+                )
+                .bind(&id.topic)
+                .bind(&id.partition)
+                .bind(ix.to_row()),
+            )
+            .await
+        }
+    }
 
     #[tokio::test]
     async fn test_update() {
