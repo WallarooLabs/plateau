@@ -99,23 +99,30 @@ pub struct Manifest {
 
 #[derive(Clone, Debug)]
 pub struct SegmentData {
+    pub index: SegmentIndex,
     pub time: RangeInclusive<DateTime<Utc>>,
-    pub index: Range<RecordIndex>,
+    pub records: Range<RecordIndex>,
     pub size: usize,
 }
 
 fn row_to_segment_data(row: SqliteRow) -> SegmentData {
+    let index = row_get_segment(&row, "segment_index");
     let t_start: DateTime<Utc> = row.get("time_start");
     let t_end: DateTime<Utc> = row.get("time_end");
     SegmentData {
+        index,
         time: t_start..=t_end,
-        index: RecordIndex::from_row(&row, "index_start")..RecordIndex::from_row(&row, "index_end"),
+        records: RecordIndex::from_row(&row, "record_start")
+            ..RecordIndex::from_row(&row, "record_end"),
         size: usize::try_from(row.get::<i64, _>("size")).unwrap(),
     }
 }
 
-fn row_get_segment(row: &SqliteRow, index: usize) -> SegmentIndex {
-    SegmentIndex(usize::try_from(row.get::<i64, _>(0)).unwrap())
+fn row_get_segment<I>(row: &SqliteRow, index: I) -> SegmentIndex
+where
+    I: ColumnIndex<SqliteRow>,
+{
+    SegmentIndex(usize::try_from(row.get::<i64, _>(index)).unwrap())
 }
 
 fn row_to_option_segment(row: SqliteRow) -> Option<SegmentIndex> {
@@ -171,23 +178,21 @@ impl Manifest {
                         id              INTEGER PRIMARY KEY,
                         topic           STRING NOT NULL,
                         partition       STRING NOT NULL,
-                        segment_id      INTEGER NOT NULL,
+                        segment_index   INTEGER NOT NULL,
                         time_start      DATETIME NOT NULL,
                         time_end        DATETIME NOT NULL,
-                        index_start     INTEGER NOT NULL,
-                        index_end       INTEGER NOT NULL,
+                        record_start    INTEGER NOT NULL,
+                        record_end      INTEGER NOT NULL,
                         size            INTEGER NOT NULL
                         )
                         ",
             )
             .await
             .unwrap();
-            pool.execute(
-                "CREATE UNIQUE INDEX segments_segment_id ON segments(topic, partition, segment_id)",
-            )
-            .await
-            .unwrap();
-            pool.execute("CREATE INDEX segments_start ON segments(topic, partition, index_start)")
+            pool.execute("CREATE UNIQUE INDEX segments_segment_index ON segments(topic, partition, segment_index)")
+                .await
+                .unwrap();
+            pool.execute("CREATE INDEX segments_start ON segments(topic, partition, record_start)")
                 .await
                 .unwrap();
 
@@ -200,33 +205,33 @@ impl Manifest {
     }
 
     /// Upserts data for a segment with the given identifier.
-    pub(crate) async fn update(&self, id: SegmentId<&PartitionId>, data: &SegmentData) -> () {
+    pub(crate) async fn update(&self, id: &PartitionId, data: &SegmentData) -> () {
         sqlx::query(
             "
             INSERT INTO segments(
                 topic,
                 partition,
-                segment_id,
+                segment_index,
                 time_start,
                 time_end,
-                index_start,
-                index_end,
+                record_start,
+                record_end,
                 size
             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-            ON CONFLICT(topic, partition, segment_id) DO UPDATE SET
+            ON CONFLICT(topic, partition, segment_index) DO UPDATE SET
                 time_start=excluded.time_start,
                 time_end=excluded.time_end,
-                index_start=excluded.index_start,
-                index_end=excluded.index_end;
+                record_start=excluded.record_start,
+                record_end=excluded.record_end;
         ",
         )
         .bind(id.topic())
         .bind(id.partition())
-        .bind(id.segment.to_row())
+        .bind(data.index.to_row())
         .bind(data.time.start())
         .bind(data.time.end())
-        .bind(data.index.start.to_row())
-        .bind(data.index.end.to_row())
+        .bind(data.records.start.to_row())
+        .bind(data.records.end.to_row())
         .bind(i64::try_from(data.size).unwrap())
         .execute(&self.pool)
         .await
@@ -237,8 +242,8 @@ impl Manifest {
     pub async fn get_segment_data(&self, id: SegmentId<&PartitionId>) -> Option<SegmentData> {
         sqlx::query(
             "
-            SELECT time_start, time_end, index_start, index_end, size FROM segments
-            WHERE topic = ?1 AND partition = ?2 AND segment_id = ?3
+            SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+            WHERE topic = ?1 AND partition = ?2 AND segment_index = ?3
         ",
         )
         .bind(id.topic())
@@ -271,8 +276,9 @@ impl Manifest {
         self.get_segment(
             sqlx::query(
                 "
-                SELECT segment_id FROM segments
-                WHERE topic = ?1 AND partition = ?2 AND index_start <= ?3 ORDER BY segment_id DESC LIMIT 1
+                SELECT segment_index FROM segments
+                WHERE topic = ?1 AND partition = ?2 AND record_start <= ?3
+                ORDER BY segment_index DESC LIMIT 1
             ",
             )
             .bind(&id.topic)
@@ -286,9 +292,9 @@ impl Manifest {
         self.get_segment(
             sqlx::query(&format!(
                 "
-                SELECT segment_id FROM segments
+                SELECT segment_index FROM segments
                 WHERE topic = ?1 AND partition = ?2
-                ORDER BY segment_id {} LIMIT 1
+                ORDER BY segment_index {} LIMIT 1
             ",
                 order
             ))
@@ -312,23 +318,18 @@ impl Manifest {
         &'a self,
         id: &'a PartitionId,
         start: RecordIndex,
-    ) -> impl futures::Stream<Item = (SegmentIndex, SegmentData)> + 'a {
+    ) -> impl futures::Stream<Item = SegmentData> + 'a {
         sqlx::query(
             "
-                SELECT segment_id, time_start, time_end, index_start, index_end, size FROM segments
-                WHERE topic = ?1 AND partition = ?2 AND index_end > ?3
-                ORDER BY segment_id ASC
+                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+                WHERE topic = ?1 AND partition = ?2 AND record_end > ?3
+                ORDER BY segment_index ASC
             ",
         )
         .bind(&id.topic)
         .bind(&id.partition)
         .bind(start.to_row())
-        .map(|row| {
-            (
-                SegmentIndex::from_row(&row, "segment_id"),
-                row_to_segment_data(row),
-            )
-        })
+        .map(row_to_segment_data)
         .fetch_many(&self.pool)
         .flat_map(|r| stream::iter(r.unwrap().right()))
     }
@@ -338,20 +339,20 @@ impl Manifest {
         id: &'a PartitionId,
         start: RecordIndex,
         times: &'a RangeInclusive<DateTime<Utc>>,
-    ) -> impl futures::Stream<Item = (SegmentIndex, SegmentData)> + 'a {
+    ) -> impl futures::Stream<Item = SegmentData> + 'a {
         // see discussion on finding the intersection of intervals here:
         // https://scicomp.stackexchange.com/questions/26258/the-easiest-way-to-find-intersection-of-two-intervals
         // our problem is a subset of that: we only want to return segments
         // where an intersection exists; we don't care what the intersection is
         sqlx::query(
             "
-                SELECT segment_id, time_start, time_end, index_start, index_end, size FROM segments
+                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
                 WHERE (
                     topic = ?1 AND partition = ?2
                     AND ?3 <= time_end AND time_start <= ?4
-                    AND index_end > ?5
+                    AND record_end > ?5
                 )
-                ORDER BY segment_id ASC
+                ORDER BY segment_index ASC
             ",
         )
         .bind(&id.topic)
@@ -359,12 +360,7 @@ impl Manifest {
         .bind(times.start())
         .bind(times.end())
         .bind(start.to_row())
-        .map(|row| {
-            (
-                SegmentIndex::from_row(&row, "segment_id"),
-                row_to_segment_data(row),
-            )
-        })
+        .map(row_to_segment_data)
         .fetch_many(&self.pool)
         .flat_map(|r| stream::iter(r.unwrap().right()))
     }
@@ -372,7 +368,7 @@ impl Manifest {
     pub async fn get_partition_range(&self, id: &PartitionId) -> Option<Range<RecordIndex>> {
         sqlx::query(
             "
-            SELECT MIN(index_start), MAX(index_end) FROM segments
+            SELECT MIN(record_start), MAX(record_end) FROM segments
             WHERE topic = ?1 AND partition = ?2
             GROUP BY partition
         ",
@@ -399,7 +395,7 @@ impl Manifest {
         sqlx::query(
             "
             DELETE FROM segments
-            WHERE topic = ?1 AND partition = ?2 AND segment_id = ?3
+            WHERE topic = ?1 AND partition = ?2 AND segment_index = ?3
         ",
         )
         .bind(id.topic())
@@ -450,7 +446,7 @@ impl Manifest {
             Some(segment_ix) => self
                 .get_segment_data(id.segment_id(segment_ix))
                 .await
-                .map(|span| span.index.end),
+                .map(|span| span.records.end),
             None => None,
         }
         .unwrap_or(RecordIndex(0))
@@ -478,10 +474,11 @@ mod test {
             let time = time.clone();
             state
                 .update(
-                    id.segment_id(SegmentIndex(0)),
+                    &id,
                     &SegmentData {
+                        index: SegmentIndex(0),
                         time,
-                        index: RecordIndex(0)..RecordIndex(ix),
+                        records: RecordIndex(0)..RecordIndex(ix),
                         size: 10,
                     },
                 )
@@ -490,10 +487,11 @@ mod test {
 
         state
             .update(
-                id.segment_id(SegmentIndex(1)),
+                &id,
                 &SegmentData {
+                    index: SegmentIndex(1),
                     time,
-                    index: RecordIndex(10)..RecordIndex(20),
+                    records: RecordIndex(10)..RecordIndex(20),
                     size: 15,
                 },
             )
@@ -535,10 +533,11 @@ mod test {
             let time = time.clone();
             state
                 .update(
-                    a.segment_id(SegmentIndex(0)),
+                    &a,
                     &SegmentData {
+                        index: SegmentIndex(0),
                         time,
-                        index: RecordIndex(0)..RecordIndex(ix),
+                        records: RecordIndex(0)..RecordIndex(ix),
                         size: 10,
                     },
                 )
@@ -547,10 +546,11 @@ mod test {
 
         state
             .update(
-                a.segment_id(SegmentIndex(1)),
+                &a,
                 &SegmentData {
+                    index: SegmentIndex(1),
                     time: time.clone(),
-                    index: RecordIndex(10)..RecordIndex(20),
+                    records: RecordIndex(10)..RecordIndex(20),
                     size: 25,
                 },
             )
@@ -558,10 +558,11 @@ mod test {
 
         state
             .update(
-                b.segment_id(SegmentIndex(0)),
+                &b,
                 &SegmentData {
+                    index: SegmentIndex(0),
                     time,
-                    index: RecordIndex(0)..RecordIndex(15),
+                    records: RecordIndex(0)..RecordIndex(15),
                     size: 12,
                 },
             )
@@ -598,10 +599,11 @@ mod test {
             let time = time.clone();
             state
                 .update(
-                    id.segment_id(SegmentIndex(0)),
+                    &id,
                     &SegmentData {
+                        index: SegmentIndex(0),
                         time,
-                        index: RecordIndex(0)..RecordIndex(ix),
+                        records: RecordIndex(0)..RecordIndex(ix),
                         size: 12,
                     },
                 )
@@ -611,10 +613,11 @@ mod test {
 
         state
             .update(
-                id.segment_id(SegmentIndex(1)),
+                &id,
                 &SegmentData {
+                    index: SegmentIndex(1),
                     time,
-                    index: RecordIndex(10)..RecordIndex(20),
+                    records: RecordIndex(10)..RecordIndex(20),
                     size: 13,
                 },
             )
@@ -672,13 +675,14 @@ mod test {
             times: RangeInclusive<i64>,
         ) {
             let time = Utc.timestamp(*times.start(), 0)..=Utc.timestamp(*times.end(), 0);
-            let index = RecordIndex(records.start)..RecordIndex(records.end);
+            let records = RecordIndex(records.start)..RecordIndex(records.end);
             state
                 .update(
-                    segment,
+                    segment.partition_id,
                     &SegmentData {
+                        index: segment.segment,
                         time,
-                        index,
+                        records,
                         size: 12,
                     },
                 )
@@ -696,7 +700,7 @@ mod test {
             assert_eq!(
                 state
                     .stream_time_segments(id, RecordIndex(start), &times)
-                    .map(|data| data.0)
+                    .map(|data| data.index)
                     .collect::<Vec<_>>()
                     .await,
                 segments

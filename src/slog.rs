@@ -25,6 +25,7 @@ use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream::StreamExt;
 use futures::{future, stream, Stream};
+use log::trace;
 use metrics::counter;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
@@ -108,13 +109,13 @@ pub struct State {
     active_data: Option<SegmentData>,
     writer: mpsc::Sender<AppendRequest>,
     handle: Option<JoinHandle<()>>,
-    pending: Option<((SegmentIndex, SegmentData), Vec<Record>)>,
+    pending: Option<(SegmentData, Vec<Record>)>,
 }
 
 struct AppendRequest {
     seal: bool,
     segment: SegmentIndex,
-    index: Range<RecordIndex>,
+    records: Range<RecordIndex>,
     time: RangeInclusive<DateTime<Utc>>,
     append_records: Vec<Record>,
 }
@@ -211,7 +212,7 @@ impl Slog {
         fs::remove_file(Slog::segment_path(&self.root, &self.name, segment_ix)).unwrap()
     }
 
-    pub(crate) async fn cached_segment_data(&self) -> Vec<(SegmentIndex, SegmentData)> {
+    pub(crate) async fn cached_segment_data(&self) -> Vec<SegmentData> {
         self.state.read().await.cached_segment_data()
     }
 
@@ -224,13 +225,22 @@ impl Slog {
         let active_size = state
             .active_data
             .as_ref()
-            .map(|d| d.index.end.0 - d.index.start.0)
+            .map(|d| d.records.end.0 - d.records.start.0)
             .unwrap_or(0);
         state.active_first_record_ix + active_size
     }
 
     pub(crate) async fn active_segment_data(&self) -> Option<SegmentData> {
         self.state.read().await.active_data.clone()
+    }
+
+    pub(crate) async fn pending_segment_data(&self) -> Option<SegmentData> {
+        self.state
+            .read()
+            .await
+            .pending
+            .clone()
+            .map(|(data, _)| data)
     }
 
     pub(crate) async fn roll(&self) -> bool {
@@ -247,18 +257,20 @@ impl State {
     pub(crate) async fn append(&mut self, r: &Record) -> InternalIndex {
         let record = SegmentRecordIndex(self.active.len());
         let first = self.active_first_record_ix;
+        let index = self.active_checkpoint.segment.clone();
         let data = self.active_data.get_or_insert_with(|| SegmentData {
+            index,
             size: 0,
-            index: first..first,
+            records: first..first,
             time: r.time..=r.time,
         });
         data.size += r.message.len();
-        data.index.end += 1;
+        data.records.end += 1;
         data.time = min(*data.time.start(), r.time)..=max(*data.time.end(), r.time);
         self.active.push(r.clone());
 
         InternalIndex {
-            segment: self.active_checkpoint.segment,
+            segment: index,
             record,
         }
     }
@@ -280,16 +292,11 @@ impl State {
             .and_then(|rs| rs.get(ix.record.0).cloned())
     }
 
-    pub(crate) fn cached_segment_data(&self) -> Vec<(SegmentIndex, SegmentData)> {
+    pub(crate) fn cached_segment_data(&self) -> Vec<SegmentData> {
         self.pending
             .iter()
             .map(|p| p.0.clone())
-            .chain(
-                self.active_data
-                    .iter()
-                    .cloned()
-                    .map(|data| (self.active_checkpoint.segment, data)),
-            )
+            .chain(self.active_data.iter().cloned())
             .collect()
     }
 
@@ -301,7 +308,7 @@ impl State {
     async fn checkpoint(&mut self, seal: bool) -> bool {
         let append_indices = self.active_checkpoint.record.0..self.active.len();
         let start = self.active_first_record_ix;
-        let index = start..(start + self.active.len());
+        let records = start..(start + self.active.len());
         if append_indices.end - append_indices.start == 0 {
             return true;
         }
@@ -312,7 +319,7 @@ impl State {
                 self.writer.send(AppendRequest {
                     seal,
                     segment: self.active_checkpoint.segment,
-                    index,
+                    records,
                     time: data.time.clone(),
                     append_records: self.active[append_indices.clone()]
                         .into_iter()
@@ -337,12 +344,13 @@ impl State {
         if let Some(pending_data) = self.active_data.clone() {
             if self.checkpoint(true).await {
                 let segment = self.active_checkpoint.segment;
+                trace!("rolling {:?}", segment);
                 self.active_checkpoint.segment = segment.next();
                 self.active_checkpoint.record = SegmentRecordIndex(0);
                 self.active_first_record_ix += self.active.len();
                 self.active_data = None;
                 let pending_records = std::mem::replace(&mut self.active, vec![]);
-                self.pending = Some(((segment, pending_data), pending_records));
+                self.pending = Some((pending_data, pending_records));
                 true
             } else {
                 panic!("log overrun")
@@ -377,7 +385,7 @@ fn spawn_slog_thread(
                 Some(AppendRequest {
                     seal,
                     segment,
-                    index,
+                    records,
                     time,
                     append_records,
                 }) => {
@@ -398,12 +406,18 @@ fn spawn_slog_thread(
                     counter!("slog_thread_records_written", u64::try_from(count).unwrap(), "name" => name.clone());
 
                     if seal {
+                        trace!("sealed {:?}", segment);
                         current.take().map(|(w, _)| w.close());
                     }
 
                     let response = WriteResult {
                         segment,
-                        data: SegmentData { index, time, size },
+                        data: SegmentData {
+                            index: segment,
+                            records,
+                            time,
+                            size,
+                        },
                     };
                     tx_done.blocking_send(response).expect("channel closed");
                 }
@@ -452,7 +466,7 @@ mod test {
             commits
                 .recv()
                 .await
-                .map(|r| (r.data.index, r.data.size > 0)),
+                .map(|r| (r.data.records, r.data.size > 0)),
             Some((RecordIndex(0)..RecordIndex(1), true))
         );
         let def = slog.append(&records[1]).await;
@@ -462,7 +476,7 @@ mod test {
             commits
                 .recv()
                 .await
-                .map(|r| (r.data.index, r.data.size > 0)),
+                .map(|r| (r.data.records, r.data.size > 0)),
             Some((RecordIndex(1)..RecordIndex(3), true))
         );
 

@@ -26,7 +26,7 @@ use futures::future::OptionFuture;
 use futures::stream::{Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
-use log::info;
+use log::{info, trace};
 use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -104,7 +104,7 @@ impl Partition {
         let record = OptionFuture::from(current.map(|ix| {
             manifest
                 .get_segment_data(id.segment_id(ix))
-                .map(|data| data.unwrap().index.end)
+                .map(|data| data.unwrap().records.end)
         }))
         .await
         .unwrap_or(RecordIndex(0));
@@ -121,11 +121,10 @@ impl Partition {
         let commit_id = id.clone();
         tokio::spawn(async move {
             while let Some(r) = writes.recv().await {
-                commit_manifest
-                    .update(commit_id.segment_id(r.segment), &r.data)
-                    .await;
+                trace!("{} checkpoint: {:?}", commit_id, &r);
+                commit_manifest.update(&commit_id, &r.data).await;
                 // ok if no receivers, that means nothing is awaiting a commit
-                commit_writer.send(r.data.index.end).ok();
+                commit_writer.send(r.data.records.end).ok();
             }
         });
 
@@ -175,16 +174,17 @@ impl Partition {
 
     async fn stream_with_active<'a>(
         &self,
-        stored: impl Stream<Item = (SegmentIndex, SegmentData)> + 'a,
-    ) -> impl Stream<Item = (SegmentIndex, SegmentData)> + 'a {
+        stored: impl Stream<Item = SegmentData> + 'a,
+    ) -> impl Stream<Item = SegmentData> + 'a {
         let state = self.state.read().await;
         let cached = state.messages.cached_segment_data().await;
-        let cached_segments: Vec<SegmentIndex> = cached.iter().map(|(ix, _)| ix.clone()).collect();
+        let cached_segments: Vec<SegmentIndex> =
+            cached.iter().map(|data| data.index.clone()).collect();
         // due to checkpoints, segment data for the active / pending segment may
         // already be stored in the manifest. we want to always only use
         // in-memory data as it is fresher.
         stored
-            .take_while(move |(index, _)| future::ready(!cached_segments.contains(&index)))
+            .take_while(move |data| future::ready(!cached_segments.contains(&data.index)))
             .chain(stream::iter(cached.into_iter()))
     }
 
@@ -241,7 +241,7 @@ impl Partition {
             .cached_segment_data()
             .await
             .iter()
-            .map(|(_, data)| data.index.clone())
+            .map(|data| data.records.clone())
             .chain(stored.into_iter())
             .reduce(|merged, range| merge_ranges(merged, range))
     }
@@ -299,7 +299,28 @@ impl Partition {
 impl State {
     async fn roll(&mut self, partition: &Partition) {
         if let Some(_) = self.messages.active_segment_data().await {
+            let pending = self.messages.pending_segment_data().await;
             self.messages.roll().await;
+            // without this wait, a rare race condition can occur:
+            //
+            // - partition.append(&rs).await;
+            //   - self.messages.roll().await;
+            // !!! partition.get_records(start, limit).await;
+            // - commit_manifest.update(&commit_id, &r.data).await
+            //
+            // the call to .get_records() occurs after .roll() has replaced the
+            // pending segment with the active one, but before the pending
+            // metadata has been written to the manifest. wait_for_record
+            // enforces the correct order:
+            //
+            // - partition.append()
+            //   - self.messages.roll().await
+            //   - commit_manifest.update(&commit_id, &r.data).await
+            //   - self.wait_for_record(pending.records.end).await;
+            // ✓ partition.get_records(start, limit)
+            if let Some(pending) = pending {
+                self.wait_for_record(pending.records.end).await;
+            }
             self.last_roll = Instant::now();
             self.retain(partition).await;
         }
@@ -320,7 +341,7 @@ impl State {
                 }
             }
 
-            let current_len = data.index.end.0 - data.index.start.0;
+            let current_len = data.records.end.0 - data.records.start.0;
             if current_len > roll.max_segment_index {
                 info!("rolling {}: length is {}", partition.id, current_len);
                 return self.roll(partition).await;
@@ -337,7 +358,7 @@ impl State {
         &'a self,
         limit: usize,
         filter: impl Fn(RecordIndex, &Record) -> bool,
-        indices: impl Stream<Item = (SegmentIndex, SegmentData)> + 'a,
+        indices: impl Stream<Item = SegmentData> + 'a,
     ) -> (Option<Range<RecordIndex>>, Vec<Record>) {
         let mut start_ix = None;
         let mut final_ix = None;
@@ -347,17 +368,17 @@ impl State {
         // `indices` of all segments that could possibly have said data. the
         // manifest tracks this information in a performant fashion.
         let records = indices
-            .flat_map(move |(index, data)| {
+            .flat_map(move |data| {
                 // once we have the segments, we need to actually read the data
                 // within. we also need to track record indices for subscriber
                 // pagination, so compute those while we have the relevant
                 // ranges easily accessible in `SegmentData`.
                 self.messages
-                    .get_records_for_segment(index)
+                    .get_records_for_segment(data.index)
                     .into_stream()
                     .flat_map(|rs| stream::iter(rs.into_iter()))
                     .enumerate()
-                    .map(move |(ix, r)| (RecordIndex(data.index.start.0 + ix), r))
+                    .map(move |(ix, r)| (RecordIndex(data.records.start.0 + ix), r))
             })
             .filter_map(|(ix, r)| {
                 // now, winnow down to the data we care about. as we go, track the first
@@ -411,14 +432,18 @@ impl State {
         }
     }
 
+    async fn wait_for_record(&mut self, target: RecordIndex) {
+        trace!("waiting for commit including {:?}", target);
+        self.commits.changed().await.expect("commit watcher ended");
+        while *self.commits.borrow() < target {
+            self.commits.changed().await.expect("commit watcher ended");
+        }
+    }
+
     pub(crate) async fn commit(&mut self, partition: &Partition) {
         if let Some(target) = self.messages.next_record_ix().await.rewind(1) {
             self.roll(partition).await;
-
-            self.commits.changed().await.expect("commit watcher ended");
-            while *self.commits.borrow() < target {
-                self.commits.changed().await.expect("commit watcher ended");
-            }
+            self.wait_for_record(target).await;
         }
     }
 }
@@ -529,7 +554,6 @@ mod test {
         test_rolling_get(true).await;
     }
 
-    #[ignore]
     #[tokio::test]
     async fn test_rolling_get_cached() {
         test_rolling_get(false).await;
