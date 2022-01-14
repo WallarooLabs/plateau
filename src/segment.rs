@@ -4,6 +4,8 @@
 use anyhow::{bail, Result};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::convert::TryFrom;
+#[cfg(test)]
+use std::hash::{Hash, Hasher};
 use std::{fs, path::PathBuf, sync::Arc};
 
 use parquet::{
@@ -22,6 +24,19 @@ use parquet::{
 pub struct Record {
     pub time: DateTime<Utc>,
     pub message: ByteArray,
+}
+
+// these are incomplete; they are currently only used in testing
+#[cfg(test)]
+impl Eq for Record {}
+
+#[cfg(test)]
+impl Hash for Record {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.time.hash(state);
+        let data_string = String::from_utf8(self.message.data().to_vec()).unwrap();
+        data_string.hash(state);
+    }
 }
 
 pub struct Segment {

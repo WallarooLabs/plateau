@@ -7,7 +7,7 @@ edition = "2018"
 
 [dependencies]
 anyhow = "1"
-futures = "*"
+futures = "^0.3.19"
 log = "0.4"
 metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
