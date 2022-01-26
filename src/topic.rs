@@ -181,7 +181,7 @@ impl Topic {
 
     pub(crate) async fn get_records_from_all<'a, F, Fut>(
         &'a self,
-        starts: TopicIterator,
+        mut iterator: TopicIterator,
         limit: usize,
         fetch: F,
     ) -> (TopicIterator, Vec<Record>)
@@ -189,44 +189,36 @@ impl Topic {
         F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, usize) -> Fut,
         Fut: futures::Future<Output = Vec<IndexedRecord>>,
     {
-        // there's a minor race condition in here that can result in too many /
-        // few records getting returned. If `partition_count` is calculated and
-        // then partitions are added / removed, the below `map_partitions` step
-        // will use an incorrect limit. we cannot add a dummy lock to force the
-        // whole function to read lock because `map_partitions` can result in a
-        // lock upgrade if the partition is not currently held in memory.
-        let partition_count = self.partition_names().await.len();
-        // rounded-up integer division
-        let partition_limit = (limit + partition_count - 1) / partition_count;
-        let starts = &starts;
-        let fetch = &fetch;
-        let all = self
-            .map_partitions(|p| async move {
-                let start = RecordIndex(starts.get(p.id().partition()).cloned().unwrap_or(0));
-                Some(fetch(p, start, partition_limit).await)
-            })
-            .await;
-
-        // if no values are present for a given partition, we have reached the
-        // end of that partition. ensure we return its final index to avoid
-        // spurious restarts
-        let current_ranges = self.readable_ids().await;
-        let next_indices: HashMap<_, _> = all
-            .iter()
-            .flat_map(|(k, rs)| {
-                rs.last()
-                    .map(|r| (r.index.0 + 1))
-                    .or_else(|| current_ranges.get(k).map(|r| r.end.0))
-                    .map(|ix| (k.clone(), ix))
-            })
-            .collect();
-
-        let records: Vec<_> = all
+        let mut read_starts: Vec<_> = self
+            .readable_ids()
+            .await
             .into_iter()
-            .flat_map(|(_, rs)| rs.into_iter().map(|r| r.data))
+            .map(|(k, v)| {
+                (
+                    RecordIndex(*iterator.entry(k.clone()).or_insert(v.start.0)),
+                    k,
+                )
+            })
             .collect();
 
-        (next_indices, records)
+        read_starts.sort();
+        let mut records = vec![];
+        for (start, name) in read_starts.into_iter() {
+            let partition = self.get_partition(&name).await;
+            let remaining = limit - records.len();
+            let batch = fetch(partition, start, remaining).await;
+
+            if let Some(final_record) = batch.last() {
+                iterator.insert(name, final_record.index.0 + 1);
+            }
+            records.extend(batch.into_iter().map(|ir| ir.data));
+
+            if records.len() >= limit {
+                break;
+            }
+        }
+
+        (iterator, records)
     }
 
     #[cfg(test)]
@@ -342,11 +334,13 @@ mod test {
             (15, "p"),
         ]);
 
+        let mut part_records = vec![vec![], vec![], vec![]];
         let names: Vec<_> = (0..=3)
             .into_iter()
             .map(|ix| format!("partition-{}", ix % 3))
             .collect();
         for (ix, record) in records.iter().enumerate() {
+            part_records[ix % 3].push(record.clone());
             topic.append(&names[ix % 3], &vec![record.clone()]).await?;
         }
 
@@ -354,30 +348,86 @@ mod test {
 
         let span = Utc.timestamp(5, 0)..=Utc.timestamp(18, 0);
 
-        let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 1]).collect();
+        let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 0]).collect();
+        // fetching two records will spill from partition-0, which has only one
+        // record in the given time range, to partition-1
         let (it, rs) = topic
-            .get_records_by_time(HashMap::new(), span.clone(), 1)
+            .get_records_by_time(HashMap::new(), span.clone(), 2)
             .await;
         assert_eq!(it, expected_it);
         assert_eq!(
             rs.into_iter().collect::<HashSet<_>>(),
-            records[1..4].to_vec().into_iter().collect::<HashSet<_>>()
+            vec![part_records[0][1].clone(), part_records[1][0].clone()]
+                .into_iter()
+                .collect::<HashSet<_>>()
         );
 
+        // next fetch will use partition with lowest index in iterator, partition-2
         let prior_it = it;
         let (it, rs) = topic.get_records_by_time(prior_it, span.clone(), 1).await;
+        let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 1]).collect();
+        assert_eq!(it, expected_it);
+        assert_eq!(
+            rs.into_iter().collect::<HashSet<_>>(),
+            vec![part_records[2][0].clone()]
+                .into_iter()
+                .collect::<HashSet<_>>()
+        );
+
+        // final fetch will fetch both remaining records from partition-1 and partition-2
+        let prior_it = it;
+        let (it, rs) = topic.get_records_by_time(prior_it, span.clone(), 5).await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 2, 2]).collect();
         assert_eq!(it, expected_it);
         assert_eq!(
             rs.into_iter().collect::<HashSet<_>>(),
-            records[4..].to_vec().into_iter().collect::<HashSet<_>>()
+            vec![part_records[1][1].clone(), part_records[2][1].clone()]
+                .into_iter()
+                .collect::<HashSet<_>>()
         );
 
+        // no more records left
         let prior_it = it;
         let (it, rs) = topic.get_records_by_time(prior_it, span, 1).await;
         assert_eq!(it, expected_it);
         assert_eq!(rs, vec![]);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_full_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+
+        let parts = 7;
+        assert!(records.len() % parts != 0);
+        let names: Vec<_> = (0..=parts)
+            .into_iter()
+            .map(|ix| format!("partition-{}", ix))
+            .collect();
+        for (ix, record) in records.iter().enumerate() {
+            topic
+                .append(&names[ix % parts], &vec![record.clone()])
+                .await?;
+        }
+
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 11;
+        assert!(fetch_count % parts != 0);
+        assert!(records.len() % fetch_count != 0);
+        for _ in 0..records.len() {
+            let (next_it, rs) = topic.get_records(it, fetch_count).await;
+            fetched.extend(rs);
+            it = next_it;
+        }
+        assert_eq!(
+            records.into_iter().collect::<HashSet<_>>(),
+            fetched.into_iter().collect::<HashSet<_>>()
+        );
         Ok(())
     }
 

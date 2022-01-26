@@ -161,31 +161,40 @@ impl Slog {
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_record(&self, ix: InternalIndex) -> Result<Option<Record>> {
-        self.get_records_for_segment(ix.segment)
+    pub(crate) async fn get_record(&self, ix: InternalIndex) -> Option<Record> {
+        self.iter_segment(ix.segment)
             .await
-            .map(|s| s.get(ix.record.0).cloned())
+            .flatten()
+            .skip(ix.record.0)
+            .next()
     }
 
-    pub(crate) async fn get_records_for_segment(&self, ix: SegmentIndex) -> Result<Vec<Record>> {
+    pub(crate) async fn iter_segment(
+        &self,
+        ix: SegmentIndex,
+    ) -> Box<dyn Iterator<Item = Vec<Record>> + Send> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
-            return Ok(vec![]);
+            return Box::new(std::iter::empty());
         }
-        state
-            .get_segment(ix)
-            .await
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| {
-                let segment = self.get_segment(ix);
-                let r: Result<_> = if Path::new(segment.path()).exists() {
-                    segment.read()?.read_all()
-                } else {
-                    Ok(vec![])
-                };
-                r
-            })
+
+        if let Some(in_mem) = state.get_segment(ix).await {
+            return Box::new(vec![in_mem.clone()].into_iter());
+        }
+
+        let segment = self.get_segment(ix);
+
+        if !Path::new(segment.path()).exists() {
+            return Box::new(std::iter::empty());
+        }
+
+        Box::new(
+            segment
+                .read()
+                .unwrap()
+                .into_chunk_iter()
+                .map(|rs| rs.unwrap()),
+        )
     }
 
     pub(crate) async fn append(&self, r: &Record) -> InternalIndex {
@@ -437,10 +446,7 @@ mod test {
             .collect();
 
         let abc = slog.append(&records[0]).await;
-        assert_eq!(
-            slog.get_record(abc.clone()).await?,
-            Some(records[0].clone())
-        );
+        assert_eq!(slog.get_record(abc.clone()).await, Some(records[0].clone()));
         slog.roll().await?;
         assert_eq!(
             commits
@@ -460,9 +466,9 @@ mod test {
             Some((RecordIndex(1)..RecordIndex(3), true))
         );
 
-        assert_eq!(slog.get_record(abc).await?, Some(records[0].clone()));
-        assert_eq!(slog.get_record(def).await?, Some(records[1].clone()));
-        assert_eq!(slog.get_record(ghi).await?, Some(records[2].clone()));
+        assert_eq!(slog.get_record(abc).await, Some(records[0].clone()));
+        assert_eq!(slog.get_record(def).await, Some(records[1].clone()));
+        assert_eq!(slog.get_record(ghi).await, Some(records[2].clone()));
         Ok(())
     }
 }

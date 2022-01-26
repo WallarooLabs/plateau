@@ -145,14 +145,13 @@ pub(crate) struct SegmentReader {
 }
 
 impl SegmentReader {
-    pub(crate) fn read_all(&self) -> Result<Vec<Record>> {
-        let metadata = self.reader.metadata();
+    pub(crate) fn into_chunk_iter(self) -> impl Iterator<Item = Result<Vec<Record>>> {
+        let metadata = self.reader.metadata().clone();
 
-        let mut results = vec![];
         let mut def_levels = vec![0; 8];
         let mut rep_levels = vec![0; 8];
 
-        for i in 0..metadata.num_row_groups() {
+        (0..metadata.num_row_groups()).into_iter().map(move |i| {
             let row_group_reader = self.reader.get_row_group(i)?;
             let row_group_metadata = metadata.row_group(i);
             let rows = usize::try_from(row_group_metadata.num_rows())?;
@@ -201,13 +200,17 @@ impl SegmentReader {
                 _ => bail!("invalid column type"),
             };
 
-            results.extend(tvs.into_iter().zip(arrs.into_iter()).map(|(tv, message)| {
-                let time = Utc.timestamp(0, 0) + Duration::milliseconds(tv);
-                Record { time, message }
-            }));
-        }
+            let result: Vec<_> = tvs
+                .into_iter()
+                .zip(arrs.into_iter())
+                .map(|(tv, message)| {
+                    let time = Utc.timestamp(0, 0) + Duration::milliseconds(tv);
+                    Record { time, message }
+                })
+                .collect();
 
-        Ok(results)
+            Ok(result)
+        })
     }
 }
 
@@ -242,7 +245,12 @@ mod test {
         assert!(size > 0);
 
         let r = s.read()?;
-        assert_eq!(r.read_all()?, records);
+        assert_eq!(
+            r.into_chunk_iter()
+                .flat_map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            records
+        );
         Ok(())
     }
 
@@ -265,7 +273,12 @@ mod test {
         assert!(size > 0);
 
         let r = s.read()?;
-        assert_eq!(r.read_all()?, records);
+        assert_eq!(
+            r.into_chunk_iter()
+                .flat_map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            records
+        );
 
         Ok(())
     }

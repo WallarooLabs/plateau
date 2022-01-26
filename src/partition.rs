@@ -379,9 +379,10 @@ impl State {
                 // pagination, so compute those while we have the relevant
                 // ranges easily accessible in `SegmentData`.
                 self.messages
-                    .get_records_for_segment(segment.index)
+                    .iter_segment(segment.index)
                     .into_stream()
-                    .flat_map(|rs| stream::iter(rs.expect("records from segment").into_iter()))
+                    .flat_map(|batches| stream::iter(batches))
+                    .flat_map(|rs| stream::iter(rs))
                     .enumerate()
                     .map(move |(index, data)| IndexedRecord {
                         index: RecordIndex(segment.records.start.0 + index),
