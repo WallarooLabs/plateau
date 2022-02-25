@@ -2,7 +2,7 @@
 //! of a given topic over _all_ partitions.
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
-pub use crate::partition::{IndexedRecord, Retention, Rolling};
+pub use crate::partition::{IndexedRecord, Rolling};
 use crate::partition::{Partition, PartitionId};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
@@ -234,6 +234,7 @@ impl Topic {
 mod test {
     use super::*;
     use crate::partition::test::deindex;
+    use crate::retention::Retention;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
     use std::collections::HashSet;

@@ -215,11 +215,11 @@ impl SegmentReader {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
     use tempfile::tempdir;
 
-    fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
+    pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
             time: Utc.timestamp(ix, 0),
             message: ByteArray::from(message.as_str()),

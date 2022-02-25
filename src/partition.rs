@@ -17,7 +17,8 @@
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
 use crate::manifest::Manifest;
-pub use crate::manifest::{PartitionId, SegmentData};
+pub use crate::manifest::{PartitionId, Scope, SegmentData};
+use crate::retention::Retention;
 pub use crate::segment::Record;
 pub use crate::slog::{InternalIndex, RecordIndex};
 use crate::slog::{SegmentIndex, SegmentRecordIndex, Slog};
@@ -49,21 +50,6 @@ impl Default for Rolling {
             max_segment_size: 100 * 1024 * 1024,
             max_segment_index: 100000,
             max_segment_duration: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Retention {
-    pub max_segment_count: Option<usize>,
-    pub max_bytes: usize,
-}
-
-impl Default for Retention {
-    fn default() -> Self {
-        Retention {
-            max_segment_count: Some(10000),
-            max_bytes: 1 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -248,10 +234,14 @@ impl Partition {
             .reduce(|merged, range| merge_ranges(merged, range))
     }
 
+    pub(crate) async fn byte_size(&self) -> usize {
+        self.manifest.get_size(Scope::Partition(&self.id)).await
+    }
+
     async fn over_retention_limit(&self) -> bool {
         let retain = &self.config.retain;
 
-        let size = self.manifest.get_size(&self.id).await.unwrap_or(0);
+        let size = self.byte_size().await;
         gauge!(
             "partition_size_bytes",
             size as f64,
@@ -292,9 +282,15 @@ impl Partition {
         false
     }
 
+    pub(crate) async fn remove_oldest(&self) {
+        let state = self.state.read().await;
+        state.remove_oldest(&self).await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn compact(&self) {
         let mut state = self.state.write().await;
+        state.commit(&self).await.expect("commit failed");
         state.retain(&self).await;
     }
 }
@@ -325,7 +321,7 @@ impl State {
                 self.wait_for_record(pending.records.end).await;
             }
             self.last_roll = Instant::now();
-            self.retain(partition).await;
+            self.retain(&partition).await;
         }
 
         Ok(())
@@ -405,33 +401,37 @@ impl State {
         records
     }
 
-    async fn retain(&mut self, partition: &Partition) {
+    async fn retain(&self, partition: &Partition) {
         while partition.over_retention_limit().await {
-            if let Some(ix) = partition.manifest.get_min_segment(&partition.id).await {
-                // TODO ensure we handle failure if this call
-                partition
-                    .manifest
-                    .remove_segment(partition.id.segment_id(ix))
-                    .await;
-                // succeeds but this does not complete e.g. due to node failure
-                self.messages.destroy(ix).expect("segment destroyed");
-                info!("retain {}: destroyed {:?}", partition.id, ix);
-                counter!(
-                    "partition_segments_destroyed",
-                    1,
-                    "topic" => String::from(partition.id.topic()),
-                    "partition" => String::from(partition.id.partition())
-                )
-            }
+            self.remove_oldest(partition).await;
+        }
+    }
+
+    async fn remove_oldest(&self, partition: &Partition) {
+        if let Some(ix) = partition.manifest.get_min_segment(&partition.id).await {
+            // TODO ensure we handle failure if this call
+            partition
+                .manifest
+                .remove_segment(partition.id.segment_id(ix))
+                .await;
+            // succeeds but this does not complete e.g. due to node failure
+            self.messages.destroy(ix).expect("segment destroyed");
+            info!("retain {}: destroyed {:?}", partition.id, ix);
+            counter!(
+                "partition_segments_destroyed",
+                1,
+                "topic" => String::from(partition.id.topic()),
+                "partition" => String::from(partition.id.partition())
+            )
         }
     }
 
     async fn wait_for_record(&mut self, target: RecordIndex) {
         trace!("waiting for commit including {:?}", target);
-        self.commits.changed().await.expect("commit watcher ended");
         while *self.commits.borrow() < target {
             self.commits.changed().await.expect("commit watcher ended");
         }
+        trace!("notified of commit including {:?}", target);
     }
 
     #[cfg(test)]

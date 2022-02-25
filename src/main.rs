@@ -2,6 +2,7 @@ mod catalog;
 mod manifest;
 mod metrics;
 mod partition;
+mod retention;
 mod segment;
 mod slog;
 mod topic;
@@ -117,7 +118,9 @@ async fn main() {
     let stream = IntervalStream::new(checkpoints)
         .take_until(exit.next())
         .for_each(|_| async {
-            catalog_checkpoint.clone().checkpoint().await;
+            let inner = catalog_checkpoint.clone();
+            inner.checkpoint().await;
+            inner.retain().await;
         });
 
     let (spec, filter) = openapi::spec().build(move || {

@@ -16,12 +16,19 @@ use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{ColumnIndex, Executor, Row};
+use std::borrow::Borrow;
 use std::convert::TryFrom;
-use std::ops::{Deref, Range, RangeInclusive};
+use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::slog::{RecordIndex, SegmentIndex};
+
+pub enum Scope<'a> {
+    Global,
+    Topic(&'a str),
+    Partition(&'a PartitionId),
+}
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct PartitionId {
@@ -51,6 +58,13 @@ impl PartitionId {
             segment,
         }
     }
+
+    fn from_row(row: &SqliteRow) -> Self {
+        PartitionId::new(
+            &row.get::<String, _>("topic"),
+            &row.get::<String, _>("partition"),
+        )
+    }
 }
 
 impl std::fmt::Display for PartitionId {
@@ -60,28 +74,39 @@ impl std::fmt::Display for PartitionId {
 }
 
 #[derive(Clone, Debug)]
-pub struct SegmentId<P: Deref<Target = PartitionId>> {
+pub struct SegmentId<P: Borrow<PartitionId>> {
     partition_id: P,
     segment: SegmentIndex,
 }
 
-impl<P: Deref<Target = PartitionId>> std::fmt::Display for SegmentId<P> {
+impl SegmentId<PartitionId> {
+    fn from_row(row: &SqliteRow) -> Self {
+        let partition_id = PartitionId::from_row(row);
+        Self {
+            partition_id,
+            segment: SegmentIndex::from_row(row, "segment_index"),
+        }
+    }
+}
+
+impl<P: Borrow<PartitionId>> std::fmt::Display for SegmentId<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
             "{}/{}",
-            self.partition_id.topic, self.partition_id.partition
+            self.partition_id.borrow().topic,
+            self.partition_id.borrow().partition
         )
     }
 }
 
-impl<P: Deref<Target = PartitionId>> SegmentId<P> {
+impl<P: Borrow<PartitionId>> SegmentId<P> {
     pub fn topic(&self) -> &str {
-        &self.partition_id.topic
+        &self.partition_id.borrow().topic
     }
 
     pub fn partition(&self) -> &str {
-        &self.partition_id.partition
+        &self.partition_id.borrow().partition
     }
 }
 
@@ -270,6 +295,32 @@ impl Manifest {
         .await
     }
 
+    /// Find the oldest segment, scoped to a topic when specified.
+    pub async fn get_oldest_segment(&self, topic: Option<&str>) -> Option<SegmentId<PartitionId>> {
+        let query = match topic.as_ref() {
+            Some(t) => sqlx::query(
+                "
+                SELECT topic, partition, segment_index FROM segments
+                WHERE topic = ?1
+                ORDER BY time_start ASC LIMIT 1
+            ",
+            )
+            .bind(t),
+            None => sqlx::query(
+                "
+                SELECT topic, partition, segment_index FROM segments
+                ORDER BY time_start ASC LIMIT 1
+            ",
+            ),
+        };
+
+        query
+            .map(|row| SegmentId::from_row(&row))
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap()
+    }
+
     /// Find the segment with the highest index for a given partition.
     pub async fn get_max_segment(&self, id: &PartitionId) -> Option<SegmentIndex> {
         self.get_ordered_segment(id, "DESC").await
@@ -373,21 +424,35 @@ impl Manifest {
     }
 
     /// Get the total stored byte size of a given partition.
-    pub async fn get_size(&self, id: &PartitionId) -> Option<usize> {
-        sqlx::query(
-            "
+    pub async fn get_size<'a>(&self, scope: Scope<'a>) -> usize {
+        let query = match scope {
+            Scope::Global => sqlx::query("SELECT SUM(size) AS size FROM segments"),
+            Scope::Partition(id) => sqlx::query(
+                "
             SELECT SUM(size) AS size FROM segments
             WHERE topic = ?1 AND partition = ?2
             GROUP BY partition
         ",
-        )
-        .bind(&id.topic)
-        .bind(&id.partition)
-        .map(|row: SqliteRow| Some(usize::try_from(row.get::<Option<i64>, _>(0)?).unwrap()))
-        .fetch_optional(&self.pool)
-        .await
-        .unwrap()
-        .flatten()
+            )
+            .bind(&id.topic)
+            .bind(&id.partition),
+            Scope::Topic(topic) => sqlx::query(
+                "
+            SELECT SUM(size) AS size FROM segments
+            WHERE topic = ?1
+            GROUP BY topic
+        ",
+            )
+            .bind(topic),
+        };
+
+        query
+            .map(|row: SqliteRow| Some(usize::try_from(row.get::<Option<i64>, _>(0)?).unwrap()))
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap()
+            .flatten()
+            .unwrap_or(0)
     }
 
     pub async fn get_partitions(&self, topic: &str) -> Vec<String> {
@@ -540,8 +605,8 @@ mod test {
             )
             .await;
 
-        assert_eq!(state.get_size(&a).await, Some(35));
-        assert_eq!(state.get_size(&b).await, Some(12));
+        assert_eq!(state.get_size(Scope::Partition(&a)).await, 35);
+        assert_eq!(state.get_size(Scope::Partition(&b)).await, 12);
         assert_eq!(
             state.get_partition_range(&a).await.unwrap(),
             RecordIndex(0)..RecordIndex(20)
@@ -554,6 +619,52 @@ mod test {
             state.get_partitions(a.topic()).await,
             vec!["a".to_string(), "b".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_query_oldest() {
+        let topic = "topic";
+        let other = "other_topic";
+        let root = tempdir().unwrap();
+        let path = root.path().join("testing.sqlite");
+        let state = Manifest::attach(PathBuf::from(path)).await;
+        let a = PartitionId::new(&topic, "a");
+        let b = PartitionId::new(&other, "a");
+        let c = PartitionId::new(&topic, "b");
+
+        let data = SegmentData {
+            index: SegmentIndex(0),
+            time: Utc.timestamp(00, 0)..=Utc.timestamp(20, 0),
+            records: RecordIndex(0)..RecordIndex(15),
+            size: 10,
+        };
+
+        assert!(state.get_oldest_segment(None).await.is_none());
+
+        for (p, time) in vec![
+            (&a, Utc.timestamp(10, 0)..=Utc.timestamp(20, 0)),
+            (&b, Utc.timestamp(5, 0)..=Utc.timestamp(20, 0)),
+            (&c, Utc.timestamp(7, 0)..=Utc.timestamp(20, 0)),
+        ] {
+            state
+                .update(
+                    p,
+                    &SegmentData {
+                        time,
+                        ..data.clone()
+                    },
+                )
+                .await;
+            assert_eq!(state.get_size(Scope::Partition(&p)).await, 10);
+        }
+        assert_eq!(state.get_size(Scope::Topic(a.topic())).await, 20);
+        assert_eq!(state.get_size(Scope::Topic(c.topic())).await, 20);
+        assert_eq!(state.get_size(Scope::Global).await, 30);
+
+        let oldest = state.get_oldest_segment(None).await.unwrap();
+        assert_eq!(oldest.partition_id, b.clone());
+        let oldest = state.get_oldest_segment(Some(topic)).await.unwrap();
+        assert_eq!(oldest.partition_id, c.clone());
     }
 
     #[tokio::test]
@@ -581,7 +692,7 @@ mod test {
                 )
                 .await
         }
-        assert_eq!(state.get_size(&id).await, Some(12));
+        assert_eq!(state.get_size(Scope::Partition(&id)).await, 12);
 
         state
             .update(
@@ -594,7 +705,7 @@ mod test {
                 },
             )
             .await;
-        assert_eq!(state.get_size(&id).await, Some(25));
+        assert_eq!(state.get_size(Scope::Partition(&id)).await, 25);
 
         assert_eq!(
             state.get_segment_for_ix(&id, RecordIndex(0)).await,
@@ -619,14 +730,14 @@ mod test {
         );
         assert_eq!(state.get_min_segment(&id).await, Some(SegmentIndex(1)));
         assert_eq!(state.get_max_segment(&id).await, Some(SegmentIndex(1)));
-        assert_eq!(state.get_size(&id).await, Some(13));
+        assert_eq!(state.get_size(Scope::Partition(&id)).await, 13);
 
         state.remove_segment(id.segment_id(SegmentIndex(1))).await;
         assert_eq!(state.get_segment_for_ix(&id, RecordIndex(0)).await, None);
         assert_eq!(state.get_segment_for_ix(&id, RecordIndex(15)).await, None);
         assert_eq!(state.get_min_segment(&id).await, None);
         assert_eq!(state.get_max_segment(&id).await, None);
-        assert_eq!(state.get_size(&id).await, None);
+        assert_eq!(state.get_size(Scope::Partition(&id)).await, 0);
         assert_eq!(state.get_partition_range(&id).await, None);
     }
 

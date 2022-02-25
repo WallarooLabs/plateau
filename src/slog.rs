@@ -391,7 +391,7 @@ fn spawn_slog_thread(
                     counter!("slog_thread_records_written", u64::try_from(count).unwrap(), "name" => name.clone());
 
                     if seal {
-                        trace!("sealed {:?}", segment);
+                        trace!("sealed {:?} {:?}", segment, records);
                         current.take().map(|(w, _)| w.close().expect(""));
                     }
 
