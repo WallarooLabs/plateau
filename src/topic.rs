@@ -3,7 +3,7 @@
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
 pub use crate::partition::{IndexedRecord, Rolling};
-use crate::partition::{Partition, PartitionId};
+use crate::partition::{Partition, PartitionId, QueryLimit};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
 use anyhow::Result;
@@ -148,7 +148,7 @@ impl Topic {
     pub(crate) async fn get_records(
         &self,
         starts: TopicIterator,
-        limit: usize,
+        limit: QueryLimit,
     ) -> (TopicIterator, Vec<Record>) {
         self.get_records_from_all(
             starts,
@@ -164,7 +164,7 @@ impl Topic {
         &self,
         starts: TopicIterator,
         times: RangeInclusive<DateTime<Utc>>,
-        limit: usize,
+        limit: QueryLimit,
     ) -> (TopicIterator, Vec<Record>) {
         let times = &times;
         self.get_records_from_all(
@@ -182,11 +182,11 @@ impl Topic {
     pub(crate) async fn get_records_from_all<'a, F, Fut>(
         &'a self,
         mut iterator: TopicIterator,
-        limit: usize,
+        limit: QueryLimit,
         fetch: F,
     ) -> (TopicIterator, Vec<Record>)
     where
-        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, usize) -> Fut,
+        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, QueryLimit) -> Fut,
         Fut: futures::Future<Output = Vec<IndexedRecord>>,
     {
         let mut read_starts: Vec<_> = self
@@ -203,17 +203,18 @@ impl Topic {
 
         read_starts.sort();
         let mut records = vec![];
+        let mut limit_left = Some(limit);
         for (start, name) in read_starts.into_iter() {
             let partition = self.get_partition(&name).await;
-            let remaining = limit - records.len();
-            let batch = fetch(partition, start, remaining).await;
+            if let Some(remaining) = limit_left {
+                let batch = fetch(partition, start, remaining).await;
+                limit_left = remaining.after(&batch);
 
-            if let Some(final_record) = batch.last() {
-                iterator.insert(name, final_record.index.0 + 1);
-            }
-            records.extend(batch.into_iter().map(|ir| ir.data));
-
-            if records.len() >= limit {
+                if let Some(final_record) = batch.last() {
+                    iterator.insert(name, final_record.index.0 + 1);
+                }
+                records.extend(batch.into_iter().map(|ir| ir.data));
+            } else {
                 break;
             }
         }
@@ -353,7 +354,7 @@ mod test {
         // fetching two records will spill from partition-0, which has only one
         // record in the given time range, to partition-1
         let (it, rs) = topic
-            .get_records_by_time(HashMap::new(), span.clone(), 2)
+            .get_records_by_time(HashMap::new(), span.clone(), QueryLimit::records(2))
             .await;
         assert_eq!(it, expected_it);
         assert_eq!(
@@ -365,7 +366,9 @@ mod test {
 
         // next fetch will use partition with lowest index in iterator, partition-2
         let prior_it = it;
-        let (it, rs) = topic.get_records_by_time(prior_it, span.clone(), 1).await;
+        let (it, rs) = topic
+            .get_records_by_time(prior_it, span.clone(), QueryLimit::records(1))
+            .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 1]).collect();
         assert_eq!(it, expected_it);
         assert_eq!(
@@ -377,7 +380,9 @@ mod test {
 
         // final fetch will fetch both remaining records from partition-1 and partition-2
         let prior_it = it;
-        let (it, rs) = topic.get_records_by_time(prior_it, span.clone(), 5).await;
+        let (it, rs) = topic
+            .get_records_by_time(prior_it, span.clone(), QueryLimit::records(5))
+            .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 2, 2]).collect();
         assert_eq!(it, expected_it);
         assert_eq!(
@@ -389,7 +394,9 @@ mod test {
 
         // no more records left
         let prior_it = it;
-        let (it, rs) = topic.get_records_by_time(prior_it, span, 1).await;
+        let (it, rs) = topic
+            .get_records_by_time(prior_it, span, QueryLimit::records(1))
+            .await;
         assert_eq!(it, expected_it);
         assert_eq!(rs, vec![]);
 
@@ -421,7 +428,9 @@ mod test {
         assert!(fetch_count % parts != 0);
         assert!(records.len() % fetch_count != 0);
         for _ in 0..records.len() {
-            let (next_it, rs) = topic.get_records(it, fetch_count).await;
+            let (next_it, rs) = topic
+                .get_records(it, QueryLimit::records(fetch_count))
+                .await;
             fetched.extend(rs);
             it = next_it;
         }
@@ -470,7 +479,7 @@ mod test {
                 topic
                     .get_partition("partition-0")
                     .await
-                    .get_records(RecordIndex(0), 1000)
+                    .get_records(RecordIndex(0), QueryLimit::records(1000))
                     .await
             ),
             vec![records[0].clone(), records[3].clone()]

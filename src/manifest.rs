@@ -177,6 +177,7 @@ impl Manifest {
     pub async fn attach(path: PathBuf) -> Self {
         let prior = Path::new(&path).exists();
         let pool = SqlitePoolOptions::new()
+            .max_connections(1)
             .connect_with(
                 SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_str().unwrap()))
                     .unwrap()
@@ -335,7 +336,7 @@ impl Manifest {
         &'a self,
         id: &'a PartitionId,
         start: RecordIndex,
-    ) -> impl futures::Stream<Item = SegmentData> + 'a {
+    ) -> impl futures::Stream<Item = SegmentData> + 'a + Send {
         sqlx::query(
             "
                 SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments

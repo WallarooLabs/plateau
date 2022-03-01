@@ -54,6 +54,43 @@ impl Default for Rolling {
     }
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub struct QueryLimit {
+    pub max_records: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for QueryLimit {
+    fn default() -> Self {
+        QueryLimit {
+            max_records: 10000,
+            max_bytes: 100 * 1024,
+        }
+    }
+}
+
+impl QueryLimit {
+    pub fn records(max_records: usize) -> Self {
+        QueryLimit {
+            max_records,
+            ..QueryLimit::default()
+        }
+    }
+
+    pub fn after(&self, records: &[IndexedRecord]) -> Option<Self> {
+        let count = records.len();
+        let bytes: usize = records.iter().map(|r| r.data.message.len()).sum();
+        if count >= self.max_records || bytes >= self.max_bytes {
+            None
+        } else {
+            Some(QueryLimit {
+                max_records: self.max_records - count,
+                max_bytes: self.max_bytes - bytes,
+            })
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub retain: Retention,
@@ -164,9 +201,9 @@ impl Partition {
     }
 
     async fn stream_with_active<'a>(
-        &self,
-        stored: impl Stream<Item = SegmentData> + 'a,
-    ) -> impl Stream<Item = SegmentData> + 'a {
+        &'a self,
+        stored: impl Stream<Item = SegmentData> + 'a + Send,
+    ) -> impl Stream<Item = SegmentData> + 'a + Send {
         let state = self.state.read().await;
         let cached = state.messages.cached_segment_data().await;
         let cached_segments: Vec<SegmentIndex> =
@@ -179,7 +216,11 @@ impl Partition {
             .chain(stream::iter(cached.into_iter()))
     }
 
-    pub(crate) async fn get_records(&self, start: RecordIndex, limit: usize) -> Vec<IndexedRecord> {
+    pub(crate) async fn get_records(
+        &self,
+        start: RecordIndex,
+        limit: QueryLimit,
+    ) -> Vec<IndexedRecord> {
         let state = self.state.read().await;
         let segments = self
             .stream_with_active(self.manifest.stream_segments(&self.id, start))
@@ -194,7 +235,7 @@ impl Partition {
         &self,
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
-        limit: usize,
+        limit: QueryLimit,
     ) -> Vec<IndexedRecord> {
         let state = self.state.read().await;
         let segments = self
@@ -212,7 +253,7 @@ impl Partition {
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
-        let records = self.get_records(index, 1).await;
+        let records = self.get_records(index, QueryLimit::records(1)).await;
 
         records
             .into_iter()
@@ -359,46 +400,61 @@ impl State {
 
     async fn get_records_from_segments<'a>(
         &'a self,
-        limit: usize,
-        filter: impl Fn(&IndexedRecord) -> bool,
-        indices: impl Stream<Item = SegmentData> + 'a,
+        limit: QueryLimit,
+        filter: impl Fn(&IndexedRecord) -> bool + Send + Sync,
+        indices: impl Stream<Item = SegmentData> + 'a + Send,
     ) -> Vec<IndexedRecord> {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
         // wasteful in many cases. this is why we require a lazy stream of
         // `indices` of all segments that could possibly have said data. the
         // manifest tracks this information in a performant fashion.
-        let records = indices
-            .flat_map(move |segment| {
-                // once we have the segments, we need to actually read the data
-                // within. we also need to track record indices for subscriber
-                // pagination, so compute those while we have the relevant
-                // ranges easily accessible in `SegmentData`.
-                self.messages
-                    .iter_segment(segment.index)
-                    .into_stream()
-                    .flat_map(|batches| stream::iter(batches))
-                    .flat_map(|rs| stream::iter(rs))
-                    .enumerate()
-                    .map(move |(index, data)| IndexedRecord {
-                        index: RecordIndex(segment.records.start.0 + index),
-                        data,
-                    })
-            })
-            .filter_map(|indexed| {
-                // now, winnow down to the data we care about. as we go, track the first
-                // and final index of the records we're collating together.
-                if filter(&indexed) {
-                    future::ready(Some(indexed))
-                } else {
-                    future::ready(None)
-                }
-            })
-            .take(limit)
-            .collect()
-            .await;
+        let mut byte_count = 0;
+        let max_bytes = limit.max_bytes;
+        // Feb 2022: this box / pin is necessary due to a bug in the rust
+        // compiler. it has difficulty matching lifetimes across async fns and
+        // closures. aggravated by using streams. issue with linked workaround:
+        //
+        // - https://github.com/rust-lang/rust/issues/64552#issuecomment-669728225
+        //
+        // there's some noise about better support for async closures in rust; the
+        // situation may resolve itself in the future
+        let stream: std::pin::Pin<Box<dyn Stream<Item = _> + Send>> = Box::pin(
+            indices
+                .flat_map(move |segment| {
+                    // once we have the segments, we need to actually read the data
+                    // within. we also need to track record indices for subscriber
+                    // pagination, so compute those while we have the relevant
+                    // ranges easily accessible in `SegmentData`.
+                    self.messages
+                        .iter_segment(segment.index)
+                        .into_stream()
+                        .flat_map(|batches| stream::iter(batches))
+                        .flat_map(|rs| stream::iter(rs))
+                        .enumerate()
+                        .map(move |(index, data)| IndexedRecord {
+                            index: RecordIndex(segment.records.start.0 + index),
+                            data,
+                        })
+                })
+                .filter_map(|indexed| {
+                    // now, winnow down to the data we care about. as we go, track the first
+                    // and final index of the records we're collating together.
+                    if filter(&indexed) {
+                        future::ready(Some(indexed))
+                    } else {
+                        future::ready(None)
+                    }
+                })
+                .take_while(move |r| {
+                    let over = byte_count <= max_bytes;
+                    byte_count += r.data.message.len();
+                    future::ready(over)
+                })
+                .take(limit.max_records),
+        );
 
-        records
+        stream.collect().await
     }
 
     async fn retain(&self, partition: &Partition) {
@@ -446,13 +502,25 @@ impl State {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
     use std::convert::TryInto;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, TempDir};
 
     pub fn deindex(rs: Vec<IndexedRecord>) -> Vec<Record> {
         rs.into_iter().map(|r| r.data).collect()
+    }
+
+    pub async fn partition() -> Result<(TempDir, Partition)> {
+        let id = PartitionId::new("topic", "testing");
+        let dir = tempdir()?;
+        let root = PathBuf::from(dir.path());
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        Ok((
+            dir,
+            Partition::attach(root, manifest, id, Config::default()).await,
+        ))
     }
 
     #[tokio::test]
@@ -541,7 +609,10 @@ pub mod test {
             let range = start..std::cmp::min(start + limit, records.len());
             let slice = Vec::from(&records[range.clone()]);
             assert_eq!(
-                deindex(t.get_records(RecordIndex(start), limit).await),
+                deindex(
+                    t.get_records(RecordIndex(start), QueryLimit::records(limit))
+                        .await
+                ),
                 slice
             );
         }
@@ -672,24 +743,24 @@ pub mod test {
         }
 
         // fetch from start fast-forwards to first valid index
-        let rs = t.get_records(RecordIndex(0), 2).await;
+        let rs = t.get_records(RecordIndex(0), QueryLimit::records(2)).await;
         let start_index = rs.iter().next().unwrap().index.clone();
         assert_eq!(deindex(rs), vec![records[3].clone(), records[4].clone()]);
 
         // iterate through from start
-        let rs = t.get_records(start_index, 2).await;
+        let rs = t.get_records(start_index, QueryLimit::records(2)).await;
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[3].clone(), records[4].clone()]);
 
-        let rs = t.get_records(next_index, 2).await;
+        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[5].clone(), records[6].clone()]);
 
-        let rs = t.get_records(next_index, 2).await;
+        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[7].clone()]);
 
-        let rs = t.get_records(next_index, 2).await;
+        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
         assert_eq!(deindex(rs), vec![]);
 
         Ok(())
@@ -752,14 +823,52 @@ pub mod test {
                     let time_slice: Vec<_> = values.clone().map(|(_, r)| r.clone()).collect();
                     assert_eq!(
                         deindex(
-                            t.get_records_by_time(RecordIndex(start), query, limit)
-                                .await
+                            t.get_records_by_time(
+                                RecordIndex(start),
+                                query,
+                                QueryLimit::records(limit)
+                            )
+                            .await
                         ),
                         time_slice
                     );
                 }
             }
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_query_byte_limit() -> Result<()> {
+        let (_dir, p) = partition().await?;
+
+        let data = "x".to_string().repeat(50);
+
+        let records = build_records((0..10).map(|_| (0, data.clone())));
+        p.append(&records).await?;
+        let rs = p
+            .get_records(
+                RecordIndex(0),
+                QueryLimit {
+                    max_records: 10,
+                    max_bytes: 250,
+                },
+            )
+            .await;
+
+        assert_eq!(rs.len(), 6);
+
+        let rs = p
+            .get_records(
+                RecordIndex(0),
+                QueryLimit {
+                    max_records: 10,
+                    max_bytes: 1,
+                },
+            )
+            .await;
+        assert_eq!(rs.len(), 1);
 
         Ok(())
     }

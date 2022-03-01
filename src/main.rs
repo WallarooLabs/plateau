@@ -26,6 +26,7 @@ use tokio_stream::wrappers::{IntervalStream, SignalStream};
 use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
+use crate::partition::QueryLimit;
 use crate::slog::SlogError;
 use crate::topic::{Record, TopicIterator};
 
@@ -235,9 +236,13 @@ async fn topic_iterate(
 
     let (next, rs) = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
-        topic.get_records_by_time(position, times, limit).await
+        topic
+            .get_records_by_time(position, times, QueryLimit::records(limit))
+            .await
     } else {
-        topic.get_records(position, limit).await
+        topic
+            .get_records(position, QueryLimit::records(limit))
+            .await
     };
 
     Ok(Json::from(TopicIterationReply {
@@ -258,6 +263,7 @@ async fn partition_get_records(
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
+    let limit = QueryLimit::records(limit);
     let rs = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic

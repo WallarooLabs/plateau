@@ -169,10 +169,10 @@ impl Slog {
             .next()
     }
 
-    pub(crate) async fn iter_segment(
-        &self,
+    pub(crate) async fn iter_segment<'a>(
+        &'a self,
         ix: SegmentIndex,
-    ) -> Box<dyn Iterator<Item = Vec<Record>> + Send> {
+    ) -> Box<dyn Iterator<Item = Vec<Record>> + Send + 'a> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
             return Box::new(std::iter::empty());
