@@ -3,7 +3,7 @@ name = "plateau"
 description = "A low-profile event and log aggregator"
 license = "MIT"
 version = "0.1.0"
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 anyhow = "1"
