@@ -35,7 +35,7 @@ use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, RwLock, RwLockReadGuard};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Rolling {
@@ -203,8 +203,8 @@ impl Partition {
     async fn stream_with_active<'a>(
         &'a self,
         stored: impl Stream<Item = SegmentData> + 'a + Send,
+        state: &RwLockReadGuard<'a, State>,
     ) -> impl Stream<Item = SegmentData> + 'a + Send {
-        let state = self.state.read().await;
         let cached = state.messages.cached_segment_data().await;
         let cached_segments: Vec<SegmentIndex> =
             cached.iter().map(|data| data.index.clone()).collect();
@@ -223,7 +223,7 @@ impl Partition {
     ) -> Vec<IndexedRecord> {
         let state = self.state.read().await;
         let segments = self
-            .stream_with_active(self.manifest.stream_segments(&self.id, start))
+            .stream_with_active(self.manifest.stream_segments(&self.id, start), &state)
             .await;
 
         state
@@ -239,7 +239,10 @@ impl Partition {
     ) -> Vec<IndexedRecord> {
         let state = self.state.read().await;
         let segments = self
-            .stream_with_active(self.manifest.stream_time_segments(&self.id, start, &times))
+            .stream_with_active(
+                self.manifest.stream_time_segments(&self.id, start, &times),
+                &state,
+            )
             .await;
 
         state
