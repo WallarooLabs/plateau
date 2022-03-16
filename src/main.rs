@@ -14,12 +14,13 @@ use futures::{future, stream};
 use parquet::data_type::ByteArray;
 use rweb::*;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use slog::RecordIndex;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time;
 use tokio_stream::wrappers::{IntervalStream, SignalStream};
@@ -91,6 +92,7 @@ struct ErrorMessage {
 enum ErrorReply {
     WriterBusy,
     InvalidQuery,
+    NoHeartbeat,
     Unknown,
 }
 impl warp::reject::Reject for ErrorReply {}
@@ -125,7 +127,8 @@ async fn main() {
         });
 
     let (spec, filter) = openapi::spec().build(move || {
-        topic_append(catalog.clone())
+        healthcheck(catalog.clone())
+            .or(topic_append(catalog.clone()))
             .or(topic_iterate(catalog.clone()))
             .or(topic_get_partitions(catalog.clone()))
             .or(partition_get_records(catalog))
@@ -139,6 +142,20 @@ async fn main() {
         ),
     )
     .await;
+}
+
+#[get("/ok")]
+#[openapi(id = "topic.get_partitions")]
+async fn healthcheck(#[data] catalog: Catalog) -> Result<Json<serde_json::Value>, Rejection> {
+    let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
+    let healthy = duration
+        .map(|d| d < Duration::from_secs(30))
+        .unwrap_or(true);
+    if healthy {
+        Ok(Json::from(json!({"ok": "true"})))
+    } else {
+        Err(warp::reject::custom(ErrorReply::NoHeartbeat))
+    }
 }
 
 #[post("/topic/{topic_name}/partition/{partition_name}")]
@@ -293,6 +310,7 @@ async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
     let (code, message) = match err.find::<ErrorReply>() {
         Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query"),
         Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy"),
+        Some(ErrorReply::NoHeartbeat) => (StatusCode::INTERNAL_SERVER_ERROR, "no heartbeat"),
         Some(ErrorReply::Unknown) | None => (StatusCode::INTERNAL_SERVER_ERROR, "unknown error"),
     };
 

@@ -25,6 +25,7 @@ pub struct Catalog {
     manifest: Manifest,
     root: Arc<PathBuf>,
     topics: Arc<RwLock<HashMap<String, Topic>>>,
+    last_checkpoint: Arc<RwLock<SystemTime>>,
 }
 
 impl Catalog {
@@ -39,7 +40,12 @@ impl Catalog {
             manifest: Manifest::attach(root.join("manifest.json")).await,
             root: Arc::new(root),
             topics: Arc::new(RwLock::new(HashMap::new())),
+            last_checkpoint: Arc::new(RwLock::new(SystemTime::now())),
         }
+    }
+
+    pub async fn last_checkpoint(&self) -> SystemTime {
+        self.last_checkpoint.read().await.clone()
     }
 
     pub async fn checkpoint(&self) {
@@ -48,7 +54,8 @@ impl Catalog {
         for (_, topic) in self.topics.read().await.iter() {
             topic.checkpoint().await
         }
-        if let Ok(duration) = SystemTime::now().duration_since(start) {
+        let end = SystemTime::now();
+        if let Ok(duration) = end.duration_since(start) {
             info!("finished full catalog checkpoint in {:?}", duration);
             gauge!(
                 "catalog_checkpoint_ms",
@@ -57,6 +64,7 @@ impl Catalog {
         } else {
             info!("finished full catalog checkpoint");
         }
+        *self.last_checkpoint.write().await = end;
     }
 
     pub async fn retain(&self) {
