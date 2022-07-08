@@ -27,3 +27,5 @@ sqlx = { version = "0.5.9", features = [ "chrono", "sqlite", "runtime-tokio-nati
 
 [dev-dependencies]
 itermore = "0.1"
+reqwest = { version = "0.11", features = ["json"] }
+uuid = { version = "1.1.2", features = ["v4", "fast-rng"]}

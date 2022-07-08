@@ -54,7 +54,7 @@ impl Default for Rolling {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct QueryLimit {
     pub max_records: usize,
     pub max_bytes: usize,
@@ -69,6 +69,13 @@ impl Default for QueryLimit {
     }
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum LimitStatus {
+    Unreached(QueryLimit),
+    BytesExceeded,
+    RecordsExceeded,
+}
+
 impl QueryLimit {
     pub fn records(max_records: usize) -> Self {
         QueryLimit {
@@ -77,13 +84,15 @@ impl QueryLimit {
         }
     }
 
-    pub fn after(&self, records: &[IndexedRecord]) -> Option<Self> {
+    pub fn after(&self, records: &[IndexedRecord]) -> LimitStatus {
         let count = records.len();
         let bytes: usize = records.iter().map(|r| r.data.message.len()).sum();
-        if count >= self.max_records || bytes >= self.max_bytes {
-            None
+        if count >= self.max_records {
+            LimitStatus::RecordsExceeded
+        } else if bytes >= self.max_bytes {
+            LimitStatus::BytesExceeded
         } else {
-            Some(QueryLimit {
+            LimitStatus::Unreached(QueryLimit {
                 max_records: self.max_records - count,
                 max_bytes: self.max_bytes - bytes,
             })
@@ -114,6 +123,11 @@ pub struct State {
 pub struct IndexedRecord {
     pub index: RecordIndex,
     pub data: Record,
+}
+
+pub(crate) struct PartitionRecordResponse {
+    pub(crate) records: Vec<IndexedRecord>,
+    pub(crate) status: LimitStatus,
 }
 
 fn merge_ranges<T: Ord>(a: Range<T>, b: Range<T>) -> Range<T> {
@@ -172,6 +186,7 @@ impl Partition {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn id(&self) -> &PartitionId {
         &self.id
     }
@@ -220,7 +235,7 @@ impl Partition {
         &self,
         start: RecordIndex,
         limit: QueryLimit,
-    ) -> Vec<IndexedRecord> {
+    ) -> PartitionRecordResponse {
         let state = self.state.read().await;
         let segments = self
             .stream_with_active(self.manifest.stream_segments(&self.id, start), &state)
@@ -236,7 +251,7 @@ impl Partition {
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
         limit: QueryLimit,
-    ) -> Vec<IndexedRecord> {
+    ) -> PartitionRecordResponse {
         let state = self.state.read().await;
         let segments = self
             .stream_with_active(
@@ -256,9 +271,10 @@ impl Partition {
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
-        let records = self.get_records(index, QueryLimit::records(1)).await;
+        let record_response = self.get_records(index, QueryLimit::records(1)).await;
 
-        records
+        record_response
+            .records
             .into_iter()
             .filter(|r| r.index == index)
             .next()
@@ -406,7 +422,7 @@ impl State {
         limit: QueryLimit,
         filter: impl Fn(&IndexedRecord) -> bool + Send + Sync,
         indices: impl Stream<Item = SegmentData> + 'a + Send,
-    ) -> Vec<IndexedRecord> {
+    ) -> PartitionRecordResponse {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
         // wasteful in many cases. this is why we require a lazy stream of
@@ -414,6 +430,8 @@ impl State {
         // manifest tracks this information in a performant fashion.
         let mut byte_count = 0;
         let max_bytes = limit.max_bytes;
+        let mut record_count = 0;
+        let max_records = limit.max_records;
         // Feb 2022: this box / pin is necessary due to a bug in the rust
         // compiler. it has difficulty matching lifetimes across async fns and
         // closures. aggravated by using streams. issue with linked workaround:
@@ -449,15 +467,34 @@ impl State {
                         future::ready(None)
                     }
                 })
-                .take_while(move |r| {
-                    let over = byte_count <= max_bytes;
+                .map(move |r| {
+                    let bytes_under = byte_count <= max_bytes;
+                    let records_under = record_count < max_records;
                     byte_count += r.data.message.len();
-                    future::ready(over)
+                    record_count += 1;
+                    (
+                        ((byte_count, record_count), (bytes_under, records_under)),
+                        r,
+                    )
+                })
+                .take_while(move |((_, (bytes_under, records_under)), _)| {
+                    future::ready(*records_under && *bytes_under)
                 })
                 .take(limit.max_records),
         );
+        let (byte_statuses, records): (Vec<_>, Vec<_>) = stream.unzip().await;
+        let mut status = LimitStatus::Unreached(limit);
+        for ((byte_count, record_count), _) in byte_statuses {
+            if record_count >= max_records {
+                status = LimitStatus::RecordsExceeded;
+                break;
+            } else if byte_count > max_bytes {
+                status = LimitStatus::BytesExceeded;
+                break;
+            }
+        }
 
-        stream.collect().await
+        PartitionRecordResponse { records, status }
     }
 
     async fn retain(&self, partition: &Partition) {
@@ -615,6 +652,7 @@ pub mod test {
                 deindex(
                     t.get_records(RecordIndex(start), QueryLimit::records(limit))
                         .await
+                        .records
                 ),
                 slice
             );
@@ -699,6 +737,13 @@ pub mod test {
         Ok(())
     }
 
+    pub(crate) fn assert_limit_unreached(status: &LimitStatus) {
+        assert_eq!(
+            std::mem::discriminant(status),
+            std::mem::discriminant(&LimitStatus::Unreached(QueryLimit::default()))
+        );
+    }
+
     #[tokio::test]
     async fn test_get_after_compaction() -> Result<()> {
         let id = PartitionId::new("topic", "testing-roll");
@@ -746,24 +791,44 @@ pub mod test {
         }
 
         // fetch from start fast-forwards to first valid index
-        let rs = t.get_records(RecordIndex(0), QueryLimit::records(2)).await;
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = t.get_records(RecordIndex(0), QueryLimit::records(2)).await;
+        assert_eq!(status, LimitStatus::RecordsExceeded);
         let start_index = rs.iter().next().unwrap().index.clone();
         assert_eq!(deindex(rs), vec![records[3].clone(), records[4].clone()]);
 
         // iterate through from start
-        let rs = t.get_records(start_index, QueryLimit::records(2)).await;
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = t.get_records(start_index, QueryLimit::records(2)).await;
+        assert_eq!(status, LimitStatus::RecordsExceeded);
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[3].clone(), records[4].clone()]);
 
-        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = t.get_records(next_index, QueryLimit::records(2)).await;
+        assert_eq!(status, LimitStatus::RecordsExceeded);
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[5].clone(), records[6].clone()]);
 
-        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = t.get_records(next_index, QueryLimit::records(2)).await;
+        assert_limit_unreached(&status);
         let next_index = rs.iter().next_back().unwrap().index.clone() + 1;
         assert_eq!(deindex(rs), vec![records[7].clone()]);
 
-        let rs = t.get_records(next_index, QueryLimit::records(2)).await;
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = t.get_records(next_index, QueryLimit::records(2)).await;
+        assert_limit_unreached(&status);
         assert_eq!(deindex(rs), vec![]);
 
         Ok(())
@@ -832,6 +897,7 @@ pub mod test {
                                 QueryLimit::records(limit)
                             )
                             .await
+                            .records
                         ),
                         time_slice
                     );
@@ -850,7 +916,10 @@ pub mod test {
 
         let records = build_records((0..10).map(|_| (0, data.clone())));
         p.append(&records).await?;
-        let rs = p
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = p
             .get_records(
                 RecordIndex(0),
                 QueryLimit {
@@ -860,9 +929,13 @@ pub mod test {
             )
             .await;
 
+        assert_eq!(status, LimitStatus::BytesExceeded);
         assert_eq!(rs.len(), 6);
 
-        let rs = p
+        let PartitionRecordResponse {
+            records: rs,
+            status,
+        } = p
             .get_records(
                 RecordIndex(0),
                 QueryLimit {
@@ -871,6 +944,7 @@ pub mod test {
                 },
             )
             .await;
+        assert_eq!(status, LimitStatus::BytesExceeded);
         assert_eq!(rs.len(), 1);
 
         Ok(())

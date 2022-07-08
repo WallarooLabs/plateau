@@ -27,9 +27,9 @@ use tokio_stream::wrappers::{IntervalStream, SignalStream};
 use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
-use crate::partition::QueryLimit;
+use crate::partition::{LimitStatus, QueryLimit};
 use crate::slog::SlogError;
-use crate::topic::{Record, TopicIterator};
+use crate::topic::{Record, TopicIterator, TopicRecordResponse};
 
 #[derive(Deserialize)]
 struct Insert {
@@ -66,9 +66,31 @@ struct Partitions {
     partitions: HashMap<String, Span>,
 }
 
+// abstracted over lower-level status so as to not leak
+/// Status of the record request query.
+#[derive(Schema, Serialize)]
+enum RecordStatus {
+    /// All current records returned.
+    All,
+    /// Record response was limited by record limit. Additional records exist.
+    RecordLimited,
+    /// Record response was limited by payload size limit. Additional records exist.
+    ByteLimited,
+}
+impl From<LimitStatus> for RecordStatus {
+    fn from(orig: LimitStatus) -> Self {
+        match orig {
+            LimitStatus::Unreached(_) => RecordStatus::All,
+            LimitStatus::BytesExceeded => RecordStatus::ByteLimited,
+            LimitStatus::RecordsExceeded => RecordStatus::RecordLimited,
+        }
+    }
+}
+
 #[derive(Schema, Serialize)]
 struct Records {
     span: Option<Span>,
+    status: RecordStatus,
     records: Vec<String>,
 }
 
@@ -235,6 +257,7 @@ struct TopicIterationQuery {
 #[derive(Schema, Serialize)]
 struct TopicIterationReply {
     records: Vec<String>,
+    status: RecordStatus,
     next: TopicIterator,
 }
 
@@ -251,7 +274,11 @@ async fn topic_iterate(
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
 
-    let (next, rs) = if let Some(start) = query.start_time {
+    let TopicRecordResponse {
+        iter: next,
+        records: rs,
+        status,
+    } = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_records_by_time(position, times, QueryLimit::records(limit))
@@ -265,6 +292,7 @@ async fn topic_iterate(
     Ok(Json::from(TopicIterationReply {
         records: serialize_records(rs),
         next,
+        status: status.into(),
     }))
 }
 
@@ -281,7 +309,7 @@ async fn partition_get_records(
     let start_record = RecordIndex(query.start);
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let limit = QueryLimit::records(limit);
-    let rs = if let Some(start) = query.start_time {
+    let resp = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_partition(&partition_name)
@@ -296,13 +324,14 @@ async fn partition_get_records(
             .await
     };
 
-    let start = rs.get(0).map(|r| r.index);
-    let end = rs.iter().next_back().map(|r| r.index + 1);
+    let start = resp.records.get(0).map(|r| r.index);
+    let end = resp.records.iter().next_back().map(|r| r.index + 1);
     let range = start.zip(end).map(|(start, end)| start..end);
 
     Ok(Json::from(Records {
         span: range.map(Span::from_range),
-        records: serialize_records(rs.into_iter().map(|r| r.data)),
+        status: resp.status.into(),
+        records: serialize_records(resp.records.into_iter().map(|r| r.data)),
     }))
 }
 
