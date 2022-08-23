@@ -7,25 +7,24 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
-futures = "^0.3.19"
+futures = "0.3"
 log = "0.4"
 metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 thiserror = "1"
 
-openssl = { version = "*", features = ["vendored"] }
 parquet = "6.4"
 pretty_env_logger = "0.4"
 rweb = { version = "0.15", features = ["openapi"] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 tempfile = "3.2"
-tokio-stream = { version = "0.1.8", features = ["signal"] }
+tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.5.9", features = [ "chrono", "sqlite", "runtime-tokio-native-tls" ] }
+sqlx = { version = "0.5", features = [ "chrono", "sqlite", "runtime-tokio-rustls" ] }
 
 [dev-dependencies]
 itermore = "0.1"
-reqwest = { version = "0.11", features = ["json"] }
-uuid = { version = "1.1.2", features = ["v4", "fast-rng"]}
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1.1", features = ["v4", "fast-rng"]}
