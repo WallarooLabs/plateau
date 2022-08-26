@@ -13,6 +13,8 @@ metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 thiserror = "1"
 
+lazy_static = "1"
+openssl = { version = "*", features = ["vendored"] }
 parquet = "6.4"
 pretty_env_logger = "0.4"
 rweb = { version = "0.15", features = ["openapi"] }

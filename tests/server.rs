@@ -1,3 +1,4 @@
+use plateau::http;
 use reqwest::Client;
 use serde_json::json;
 
@@ -110,15 +111,18 @@ const TEST_MESSAGE: &str = "this is my test message. it's not that long but it's
 it just needs to be long enough that we can start hitting the byte limit before we hit \
 the default record limit.";
 
-fn setup() -> (Client, String) {
+async fn setup() -> (Client, String, http::TestServer) {
     pretty_env_logger::try_init().ok(); // called multiple times, so ignore errors
-    (Client::new(), format!("topic-{}", uuid::Uuid::new_v4()))
+    (
+        Client::new(),
+        format!("topic-{}", uuid::Uuid::new_v4()),
+        http::TestServer::new().await.unwrap(),
+    )
 }
 
 #[tokio::test]
-#[ignore]
 async fn topic_status_all() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     repeat_append(
         &client,
@@ -136,9 +140,8 @@ async fn topic_status_all() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn topic_status_record_limited() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     repeat_append(
         &client,
@@ -156,9 +159,8 @@ async fn topic_status_record_limited() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn topic_status_byte_limited() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
     let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
@@ -181,9 +183,8 @@ async fn topic_status_byte_limited() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn partition_status_all() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     repeat_append(
         &client,
@@ -204,9 +205,8 @@ async fn partition_status_all() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn partition_status_record_limited() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     repeat_append(
         &client,
@@ -228,9 +228,8 @@ async fn partition_status_record_limited() {
 }
 
 #[tokio::test]
-#[ignore]
 async fn partition_status_byte_limited() {
-    let (client, topic_name) = setup();
+    let (client, topic_name, _server) = setup().await;
 
     const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
     let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
