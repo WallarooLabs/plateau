@@ -83,6 +83,14 @@ impl Segment {
         let reader = SerializedFileReader::new(file)?;
         Ok(SegmentReader { reader })
     }
+
+    pub(crate) fn destroy(&self) -> Result<()> {
+        fs::remove_file(self.path.as_path()).map_err(|e| e.into())
+    }
+
+    pub(crate) fn validate(&self) -> bool {
+        self.read().is_ok()
+    }
 }
 
 pub(crate) struct SegmentWriter {
@@ -136,6 +144,14 @@ impl SegmentWriter {
     pub(crate) fn close(mut self) -> Result<usize> {
         self.writer.close()?;
         self.file.sync_data()?;
+
+        // NOTE: the file data is now synchronized, but the file itself may not appear in the
+        // parent directory on crash unless we fsync that too.
+        let mut parent = self.path.clone();
+        parent.pop();
+        let directory = fs::File::open(&parent)?;
+        directory.sync_all()?;
+
         self.size_estimate()
     }
 }

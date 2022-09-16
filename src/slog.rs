@@ -27,7 +27,6 @@ use log::trace;
 use metrics::counter;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
-use std::fs;
 use std::ops::{Add, AddAssign, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -49,6 +48,14 @@ pub struct SegmentIndex(pub usize);
 impl SegmentIndex {
     pub fn next(&self) -> Self {
         SegmentIndex(self.0 + 1)
+    }
+
+    pub fn prev(&self) -> Option<Self> {
+        if self.0 > 0 {
+            Some(SegmentIndex(self.0 - 1))
+        } else {
+            None
+        }
     }
 }
 
@@ -114,9 +121,9 @@ pub(crate) struct WriteResult {
 }
 
 impl Slog {
-    //! Because a slog is stateless, whatever attaches it is responsible for processing
-    //! commit events. The channel is bounded to a size of one; if it is not consumed,
-    //! the writer thread will immediately stall.
+    /// Because a slog is stateless, whatever attaches it is responsible for processing
+    /// commit events. The channel is bounded to a size of one; if it is not consumed,
+    /// the writer thread will immediately stall.
     pub fn attach(
         root: PathBuf,
         name: String,
@@ -143,16 +150,12 @@ impl Slog {
         (slog, rx)
     }
 
-    fn segment_path(root: &PathBuf, name: &str, segment_ix: SegmentIndex) -> PathBuf {
+    fn segment_path(root: &Path, name: &str, segment_ix: SegmentIndex) -> PathBuf {
         let file = PathBuf::from(format!("{}-{}", name, segment_ix.0));
-        root.join(file)
+        [root, file.as_path()].into_iter().collect()
     }
 
-    pub(crate) fn segment_from_name(
-        root: &PathBuf,
-        name: &str,
-        segment_ix: SegmentIndex,
-    ) -> Segment {
+    pub(crate) fn segment_from_name(root: &Path, name: &str, segment_ix: SegmentIndex) -> Segment {
         Segment::at(Slog::segment_path(root, name, segment_ix))
     }
 
@@ -202,8 +205,7 @@ impl Slog {
     }
 
     pub(crate) fn destroy(&self, segment_ix: SegmentIndex) -> Result<()> {
-        fs::remove_file(Slog::segment_path(&self.root, &self.name, segment_ix))?;
-        Ok(())
+        self.get_segment(segment_ix).destroy()
     }
 
     pub(crate) async fn cached_segment_data(&self) -> Vec<SegmentData> {

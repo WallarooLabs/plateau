@@ -28,7 +28,7 @@ use futures::future::OptionFuture;
 use futures::stream::{Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
-use log::{info, trace};
+use log::{error, info, trace};
 use metrics::{counter, gauge};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -144,21 +144,17 @@ impl Partition {
         if !Path::exists(&root) {
             fs::create_dir(&root).unwrap();
         }
-        let current = manifest.get_max_segment(&id).await;
-        let record = OptionFuture::from(current.map(|ix| {
-            manifest
-                .get_segment_data(id.segment_id(ix))
-                .map(|data| data.unwrap().records.end)
-        }))
-        .await
-        .unwrap_or(RecordIndex(0));
-        let segment = current.map(|s| s.next()).unwrap_or(SegmentIndex(0));
+
+        let slog_name = Self::slog_name(&id);
+        let (segment, record) =
+            Self::find_starting_index(&id, root.as_path(), &slog_name, &manifest).await;
+
         let checkpoint = InternalIndex {
             segment,
             record: SegmentRecordIndex(0),
         };
-        let (messages, mut writes) =
-            Slog::attach(root.clone(), Partition::slog_name(&id), checkpoint, record);
+
+        let (messages, mut writes) = Slog::attach(root.clone(), slog_name, checkpoint, record);
 
         let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
@@ -184,6 +180,41 @@ impl Partition {
             id,
             config,
         }
+    }
+
+    async fn find_starting_index(
+        id: &PartitionId,
+        root: &Path,
+        slog_name: &str,
+        manifest: &Manifest,
+    ) -> (SegmentIndex, RecordIndex) {
+        let mut current = manifest.get_max_segment(id).await;
+        let mut index = None;
+
+        // rewind until we find a starting index based upon a good segment
+        while index.is_none() {
+            if let Some(ix) = current {
+                let segment = Slog::segment_from_name(root, slog_name, ix);
+                let data = manifest.get_segment_data(id.segment_id(ix)).await;
+                let valid = segment.validate();
+                index = match data {
+                    Some(data) if valid => Some((ix.next(), data.records.end)),
+                    _ => {
+                        error!("bad {:?} file: {} catalog: {}", ix, valid, data.is_some());
+                        if let Err(e) = segment.destroy() {
+                            error!("error destroying {:?}: {}", ix, e);
+                        }
+                        manifest.remove_segment(id.segment_id(ix)).await;
+                        current = ix.prev();
+                        None
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        index.unwrap_or((SegmentIndex(0), RecordIndex(0)))
     }
 
     #[allow(dead_code)]
@@ -552,15 +583,12 @@ pub mod test {
         rs.into_iter().map(|r| r.data).collect()
     }
 
-    pub async fn partition() -> Result<(TempDir, Partition)> {
+    pub async fn partition(config: Config) -> Result<(TempDir, Partition)> {
         let id = PartitionId::new("topic", "testing");
         let dir = tempdir()?;
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        Ok((
-            dir,
-            Partition::attach(root, manifest, id, Config::default()).await,
-        ))
+        Ok((dir, Partition::attach(root, manifest, id, config).await))
     }
 
     #[tokio::test]
@@ -599,24 +627,18 @@ pub mod test {
         Ok(())
     }
 
-    async fn test_rolling_get(commit: bool) -> Result<()> {
-        let id = PartitionId::new("topic", "testing-roll");
-        let dir = tempdir().unwrap();
-        let root = PathBuf::from(dir.path());
-        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let t = Partition::attach(
-            root,
-            manifest,
-            id,
-            Config {
-                roll: Rolling {
-                    max_segment_index: 2,
-                    ..Rolling::default()
-                },
-                ..Config::default()
+    fn segment_3s() -> Config {
+        Config {
+            roll: Rolling {
+                max_segment_index: 2,
+                ..Rolling::default()
             },
-        )
-        .await;
+            ..Config::default()
+        }
+    }
+
+    async fn test_rolling_get(commit: bool) -> Result<()> {
+        let (_dir, t) = partition(segment_3s()).await?;
 
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
@@ -670,69 +692,132 @@ pub mod test {
         test_rolling_get(false).await
     }
 
+    type PartitionSpec = (Manifest, PartitionId, Config);
+    fn to_spec(p: Partition) -> PartitionSpec {
+        (p.manifest, p.id, p.config)
+    }
+
+    async fn reattach(dir: &TempDir, p: PartitionSpec) -> Partition {
+        let root = PathBuf::from(dir.path());
+        Partition::attach(root, p.0, p.1, p.2).await
+    }
+
     #[tokio::test]
     async fn test_durability() -> Result<()> {
-        let id = PartitionId::new("topic", "testing-roll");
-        let dir = tempdir().unwrap();
-        let root = PathBuf::from(dir.path());
-        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
+        let records: Vec<_> = (0..(3 * 10))
             .into_iter()
-            .map(|message| Record {
+            .map(|ix| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: ByteArray::from(format!("record-{}", ix).as_str()),
             })
             .collect();
-        {
-            let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-            let t = Partition::attach(
-                root.clone(),
-                manifest,
-                id.clone(),
-                Config {
-                    roll: Rolling {
-                        max_segment_index: 2,
-                        ..Rolling::default()
-                    },
-                    ..Config::default()
-                },
-            )
-            .await;
 
+        let (dir, part) = partition(segment_3s()).await?;
+        let spec = {
             for record in records.iter() {
-                t.append(&vec![record.clone()]).await?;
+                part.append(&vec![record.clone()]).await?;
             }
-            t.commit().await?;
-        }
+            part.commit().await?;
+            to_spec(part)
+        };
 
         {
-            let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-            let t = Partition::attach(
-                root,
-                manifest,
-                id,
-                Config {
-                    roll: Rolling {
-                        max_segment_index: 2,
-                        ..Rolling::default()
-                    },
-                    ..Config::default()
-                },
-            )
-            .await;
+            let part = reattach(&dir, spec).await;
 
             for (ix, record) in records.iter().enumerate() {
                 assert_eq!(
-                    t.get_record_by_index(RecordIndex(ix)).await,
+                    part.get_record_by_index(RecordIndex(ix)).await,
                     Some(record.clone()),
                     "record {}",
                     ix
                 );
             }
             assert_eq!(
-                t.get_record_by_index(RecordIndex(records.len())).await,
+                part.get_record_by_index(RecordIndex(records.len())).await,
                 None
             );
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_recovery() -> Result<()> {
+        let mut records: Vec<_> = (0..(3 * 10))
+            .into_iter()
+            .map(|ix| Record {
+                time: Utc.timestamp(0, 0),
+                message: ByteArray::from(format!("record-{}", ix).as_str()),
+            })
+            .collect();
+
+        let (dir, part) = partition(segment_3s()).await?;
+        {
+            for record in records.iter() {
+                part.append(&vec![record.clone()]).await?;
+            }
+            part.commit().await?;
+        }
+
+        let spec = to_spec(part);
+
+        // let's commit every imaginable sin here
+        let manifest = &spec.0;
+        let last = manifest.get_max_segment(&spec.1).await.unwrap();
+        let slog_name = Partition::slog_name(&spec.1);
+        let root = PathBuf::from(dir.path());
+
+        // first, corrupt the last file.
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
+        let f = std::fs::File::options().write(true).open(segment.path())?;
+        f.set_len(f.metadata().unwrap().len() - 10)?;
+
+        // delete the next data entry from the manifest
+        let ix = last.prev().unwrap();
+        manifest.remove_segment(spec.1.segment_id(ix)).await;
+
+        // delete the next file entirely
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());
+        segment.destroy()?;
+
+        records.truncate(records.len() - 3 * 3);
+        let part = reattach(&dir, spec).await;
+
+        for (ix, record) in records.iter().enumerate() {
+            assert_eq!(
+                part.get_record_by_index(RecordIndex(ix)).await,
+                Some(record.clone()),
+                "record {}",
+                ix
+            );
+        }
+        assert_eq!(
+            part.get_record_by_index(RecordIndex(records.len())).await,
+            None
+        );
+
+        // now, test that we can write and persist still.
+        for record in records.iter() {
+            part.append(&vec![record.clone()]).await?;
+        }
+        part.commit().await?;
+
+        let spec = to_spec(part);
+        let part = reattach(&dir, spec).await;
+        let doubled: Vec<_> = records.iter().chain(records.iter()).cloned().collect();
+
+        for (ix, record) in doubled.iter().enumerate() {
+            assert_eq!(
+                part.get_record_by_index(RecordIndex(ix)).await,
+                Some(record.clone()),
+                "record {}",
+                ix
+            );
+        }
+        assert_eq!(
+            part.get_record_by_index(RecordIndex(doubled.len())).await,
+            None
+        );
 
         Ok(())
     }
@@ -910,7 +995,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_query_byte_limit() -> Result<()> {
-        let (_dir, p) = partition().await?;
+        let (_dir, p) = partition(Config::default()).await?;
 
         let data = "x".to_string().repeat(50);
 
