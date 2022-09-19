@@ -2,7 +2,6 @@ use ::log::info;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future;
-use lazy_static::lazy_static;
 use parquet::data_type::ByteArray;
 use rweb::*;
 use serde::{Deserialize, Serialize};
@@ -13,10 +12,10 @@ use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
 use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
+use tracing::Instrument;
 use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
@@ -113,7 +112,10 @@ enum ErrorReply {
 }
 impl warp::reject::Reject for ErrorReply {}
 
-pub fn serve<I>(addr: I, catalog: Catalog) -> Pin<Box<dyn Future<Output = ()> + Send>>
+pub async fn serve<I>(
+    addr: I,
+    catalog: Catalog,
+) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>)
 where
     I: Into<SocketAddr> + Send + 'static,
 {
@@ -127,11 +129,15 @@ where
             .or(partition_get_records(catalog))
     });
 
-    Box::pin(rweb::serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error)).run(addr))
-}
+    let server = rweb::serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error));
 
-lazy_static! {
-    static ref SINGLE_TEST_SERVER: Mutex<()> = Mutex::new(());
+    // Ideally warp would have something like a `run_ephemeral`, but here we
+    // are. it's only three lines to copy from Server::run
+    let (addr, fut) = server.bind_ephemeral(addr);
+    let span = tracing::info_span!("Server::run", ?addr);
+    tracing::info!(parent: &span, "listening on http://{}", addr);
+
+    (addr, Box::pin(fut.instrument(span)))
 }
 
 /// A RAII wrapper around a full plateau test server.
@@ -141,10 +147,10 @@ lazy_static! {
 /// Currently, we assume that only one test server can run at a given time to
 /// prevent port conflicts.
 pub struct TestServer {
+    addr: SocketAddr,
     end_tx: mpsc::Sender<()>,
     pub catalog: Catalog,
     pub temp: TempDir,
-    _guard: MutexGuard<'static, ()>,
 }
 
 impl TestServer {
@@ -155,20 +161,21 @@ impl TestServer {
         let catalog = Catalog::attach(root).await;
 
         let serve_catalog = catalog.clone();
+        let (addr, server) = serve(([127, 0, 0, 1], 0), serve_catalog).await;
         tokio::spawn(async move {
-            future::select(
-                Box::pin(end_rx.recv()),
-                serve(([127, 0, 0, 1], 3030), serve_catalog),
-            )
-            .await;
+            future::select(Box::pin(end_rx.recv()), server).await;
         });
 
         Ok(TestServer {
+            addr,
             end_tx,
             catalog,
             temp,
-            _guard: SINGLE_TEST_SERVER.lock().unwrap(),
         })
+    }
+
+    pub fn base(&self) -> String {
+        format!("http://{}:{}", self.addr.ip(), self.addr.port())
     }
 }
 

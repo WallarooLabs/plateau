@@ -41,7 +41,7 @@ async fn main() {
 
     future::select(
         Box::pin(stream),
-        http::serve(([0, 0, 0, 0], 3030), catalog.clone()),
+        http::serve(([0, 0, 0, 0], 3030), catalog.clone()).await.1,
     )
     .await;
 }

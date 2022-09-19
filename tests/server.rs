@@ -1,8 +1,7 @@
 use plateau::http;
+use plateau::http::TestServer;
 use reqwest::Client;
 use serde_json::json;
-
-const BASE_URL: &'static str = "http://localhost:3030";
 
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
     let records: Vec<_> = vec![body.to_string()]
@@ -64,21 +63,31 @@ async fn fetch_partition_records(
     result
 }
 
-fn append_url(topic_name: impl AsRef<str>, partition_name: impl AsRef<str>) -> String {
+fn append_url(
+    server: &TestServer,
+    topic_name: impl AsRef<str>,
+    partition_name: impl AsRef<str>,
+) -> String {
     format!(
-        "{BASE_URL}/topic/{}/partition/{}",
+        "{}/topic/{}/partition/{}",
+        server.base(),
         topic_name.as_ref(),
         partition_name.as_ref()
     )
 }
 
-fn topic_records_url(topic_name: impl AsRef<str>) -> String {
-    format!("{BASE_URL}/topic/{}/records", topic_name.as_ref())
+fn topic_records_url(server: &TestServer, topic_name: impl AsRef<str>) -> String {
+    format!("{}/topic/{}/records", server.base(), topic_name.as_ref())
 }
 
-fn partition_records_url(topic_name: impl AsRef<str>, partition_name: impl AsRef<str>) -> String {
+fn partition_records_url(
+    server: &TestServer,
+    topic_name: impl AsRef<str>,
+    partition_name: impl AsRef<str>,
+) -> String {
     format!(
-        "{BASE_URL}/topic/{}/partition/{}/records",
+        "{}/topic/{}/partition/{}/records",
+        server.base(),
         topic_name.as_ref(),
         partition_name.as_ref()
     )
@@ -122,30 +131,34 @@ async fn setup() -> (Client, String, http::TestServer) {
 
 #[tokio::test]
 async fn topic_status_all() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         10,
     )
     .await;
 
     // test unlimited request, should get all records
-    let json_response =
-        fetch_topic_records(&client, topic_records_url(&topic_name).as_str(), None).await;
+    let json_response = fetch_topic_records(
+        &client,
+        topic_records_url(&server, &topic_name).as_str(),
+        None,
+    )
+    .await;
     assert_status(&json_response, "All");
     assert_response_length(&json_response, 10);
 }
 
 #[tokio::test]
 async fn topic_status_record_limited() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         10,
     )
@@ -153,14 +166,14 @@ async fn topic_status_record_limited() {
 
     // test record-limited request, should get 'RecordLimited' response and fewer results
     let json_response =
-        fetch_topic_records(&client, topic_records_url(&topic_name).as_str(), 5).await;
+        fetch_topic_records(&client, topic_records_url(&server, &topic_name).as_str(), 5).await;
     assert_status(&json_response, "RecordLimited");
     assert_response_length(&json_response, 5);
 }
 
 #[tokio::test]
 async fn topic_status_byte_limited() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
     let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
@@ -168,14 +181,18 @@ async fn topic_status_byte_limited() {
     let message_limit = DEFAULT_MAX_BYTES / test_messsage_bytelen;
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         // add one more message so that we're beyond the limit
         message_limit + 1,
     )
     .await;
-    let json_response =
-        fetch_topic_records(&client, topic_records_url(&topic_name).as_str(), None).await;
+    let json_response = fetch_topic_records(
+        &client,
+        topic_records_url(&server, &topic_name).as_str(),
+        None,
+    )
+    .await;
     assert_status(&json_response, "ByteLimited");
     // plateau always finishes the current record when we hit the byte limit, so we expect to have
     // one more than the actual hard limit caculated above
@@ -184,11 +201,11 @@ async fn topic_status_byte_limited() {
 
 #[tokio::test]
 async fn partition_status_all() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         10,
     )
@@ -196,7 +213,7 @@ async fn partition_status_all() {
 
     let json_response = fetch_partition_records(
         &client,
-        partition_records_url(&topic_name, PARTITION_NAME).as_str(),
+        partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         None,
     )
     .await;
@@ -206,11 +223,11 @@ async fn partition_status_all() {
 
 #[tokio::test]
 async fn partition_status_record_limited() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         10,
     )
@@ -219,7 +236,7 @@ async fn partition_status_record_limited() {
     // test record-limited request, should get 'RecordLimited' response and fewer results
     let json_response = fetch_partition_records(
         &client,
-        partition_records_url(&topic_name, PARTITION_NAME).as_str(),
+        partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         5,
     )
     .await;
@@ -229,7 +246,7 @@ async fn partition_status_record_limited() {
 
 #[tokio::test]
 async fn partition_status_byte_limited() {
-    let (client, topic_name, _server) = setup().await;
+    let (client, topic_name, server) = setup().await;
 
     const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
     let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
@@ -237,7 +254,7 @@ async fn partition_status_byte_limited() {
     let message_limit = DEFAULT_MAX_BYTES / test_messsage_bytelen;
     repeat_append(
         &client,
-        append_url(&topic_name, PARTITION_NAME).as_str(),
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
         TEST_MESSAGE,
         // add one more message so that we're beyond the limit
         message_limit + 1,
@@ -245,7 +262,7 @@ async fn partition_status_byte_limited() {
     .await;
     let json_response = fetch_partition_records(
         &client,
-        partition_records_url(&topic_name, PARTITION_NAME).as_str(),
+        partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         None,
     )
     .await;
