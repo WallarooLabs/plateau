@@ -123,6 +123,7 @@ where
 
     let (spec, filter) = openapi::spec().build(move || {
         healthcheck(catalog.clone())
+            .or(get_topics(catalog.clone()))
             .or(topic_append(catalog.clone()))
             .or(topic_iterate(catalog.clone()))
             .or(topic_get_partitions(catalog.clone()))
@@ -197,6 +198,25 @@ async fn healthcheck(#[data] catalog: Catalog) -> Result<Json<serde_json::Value>
     } else {
         Err(warp::reject::custom(ErrorReply::NoHeartbeat))
     }
+}
+
+#[derive(Schema, Serialize)]
+struct Topics {
+    topics: Vec<Topic>,
+}
+
+#[derive(Schema, Serialize)]
+struct Topic {
+    name: String,
+}
+
+#[get("/topics")]
+#[openapi(id = "get_topics")]
+async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection> {
+    let topics = catalog.list_topics().await;
+    Ok(Json::from(Topics {
+        topics: topics.into_iter().map(|name| Topic { name }).collect(),
+    }))
 }
 
 #[post("/topic/{topic_name}/partition/{partition_name}")]

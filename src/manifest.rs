@@ -469,6 +469,18 @@ impl Manifest {
         .await
         .unwrap()
     }
+
+    pub async fn get_topics(&self) -> Vec<String> {
+        sqlx::query(
+            "
+            SELECT DISTINCT topic FROM segments
+        ",
+        )
+        .map(|row: SqliteRow| row.get::<String, _>(0))
+        .fetch_all(&self.pool)
+        .await
+        .unwrap()
+    }
 }
 
 #[cfg(test)]
@@ -620,6 +632,7 @@ mod test {
             state.get_partitions(a.topic()).await,
             vec!["a".to_string(), "b".to_string()]
         );
+        assert_eq!(state.get_topics().await, vec![a.topic()]);
     }
 
     #[tokio::test]

@@ -1,7 +1,9 @@
+use anyhow::Result;
 use plateau::http;
 use plateau::http::TestServer;
 use reqwest::Client;
 use serde_json::json;
+use std::time::Duration;
 
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
     let records: Vec<_> = vec![body.to_string()]
@@ -61,6 +63,15 @@ async fn fetch_partition_records(
         .await
         .unwrap();
     result
+}
+
+async fn get_topics(client: &Client, url: &str) -> Result<serde_json::Value> {
+    let response = client.get(url).send().await?.error_for_status()?;
+    Ok(response.json::<serde_json::Value>().await?)
+}
+
+fn topic_url(server: &TestServer) -> String {
+    format!("{}/topics", server.base(),)
 }
 
 fn append_url(
@@ -130,9 +141,13 @@ async fn setup() -> (Client, String, http::TestServer) {
 }
 
 #[tokio::test]
-async fn topic_status_all() {
+async fn topic_status_all() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
+    assert_eq!(
+        get_topics(&client, &topic_url(&server)).await?,
+        json!({"topics": []})
+    );
     repeat_append(
         &client,
         append_url(&server, &topic_name, PARTITION_NAME).as_str(),
@@ -140,6 +155,15 @@ async fn topic_status_all() {
         10,
     )
     .await;
+
+    server.catalog.checkpoint().await;
+    // hack until we have a true commit mechanism (requires partial parquet file support)
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    assert_eq!(
+        get_topics(&client, &topic_url(&server)).await?,
+        json!({"topics": [{"name": topic_name.clone()}]})
+    );
 
     // test unlimited request, should get all records
     let json_response = fetch_topic_records(
@@ -150,6 +174,8 @@ async fn topic_status_all() {
     .await;
     assert_status(&json_response, "All");
     assert_response_length(&json_response, 10);
+
+    Ok(())
 }
 
 #[tokio::test]

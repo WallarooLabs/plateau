@@ -98,6 +98,10 @@ impl Catalog {
         size > retain.max_bytes
     }
 
+    pub async fn list_topics(&self) -> Vec<String> {
+        self.manifest.get_topics().await
+    }
+
     pub async fn get_topic(&self, name: &str) -> RwLockReadGuard<'_, Topic> {
         let read = self.topics.read().await;
         let v = RwLockReadGuard::try_map(read, |m| m.get(name));
