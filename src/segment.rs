@@ -1,17 +1,31 @@
 //! A segment contains a bundle of time and logically indexed records.
 //!
 //! Currently, the only supported segment format is local Parquet files.
-use anyhow::{bail, Result};
+use anyhow::Result;
+use arrow2::array::{
+    MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
+};
+use arrow2::chunk::Chunk;
+use arrow2::datatypes::{DataType, Field, Schema};
+use arrow2::io::parquet::read::FileReader as FileReader2;
+use arrow2::io::parquet::read::{infer_schema, read_metadata};
+use arrow2::io::parquet::write::FileWriter as FileWriter2;
+use arrow2::io::parquet::write::{
+    CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
+};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::convert::TryFrom;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
-use std::{fs, path::PathBuf, sync::Arc};
+#[cfg(test)]
+use std::sync::Arc;
+use std::{fs, path::PathBuf};
 
+use parquet::data_type::ByteArray;
+#[cfg(test)]
 use parquet::{
     column::reader::ColumnReader,
     column::writer::ColumnWriter,
-    data_type::ByteArray,
     file::{
         properties::WriterProperties,
         reader::{FileReader, SerializedFileReader},
@@ -52,6 +66,15 @@ impl Segment {
         &self.path
     }
 
+    fn file(&self) -> Result<fs::File> {
+        Ok(fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.path)?)
+    }
+
+    #[cfg(test)]
     pub(crate) fn create(&self) -> Result<SegmentWriter> {
         // TODO: better schema for timestamps.
         // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
@@ -64,20 +87,46 @@ impl Segment {
         let schema = Arc::new(parse_message_type(message_type)?);
         let props = Arc::new(WriterProperties::builder().build());
 
-        let file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&self.path)?;
+        let file = self.file()?;
         let writer = SerializedFileWriter::new(file.try_clone()?, schema, props)?;
 
         Ok(SegmentWriter {
             path: self.path.clone(),
             file,
-            writer,
+            writer: Writer::Arrow(writer),
         })
     }
 
+    pub(crate) fn create2(&self) -> Result<SegmentWriter> {
+        // TODO: better schema for timestamps.
+        // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
+        let time = Field::new("time", DataType::Int64, true);
+        let message = Field::new("message", DataType::Utf8, true);
+        let schema = Schema::from(vec![time, message]);
+
+        // TODO: ideally we'd use compression, but this currently causes nasty dependency issues
+        // between parquet2 and parquet
+        let options = WriteOptions {
+            write_statistics: true,
+            compression: CompressionOptions::Uncompressed,
+            version: Version::V2,
+        };
+
+        let file = self.file()?;
+        let writer = FileWriter2::try_new(file.try_clone()?, schema.clone(), options)?;
+        let writer = WriteArrow2 {
+            writer,
+            schema,
+            options,
+        };
+        Ok(SegmentWriter {
+            path: self.path.clone(),
+            file,
+            writer: Writer::Arrow2(writer),
+        })
+    }
+
+    #[cfg(test)]
     pub(crate) fn read(&self) -> Result<SegmentReader> {
         let file = fs::File::open(&self.path)?;
         let reader = SerializedFileReader::new(file)?;
@@ -89,19 +138,48 @@ impl Segment {
     }
 
     pub(crate) fn validate(&self) -> bool {
-        self.read().is_ok()
+        self.read2().is_ok()
     }
+
+    pub(crate) fn read2(&self) -> Result<SegmentReader2> {
+        let file = fs::File::open(&self.path)?;
+        Ok(SegmentReader2::new(file)?)
+    }
+}
+
+enum Writer {
+    #[cfg(test)]
+    Arrow(SerializedFileWriter<fs::File>),
+    Arrow2(WriteArrow2),
+}
+
+struct WriteArrow2 {
+    writer: FileWriter2<fs::File>,
+    schema: Schema,
+    options: WriteOptions,
 }
 
 pub(crate) struct SegmentWriter {
     path: PathBuf,
     file: fs::File,
-    writer: SerializedFileWriter<std::fs::File>,
+    writer: Writer,
 }
 
 impl SegmentWriter {
-    pub(crate) fn log(&mut self, mut record: Vec<Record>) -> Result<()> {
-        let mut row_group_writer = self.writer.next_row_group()?;
+    pub(crate) fn log(&mut self, record: Vec<Record>) -> Result<()> {
+        match &mut self.writer {
+            #[cfg(test)]
+            Writer::Arrow(ref mut sfw) => Self::log_arrow(sfw, record),
+            Writer::Arrow2(ref mut fw) => Self::log_arrow2(fw, record),
+        }
+    }
+
+    #[cfg(test)]
+    fn log_arrow(
+        writer: &mut SerializedFileWriter<fs::File>,
+        mut record: Vec<Record>,
+    ) -> Result<()> {
+        let mut row_group_writer = writer.next_row_group()?;
 
         let mut times = vec![];
         let mut messages = vec![];
@@ -116,7 +194,7 @@ impl SegmentWriter {
                 ColumnWriter::Int64ColumnWriter(ref mut typed_writer) => {
                     typed_writer.write_batch(&times, None, None)?;
                 }
-                _ => bail!("invalid column type"),
+                _ => anyhow::bail!("invalid column type"),
             };
             row_group_writer.close_column(col_writer)?;
         }
@@ -126,12 +204,35 @@ impl SegmentWriter {
                 ColumnWriter::ByteArrayColumnWriter(ref mut typed_writer) => {
                     typed_writer.write_batch(&messages, None, None)?;
                 }
-                _ => bail!("invalid column type"),
+                _ => anyhow::bail!("invalid column type"),
             };
             row_group_writer.close_column(col_writer)?;
         }
 
-        self.writer.close_row_group(row_group_writer)?;
+        writer.close_row_group(row_group_writer)?;
+        Ok(())
+    }
+
+    fn log_arrow2(writer: &mut WriteArrow2, mut record: Vec<Record>) -> Result<()> {
+        let mut times = MutablePrimitiveArray::<i64>::new();
+        let mut messages = MutableUtf8Array::<i32>::new();
+
+        for r in record.drain(..) {
+            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+            times.push(Some(dt.num_milliseconds()));
+            messages.push(Some(r.message.as_utf8()?));
+        }
+
+        let iter = vec![Chunk::try_new(vec![times.as_box(), messages.as_box()])];
+
+        let encodings = vec![vec![Encoding::Plain], vec![Encoding::Plain]];
+        let row_groups =
+            RowGroupIterator::try_new(iter.into_iter(), &writer.schema, writer.options, encodings)?;
+
+        for group in row_groups {
+            writer.writer.write(group?)?;
+        }
+
         Ok(())
     }
 
@@ -142,7 +243,15 @@ impl SegmentWriter {
     }
 
     pub(crate) fn close(mut self) -> Result<usize> {
-        self.writer.close()?;
+        match &mut self.writer {
+            #[cfg(test)]
+            Writer::Arrow(ref mut w) => {
+                w.close()?;
+            }
+            Writer::Arrow2(ref mut w2) => {
+                w2.writer.end(None)?;
+            }
+        }
         self.file.sync_data()?;
 
         // NOTE: the file data is now synchronized, but the file itself may not appear in the
@@ -156,10 +265,12 @@ impl SegmentWriter {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct SegmentReader {
     reader: SerializedFileReader<fs::File>,
 }
 
+#[cfg(test)]
 impl SegmentReader {
     pub(crate) fn into_chunk_iter(self) -> impl Iterator<Item = Result<Vec<Record>>> {
         let metadata = self.reader.metadata().clone();
@@ -196,7 +307,7 @@ impl SegmentReader {
                         read += batch.0;
                     }
                 }
-                _ => bail!("invalid column type"),
+                _ => anyhow::bail!("invalid column type"),
             };
 
             let mut column_reader = row_group_reader.get_column_reader(1)?;
@@ -213,7 +324,7 @@ impl SegmentReader {
                         read += batch.0;
                     }
                 }
-                _ => bail!("invalid column type"),
+                _ => anyhow::bail!("invalid column type"),
             };
 
             let result: Vec<_> = tvs
@@ -226,6 +337,54 @@ impl SegmentReader {
                 .collect();
 
             Ok(result)
+        })
+    }
+}
+
+pub(crate) struct SegmentReader2 {
+    reader: FileReader2<fs::File>,
+}
+
+impl SegmentReader2 {
+    fn new(mut f: fs::File) -> Result<Self> {
+        let metadata = read_metadata(&mut f)?;
+        let schema = infer_schema(&metadata)?;
+
+        let schema = schema.filter(|_, f| f.name == "time" || f.name == "message");
+
+        Ok(SegmentReader2 {
+            reader: FileReader2::new(f, metadata.row_groups, schema, None, None, None),
+        })
+    }
+
+    pub(crate) fn into_chunk_iter(self) -> impl Iterator<Item = Result<Vec<Record>>> {
+        self.reader.into_iter().map(|chunk| {
+            let arrays = chunk?.into_arrays();
+            let time = arrays
+                .get(0)
+                .ok_or(anyhow::anyhow!("missing 'time' column"))
+                .and_then(|arr| {
+                    arr.as_any()
+                        .downcast_ref::<PrimitiveArray<i64>>()
+                        .ok_or(anyhow::anyhow!("invalid 'time' array"))
+                })?;
+            let message = arrays
+                .get(1)
+                .ok_or(anyhow::anyhow!("missing 'message' column"))
+                .and_then(|arr| {
+                    arr.as_any()
+                        .downcast_ref::<Utf8Array<i32>>()
+                        .ok_or(anyhow::anyhow!("invalid 'message' array"))
+                })?;
+
+            Ok(time
+                .values_iter()
+                .zip(message.values_iter())
+                .map(|(tv, m)| Record {
+                    time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
+                    message: ByteArray::from(m),
+                })
+                .collect())
         })
     }
 }
@@ -261,6 +420,60 @@ pub mod test {
         assert!(size > 0);
 
         let r = s.read()?;
+        assert_eq!(
+            r.into_chunk_iter()
+                .flat_map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            records
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn round_trip1_2() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(PathBuf::from(path));
+        let records: Vec<_> = build_records(
+            (0..20)
+                .into_iter()
+                .map(|ix| (ix, format!("message-{}", ix))),
+        );
+
+        let mut w = s.create()?;
+        w.log(records[0..10].to_vec())?;
+        w.log(records[10..].to_vec())?;
+        let size = w.close()?;
+        assert!(size > 0);
+
+        let r = s.read2()?;
+        assert_eq!(
+            r.into_chunk_iter()
+                .flat_map(|b| b.unwrap())
+                .collect::<Vec<_>>(),
+            records
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn round_trip2() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(PathBuf::from(path));
+        let records: Vec<_> = build_records(
+            (0..20)
+                .into_iter()
+                .map(|ix| (ix, format!("message-{}", ix))),
+        );
+
+        let mut w = s.create2()?;
+        w.log(records[0..10].to_vec())?;
+        w.log(records[10..].to_vec())?;
+        let size = w.close()?;
+        assert!(size > 0);
+
+        let r = s.read2()?;
         assert_eq!(
             r.into_chunk_iter()
                 .flat_map(|b| b.unwrap())

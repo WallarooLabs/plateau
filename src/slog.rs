@@ -193,7 +193,7 @@ impl Slog {
 
         Box::new(
             segment
-                .read()
+                .read2()
                 .unwrap()
                 .into_chunk_iter()
                 .map(|rs| rs.unwrap()),
@@ -385,7 +385,7 @@ fn spawn_slog_thread(
                         }
                     });
                     let (ref mut writer, _) = current.get_or_insert_with(|| {
-                        (new_segment.create().expect("segment creation"), segment)
+                        (new_segment.create2().expect("segment creation"), segment)
                     });
                     let count = append_records.len();
                     writer.log(append_records).expect("added records");
