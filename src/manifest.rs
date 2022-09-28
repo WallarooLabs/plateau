@@ -112,7 +112,6 @@ impl<P: Borrow<PartitionId>> SegmentId<P> {
 
 #[derive(Clone)]
 pub struct Manifest {
-    path: PathBuf,
     pool: SqlitePool,
 }
 
@@ -214,7 +213,7 @@ impl Manifest {
                 .unwrap();
         }
         // TODO clear pending segments (size=NULL)
-        Manifest { path, pool }
+        Manifest { pool }
     }
 
     /// Upserts data for a segment with the given identifier.

@@ -119,7 +119,6 @@ struct AppendRequest {
 
 #[derive(Debug)]
 pub(crate) struct WriteResult {
-    pub(crate) segment: SegmentIndex,
     pub(crate) data: SegmentData,
 }
 
@@ -407,7 +406,6 @@ fn spawn_slog_thread(
                     }
 
                     let response = WriteResult {
-                        segment,
                         data: SegmentData {
                             index: segment,
                             records,

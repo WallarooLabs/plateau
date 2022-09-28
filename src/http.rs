@@ -187,7 +187,7 @@ impl Drop for TestServer {
 }
 
 #[get("/ok")]
-#[openapi(id = "topic.get_partitions")]
+#[openapi(id = "healthcheck")]
 async fn healthcheck(#[data] catalog: Catalog) -> Result<Json<serde_json::Value>, Rejection> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
     let healthy = duration

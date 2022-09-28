@@ -24,7 +24,6 @@ pub use crate::slog::{InternalIndex, RecordIndex};
 use crate::slog::{SegmentIndex, SegmentRecordIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::future::OptionFuture;
 use futures::stream::{Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
