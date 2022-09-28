@@ -2,11 +2,12 @@
 //!
 //! Currently, the only supported segment format is local Parquet files.
 use anyhow::Result;
+use arrow2::array::Array;
 use arrow2::array::{
     MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
 };
 use arrow2::chunk::Chunk;
-use arrow2::datatypes::{DataType, Field, Schema};
+use arrow2::datatypes::{DataType, Field, Metadata, Schema};
 use arrow2::io::parquet::read::FileReader as FileReader2;
 use arrow2::io::parquet::read::{infer_schema, read_metadata};
 use arrow2::io::parquet::write::FileWriter as FileWriter2;
@@ -17,9 +18,10 @@ use chrono::{DateTime, Duration, TimeZone, Utc};
 use std::convert::TryFrom;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
+use std::iter;
 #[cfg(test)]
 use std::sync::Arc;
-use std::{fs, path::PathBuf};
+use std::{fs, path::Path, path::PathBuf};
 
 use parquet::data_type::ByteArray;
 #[cfg(test)]
@@ -93,17 +95,11 @@ impl Segment {
         Ok(SegmentWriter {
             path: self.path.clone(),
             file,
-            writer: Writer::Arrow(writer),
+            writer,
         })
     }
 
-    pub(crate) fn create2(&self) -> Result<SegmentWriter> {
-        // TODO: better schema for timestamps.
-        // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
-        let time = Field::new("time", DataType::Int64, true);
-        let message = Field::new("message", DataType::Utf8, true);
-        let schema = Schema::from(vec![time, message]);
-
+    pub(crate) fn create2(&self, schema: Schema) -> Result<SegmentWriter2> {
         // TODO: ideally we'd use compression, but this currently causes nasty dependency issues
         // between parquet2 and parquet
         let options = WriteOptions {
@@ -114,15 +110,12 @@ impl Segment {
 
         let file = self.file()?;
         let writer = FileWriter2::try_new(file.try_clone()?, schema.clone(), options)?;
-        let writer = WriteArrow2 {
+        Ok(SegmentWriter2 {
+            path: self.path.clone(),
+            file,
             writer,
             schema,
             options,
-        };
-        Ok(SegmentWriter {
-            path: self.path.clone(),
-            file,
-            writer: Writer::Arrow2(writer),
         })
     }
 
@@ -147,38 +140,17 @@ impl Segment {
     }
 }
 
-enum Writer {
-    #[cfg(test)]
-    Arrow(SerializedFileWriter<fs::File>),
-    Arrow2(WriteArrow2),
-}
-
-struct WriteArrow2 {
-    writer: FileWriter2<fs::File>,
-    schema: Schema,
-    options: WriteOptions,
-}
-
+#[cfg(test)]
 pub(crate) struct SegmentWriter {
     path: PathBuf,
     file: fs::File,
-    writer: Writer,
+    writer: SerializedFileWriter<fs::File>,
 }
 
+#[cfg(test)]
 impl SegmentWriter {
-    pub(crate) fn log(&mut self, record: Vec<Record>) -> Result<()> {
-        match &mut self.writer {
-            #[cfg(test)]
-            Writer::Arrow(ref mut sfw) => Self::log_arrow(sfw, record),
-            Writer::Arrow2(ref mut fw) => Self::log_arrow2(fw, record),
-        }
-    }
-
-    #[cfg(test)]
-    fn log_arrow(
-        writer: &mut SerializedFileWriter<fs::File>,
-        mut record: Vec<Record>,
-    ) -> Result<()> {
+    fn log(&mut self, mut record: Vec<Record>) -> Result<()> {
+        let writer = &mut self.writer;
         let mut row_group_writer = writer.next_row_group()?;
 
         let mut times = vec![];
@@ -212,51 +184,84 @@ impl SegmentWriter {
         writer.close_row_group(row_group_writer)?;
         Ok(())
     }
+}
 
-    fn log_arrow2(writer: &mut WriteArrow2, mut record: Vec<Record>) -> Result<()> {
-        let mut times = MutablePrimitiveArray::<i64>::new();
-        let mut messages = MutableUtf8Array::<i32>::new();
+#[cfg(test)]
+impl CloseArrow for SegmentWriter {
+    fn get_path(&self) -> &Path {
+        self.path.as_path()
+    }
 
-        for r in record.drain(..) {
-            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
-            times.push(Some(dt.num_milliseconds()));
-            messages.push(Some(r.message.as_utf8()?));
+    fn end(&mut self) -> Result<()> {
+        self.writer.close()?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+}
+
+pub struct SegmentWriter2 {
+    path: PathBuf,
+    file: fs::File,
+    writer: FileWriter2<fs::File>,
+    schema: Schema,
+    options: WriteOptions,
+}
+
+impl SegmentWriter2 {
+    pub fn check_schema(&self, schema: &Schema) -> bool {
+        &self.schema == schema
+    }
+
+    pub fn log_arrow(&mut self, schema: &Schema, chunk: SegmentChunk) -> Result<()> {
+        if !self.check_schema(schema) {
+            anyhow::bail!("cannot use different schemas within the same segment");
         }
 
-        let iter = vec![Chunk::try_new(vec![times.as_box(), messages.as_box()])];
+        let iter = vec![Ok(chunk)];
 
-        let encodings = vec![vec![Encoding::Plain], vec![Encoding::Plain]];
+        let encodings: Vec<_> = iter::repeat(vec![Encoding::Plain])
+            .take(schema.fields.len())
+            .collect();
+
         let row_groups =
-            RowGroupIterator::try_new(iter.into_iter(), &writer.schema, writer.options, encodings)?;
+            RowGroupIterator::try_new(iter.into_iter(), &self.schema, self.options, encodings)?;
 
         for group in row_groups {
-            writer.writer.write(group?)?;
+            self.writer.write(group?)?;
         }
 
         Ok(())
     }
+}
+
+impl CloseArrow for SegmentWriter2 {
+    fn get_path(&self) -> &Path {
+        self.path.as_path()
+    }
+
+    fn end(&mut self) -> Result<()> {
+        self.writer.end(None)?;
+        self.file.sync_data()?;
+        Ok(())
+    }
+}
+
+pub(crate) trait CloseArrow: Sized {
+    fn get_path(&self) -> &Path;
+    fn end(&mut self) -> Result<()>;
 
     /// Return an estimate of the on-disk size of this file. Note that this
     /// will _not_ include the final metadata footer.
-    pub(crate) fn size_estimate(&self) -> Result<usize> {
-        Ok(usize::try_from(fs::metadata(&self.path)?.len())?)
+    fn size_estimate(&self) -> Result<usize> {
+        Ok(usize::try_from(fs::metadata(&self.get_path())?.len())?)
     }
 
-    pub(crate) fn close(mut self) -> Result<usize> {
-        match &mut self.writer {
-            #[cfg(test)]
-            Writer::Arrow(ref mut w) => {
-                w.close()?;
-            }
-            Writer::Arrow2(ref mut w2) => {
-                w2.writer.end(None)?;
-            }
-        }
-        self.file.sync_data()?;
+    fn close(mut self) -> Result<usize> {
+        self.end()?;
 
         // NOTE: the file data is now synchronized, but the file itself may not appear in the
         // parent directory on crash unless we fsync that too.
-        let mut parent = self.path.clone();
+        let mut parent = self.get_path().to_path_buf();
         parent.pop();
         let directory = fs::File::open(&parent)?;
         directory.sync_all()?;
@@ -343,7 +348,9 @@ impl SegmentReader {
 
 pub(crate) struct SegmentReader2 {
     reader: FileReader2<fs::File>,
+    schema: Schema,
 }
+pub(crate) type SegmentChunk = Chunk<Box<dyn Array>>;
 
 impl SegmentReader2 {
     fn new(mut f: fs::File) -> Result<Self> {
@@ -353,40 +360,78 @@ impl SegmentReader2 {
         let schema = schema.filter(|_, f| f.name == "time" || f.name == "message");
 
         Ok(SegmentReader2 {
-            reader: FileReader2::new(f, metadata.row_groups, schema, None, None, None),
+            reader: FileReader2::new(f, metadata.row_groups, schema.clone(), None, None, None),
+            schema,
         })
     }
 
-    pub(crate) fn into_chunk_iter(self) -> impl Iterator<Item = Result<Vec<Record>>> {
-        self.reader.into_iter().map(|chunk| {
-            let arrays = chunk?.into_arrays();
-            let time = arrays
-                .get(0)
-                .ok_or(anyhow::anyhow!("missing 'time' column"))
-                .and_then(|arr| {
-                    arr.as_any()
-                        .downcast_ref::<PrimitiveArray<i64>>()
-                        .ok_or(anyhow::anyhow!("invalid 'time' array"))
-                })?;
-            let message = arrays
-                .get(1)
-                .ok_or(anyhow::anyhow!("missing 'message' column"))
-                .and_then(|arr| {
-                    arr.as_any()
-                        .downcast_ref::<Utf8Array<i32>>()
-                        .ok_or(anyhow::anyhow!("invalid 'message' array"))
-                })?;
-
-            Ok(time
-                .values_iter()
-                .zip(message.values_iter())
-                .map(|(tv, m)| Record {
-                    time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
-                    message: ByteArray::from(m),
-                })
-                .collect())
-        })
+    pub(crate) fn into_chunk_iter(self) -> (Schema, impl Iterator<Item = Result<SegmentChunk>>) {
+        (
+            self.schema,
+            self.reader.into_iter().map(|r| r.map_err(Into::into)),
+        )
     }
+}
+
+pub fn parse_legacy(schema: &Schema, chunk: SegmentChunk) -> Result<Vec<Record>> {
+    if schema.fields.get(0).map(|f| f.name.as_str()) != Some("time") {
+        anyhow::bail!("first column must be time")
+    }
+    if schema.fields.get(1).map(|f| f.name.as_str()) != Some("message") {
+        anyhow::bail!("second column must be message")
+    }
+
+    let arrays = chunk.into_arrays();
+    let time = arrays
+        .get(0)
+        .ok_or(anyhow::anyhow!("missing 'time' column"))
+        .and_then(|arr| {
+            arr.as_any()
+                .downcast_ref::<PrimitiveArray<i64>>()
+                .ok_or(anyhow::anyhow!("invalid 'time' array"))
+        })?;
+    let message = arrays
+        .get(1)
+        .ok_or(anyhow::anyhow!("missing 'message' column"))
+        .and_then(|arr| {
+            arr.as_any()
+                .downcast_ref::<Utf8Array<i32>>()
+                .ok_or(anyhow::anyhow!("invalid 'message' array"))
+        })?;
+
+    Ok(time
+        .values_iter()
+        .zip(message.values_iter())
+        .map(|(tv, m)| Record {
+            time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
+            message: ByteArray::from(m),
+        })
+        .collect())
+}
+
+pub fn legacy_schema() -> Schema {
+    // TODO: better schema for timestamps.
+    // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
+    Schema {
+        fields: vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("message", DataType::Utf8, false),
+        ],
+        metadata: Metadata::default(),
+    }
+}
+
+pub fn chunk_legacy(mut records: Vec<Record>) -> Result<SegmentChunk> {
+    let mut times = MutablePrimitiveArray::<i64>::new();
+    let mut messages = MutableUtf8Array::<i32>::new();
+
+    for r in records.drain(..) {
+        let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+        times.push(Some(dt.num_milliseconds()));
+        messages.push(Some(r.message.as_utf8()?));
+    }
+
+    Chunk::try_new(vec![times.as_box(), messages.as_box()]).map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -394,12 +439,68 @@ pub mod test {
     use super::*;
     use tempfile::tempdir;
 
+    use arrow2::array::FixedSizeListArray;
+
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
             time: Utc.timestamp(ix, 0),
             message: ByteArray::from(message.as_str()),
         })
         .collect()
+    }
+
+    pub fn inferences_schema_a() -> (Schema, SegmentChunk) {
+        let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
+        let inner = PrimitiveArray::<f32>::from_values(vec![2.0, 4.0, 6.0, 8.0, 10.0]);
+        let outputs = inner;
+
+        // TODO: we need fixed size list array support, which currently is not
+        // in arrow2's parquet io module.
+        /*
+        let outputs = FixedSizeListArray::new(
+            DataType::FixedSizeList(
+                Box::new(Field::new("inner", inner.data_type().clone(), false)),
+                2,
+            ),
+            inner.to_boxed(),
+            None,
+        );
+        */
+
+        let schema = Schema {
+            fields: vec![
+                Field::new("inputs", inputs.data_type().clone(), false),
+                Field::new("mul", mul.data_type().clone(), false),
+                Field::new("outputs", outputs.data_type().clone(), false),
+            ],
+            metadata: Metadata::default(),
+        };
+
+        (
+            schema,
+            Chunk::try_new(vec![inputs.boxed(), mul.boxed(), outputs.boxed()]).unwrap(),
+        )
+    }
+
+    pub fn inferences_schema_b() -> (Schema, SegmentChunk) {
+        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
+            vec!["one", "two", "three", "four", "five"].into_iter(),
+        );
+        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+
+        let schema = Schema {
+            fields: vec![
+                Field::new("inputs", inputs.data_type().clone(), false),
+                Field::new("outputs", outputs.data_type().clone(), false),
+            ],
+            metadata: Metadata::default(),
+        };
+
+        (
+            schema,
+            Chunk::try_new(vec![inputs.boxed(), outputs.boxed()]).unwrap(),
+        )
     }
 
     #[test]
@@ -447,9 +548,9 @@ pub mod test {
         assert!(size > 0);
 
         let r = s.read2()?;
+        let (schema, iter) = r.into_chunk_iter();
         assert_eq!(
-            r.into_chunk_iter()
-                .flat_map(|b| b.unwrap())
+            iter.flat_map(|b| parse_legacy(&schema, b.unwrap()).unwrap())
                 .collect::<Vec<_>>(),
             records
         );
@@ -467,19 +568,35 @@ pub mod test {
                 .map(|ix| (ix, format!("message-{}", ix))),
         );
 
-        let mut w = s.create2()?;
-        w.log(records[0..10].to_vec())?;
-        w.log(records[10..].to_vec())?;
+        let mut w = s.create2(legacy_schema())?;
+        let schema = &legacy_schema();
+        w.log_arrow(&schema, chunk_legacy(records[0..10].to_vec())?)?;
+        w.log_arrow(&schema, chunk_legacy(records[10..].to_vec())?)?;
         let size = w.close()?;
         assert!(size > 0);
 
         let r = s.read2()?;
+        let (schema, iter) = r.into_chunk_iter();
         assert_eq!(
-            r.into_chunk_iter()
-                .flat_map(|b| b.unwrap())
+            iter.flat_map(|b| parse_legacy(&schema, b.unwrap()).unwrap())
                 .collect::<Vec<_>>(),
             records
         );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_change() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(PathBuf::from(path));
+
+        let (a_schema, a) = inferences_schema_a();
+        let mut w = s.create2(a_schema.clone())?;
+        w.log_arrow(&a_schema, a)?;
+        let (b_schema, b) = inferences_schema_b();
+        assert!(!w.check_schema(&b_schema));
+        assert!(w.log_arrow(&b_schema, b).is_err());
         Ok(())
     }
 

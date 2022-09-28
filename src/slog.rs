@@ -20,8 +20,11 @@
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
 use crate::manifest::SegmentData;
-use crate::segment::{Record, Segment};
+use crate::segment::{
+    chunk_legacy, legacy_schema, parse_legacy, CloseArrow, Record, Segment, SegmentWriter2,
+};
 use anyhow::Result;
+use arrow2::datatypes::Schema;
 use chrono::{DateTime, Utc};
 use log::trace;
 use metrics::counter;
@@ -191,13 +194,8 @@ impl Slog {
             return Box::new(std::iter::empty());
         }
 
-        Box::new(
-            segment
-                .read2()
-                .unwrap()
-                .into_chunk_iter()
-                .map(|rs| rs.unwrap()),
-        )
+        let (schema, iter) = segment.read2().unwrap().into_chunk_iter();
+        Box::new(iter.map(move |chunk| parse_legacy(&schema, chunk.unwrap()).unwrap()))
     }
 
     pub(crate) async fn append(&self, r: &Record) -> InternalIndex {
@@ -365,7 +363,7 @@ fn spawn_slog_thread(
 
     let handle = std::thread::spawn(move || {
         let mut active = true;
-        let mut current: Option<(crate::segment::SegmentWriter, SegmentIndex)> = None;
+        let mut current: Option<(Schema, SegmentWriter2, SegmentIndex)> = None;
         while active {
             match rx_records.blocking_recv() {
                 Some(AppendRequest {
@@ -376,25 +374,36 @@ fn spawn_slog_thread(
                     append_records,
                 }) => {
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
-                    current = current.and_then(|(writer, id)| {
+                    current = current.and_then(|(_, writer, id)| {
                         if id != segment {
                             writer.close().expect("sealed segment");
                             None
                         } else {
-                            Some((writer, id))
+                            Some((legacy_schema(), writer, id))
                         }
                     });
-                    let (ref mut writer, _) = current.get_or_insert_with(|| {
-                        (new_segment.create2().expect("segment creation"), segment)
+                    let (schema, ref mut writer, _) = current.get_or_insert_with(|| {
+                        (
+                            legacy_schema(),
+                            new_segment
+                                .create2(legacy_schema())
+                                .expect("segment creation"),
+                            segment,
+                        )
                     });
                     let count = append_records.len();
-                    writer.log(append_records).expect("added records");
+                    writer
+                        .log_arrow(
+                            &schema,
+                            chunk_legacy(append_records).expect("invalid record format"),
+                        )
+                        .expect("added records");
                     let size = writer.size_estimate().expect("segment size estimate");
                     counter!("slog_thread_records_written", u64::try_from(count).unwrap(), "name" => name.clone());
 
                     if seal {
                         trace!("sealed {:?} {:?}", segment, records);
-                        current.take().map(|(w, _)| w.close().expect(""));
+                        current.take().map(|(_, w, _)| w.close().expect(""));
                     }
 
                     let response = WriteResult {
@@ -409,7 +418,7 @@ fn spawn_slog_thread(
                     tx_done.blocking_send(response).expect("channel closed");
                 }
                 None => {
-                    current.take().map(|(writer, _)| writer.close());
+                    current.take().map(|(_, writer, _)| writer.close());
                     active = false
                 }
             }
