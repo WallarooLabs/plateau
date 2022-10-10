@@ -1,4 +1,5 @@
 pub mod catalog;
+mod chunk;
 pub mod http;
 mod manifest;
 pub mod metrics;

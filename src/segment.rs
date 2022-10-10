@@ -2,7 +2,6 @@
 //!
 //! Currently, the only supported segment format is local Parquet files.
 use anyhow::Result;
-use arrow2::array::Array;
 use arrow2::array::{
     MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
 };
@@ -35,6 +34,8 @@ use parquet::{
     },
     schema::parser::parse_message_type,
 };
+
+use crate::chunk::SegmentChunk;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Record {
@@ -217,14 +218,16 @@ impl SegmentWriter2 {
             anyhow::bail!("cannot use different schemas within the same segment");
         }
 
-        let iter = vec![Ok(chunk)];
-
         let encodings: Vec<_> = iter::repeat(vec![Encoding::Plain])
             .take(schema.fields.len())
             .collect();
 
-        let row_groups =
-            RowGroupIterator::try_new(iter.into_iter(), &self.schema, self.options, encodings)?;
+        let row_groups = RowGroupIterator::try_new(
+            iter::once(Ok(chunk)),
+            &self.schema,
+            self.options,
+            encodings,
+        )?;
 
         for group in row_groups {
             self.writer.write(group?)?;
@@ -350,7 +353,6 @@ pub(crate) struct SegmentReader2 {
     reader: FileReader2<fs::File>,
     schema: Schema,
 }
-pub(crate) type SegmentChunk = Chunk<Box<dyn Array>>;
 
 impl SegmentReader2 {
     fn new(mut f: fs::File) -> Result<Self> {
@@ -437,9 +439,8 @@ pub fn chunk_legacy(mut records: Vec<Record>) -> Result<SegmentChunk> {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
     use tempfile::tempdir;
-
-    use arrow2::array::FixedSizeListArray;
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
@@ -448,61 +449,6 @@ pub mod test {
         })
         .collect()
     }
-
-    pub fn inferences_schema_a() -> (Schema, SegmentChunk) {
-        let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-        let inner = PrimitiveArray::<f32>::from_values(vec![2.0, 4.0, 6.0, 8.0, 10.0]);
-        let outputs = inner;
-
-        // TODO: we need fixed size list array support, which currently is not
-        // in arrow2's parquet io module.
-        /*
-        let outputs = FixedSizeListArray::new(
-            DataType::FixedSizeList(
-                Box::new(Field::new("inner", inner.data_type().clone(), false)),
-                2,
-            ),
-            inner.to_boxed(),
-            None,
-        );
-        */
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("mul", mul.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        (
-            schema,
-            Chunk::try_new(vec![inputs.boxed(), mul.boxed(), outputs.boxed()]).unwrap(),
-        )
-    }
-
-    pub fn inferences_schema_b() -> (Schema, SegmentChunk) {
-        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        );
-        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        (
-            schema,
-            Chunk::try_new(vec![inputs.boxed(), outputs.boxed()]).unwrap(),
-        )
-    }
-
     #[test]
     fn round_trip() -> Result<()> {
         let root = tempdir()?;
