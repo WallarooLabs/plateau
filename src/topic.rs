@@ -1,10 +1,11 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
-use crate::chunk::{Schema, SchemaChunk};
+use crate::chunk::{legacy_schema, Schema, SchemaChunk, SegmentChunk};
+use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
 pub use crate::partition::Rolling;
-use crate::partition::{LimitStatus, Partition, PartitionId, PartitionRecordResponse, QueryLimit};
+use crate::partition::{Partition, PartitionId};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
 use anyhow::Result;
@@ -32,8 +33,7 @@ pub type TopicIterator = HashMap<String, usize>;
 
 pub(crate) struct TopicRecordResponse {
     pub(crate) iter: TopicIterator,
-    pub(crate) status: LimitStatus,
-    pub(crate) records: Vec<Record>,
+    pub(crate) batch: LimitedBatch,
 }
 
 impl Topic {
@@ -137,11 +137,25 @@ impl Topic {
         .await;
     }
 
-    pub async fn append(&self, partition_name: &str, rs: &[Record]) -> Result<Range<RecordIndex>> {
+    pub async fn extend(
+        &self,
+        partition_name: &str,
+        data: SchemaChunk<Schema>,
+    ) -> Result<Range<RecordIndex>> {
         let partition = self.get_partition(partition_name).await;
-        partition
-            .extend(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
-            .await
+        partition.extend(data).await
+    }
+
+    pub async fn extend_records(
+        &self,
+        partition_name: &str,
+        rs: &[Record],
+    ) -> Result<Range<RecordIndex>> {
+        self.extend(
+            partition_name,
+            SchemaChunk::from_legacy(rs.to_vec()).unwrap(),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -157,7 +171,7 @@ impl Topic {
     pub(crate) async fn get_records(
         &self,
         starts: TopicIterator,
-        limit: QueryLimit,
+        limit: RowLimit,
     ) -> TopicRecordResponse {
         self.get_records_from_all(
             starts,
@@ -173,7 +187,7 @@ impl Topic {
         &self,
         starts: TopicIterator,
         times: RangeInclusive<DateTime<Utc>>,
-        limit: QueryLimit,
+        limit: RowLimit,
     ) -> TopicRecordResponse {
         let times = &times;
         self.get_records_from_all(
@@ -191,12 +205,12 @@ impl Topic {
     pub(crate) async fn get_records_from_all<'a, F, Fut>(
         &'a self,
         mut iterator: TopicIterator,
-        limit: QueryLimit,
+        limit: RowLimit,
         fetch: F,
     ) -> TopicRecordResponse
     where
-        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, QueryLimit) -> Fut,
-        Fut: futures::Future<Output = PartitionRecordResponse>,
+        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, RowLimit) -> Fut,
+        Fut: futures::Future<Output = LimitedBatch>,
     {
         let mut read_starts: Vec<_> = self
             .readable_ids()
@@ -211,38 +225,41 @@ impl Topic {
             .collect();
 
         read_starts.sort();
-        let mut records = vec![];
-        let mut status = LimitStatus::Unreached {
-            remaining: limit,
-            schema: None,
-        };
+        let mut batch = LimitedBatch::open(limit);
+        let mut any_schema_change = false;
         for (start, name) in read_starts.into_iter() {
             let partition = self.get_partition(&name).await;
-            if let LimitStatus::Unreached { remaining, .. } = status {
+            if let BatchStatus::Open { remaining } = batch.status {
                 let batch_response = fetch(partition, start, remaining).await;
-                let trimmed = batch_response
-                    .indexed
-                    .into_iter()
-                    .scan(&mut status, |status, indexed| status.after(indexed))
-                    .collect::<Vec<_>>();
-
-                if let Some(final_record) = trimmed.last().and_then(|indexed| indexed.end()) {
-                    iterator.insert(name, (final_record + 1).0);
+                if matches!(batch_response.status, BatchStatus::SchemaChanged) {
+                    any_schema_change = true;
                 }
-                records.extend(
-                    trimmed
-                        .into_iter()
-                        .flat_map(|ir| ir.into_legacy().into_iter()),
-                );
+                if batch.schema_matches(&batch_response) {
+                    batch.extend(batch_response);
+
+                    if let Some(final_record) =
+                        batch.chunks.last().and_then(|indexed| indexed.end())
+                    {
+                        iterator.insert(name, (final_record + 1).0);
+                    }
+                } else {
+                    any_schema_change = true;
+                }
             } else {
                 break;
             }
         }
 
+        // we don't want to short-circuit when one partition has a schema
+        // change; we want to fetch all records with the current schema
+        // from all partitions.
+        if any_schema_change {
+            batch.status = BatchStatus::SchemaChanged;
+        }
+
         TopicRecordResponse {
             iter: iterator,
-            records,
-            status,
+            batch,
         }
     }
 
@@ -258,6 +275,7 @@ impl Topic {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
     use crate::partition::test::{assert_limit_unreached, deindex};
     use crate::retention::Retention;
     use chrono::{TimeZone, Utc};
@@ -321,7 +339,9 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.append(&name, &vec![record.clone()]).await?;
+            topic
+                .extend(&name, SchemaChunk::from_legacy(vec![record.clone()])?)
+                .await?;
         }
 
         topic.commit().await?;
@@ -367,7 +387,12 @@ mod test {
             .collect();
         for (ix, record) in records.iter().enumerate() {
             part_records[ix % 3].push(record.clone());
-            topic.append(&names[ix % 3], &vec![record.clone()]).await?;
+            topic
+                .extend(
+                    &names[ix % 3],
+                    SchemaChunk::from_legacy(vec![record.clone()])?,
+                )
+                .await?;
         }
 
         topic.commit().await?;
@@ -377,72 +402,124 @@ mod test {
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 0]).collect();
         // fetching two records will spill from partition-0, which has only one
         // record in the given time range, to partition-1
-        let TopicRecordResponse {
-            iter: it,
-            records: rs,
-            status,
-        } = topic
-            .get_records_by_time(HashMap::new(), span.clone(), QueryLimit::records(2))
+        let result = topic
+            .get_records_by_time(HashMap::new(), span.clone(), RowLimit::records(2))
             .await;
-        assert_eq!(status, LimitStatus::RecordsExceeded);
-        assert_eq!(it, expected_it);
+        assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
+        assert_eq!(result.iter, expected_it);
         assert_eq!(
-            rs.into_iter().collect::<HashSet<_>>(),
+            result
+                .batch
+                .into_legacy()?
+                .into_iter()
+                .collect::<HashSet<_>>(),
             vec![part_records[0][1].clone(), part_records[1][0].clone()]
                 .into_iter()
                 .collect::<HashSet<_>>()
         );
 
         // next fetch will use partition with lowest index in iterator, partition-2
-        let prior_it = it;
-        let TopicRecordResponse {
-            iter: it,
-            records: rs,
-            status,
-        } = topic
-            .get_records_by_time(prior_it, span.clone(), QueryLimit::records(1))
+        let prior_it = result.iter;
+        let result = topic
+            .get_records_by_time(prior_it, span.clone(), RowLimit::records(1))
             .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 1]).collect();
-        assert_eq!(status, LimitStatus::RecordsExceeded);
-        assert_eq!(it, expected_it);
+        assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
+        assert_eq!(result.iter, expected_it);
         assert_eq!(
-            rs.into_iter().collect::<HashSet<_>>(),
+            result
+                .batch
+                .into_legacy()?
+                .into_iter()
+                .collect::<HashSet<_>>(),
             vec![part_records[2][0].clone()]
                 .into_iter()
                 .collect::<HashSet<_>>()
         );
 
         // final fetch will fetch both remaining records from partition-1 and partition-2
-        let prior_it = it;
-        let TopicRecordResponse {
-            iter: it,
-            records: rs,
-            status,
-        } = topic
-            .get_records_by_time(prior_it, span.clone(), QueryLimit::records(5))
+        let prior_it = result.iter;
+        let result = topic
+            .get_records_by_time(prior_it, span.clone(), RowLimit::records(5))
             .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 2, 2]).collect();
-        assert_limit_unreached(&status);
-        assert_eq!(it, expected_it);
+        assert_limit_unreached(&result.batch.status);
+        assert_eq!(result.iter, expected_it);
         assert_eq!(
-            rs.into_iter().collect::<HashSet<_>>(),
+            result
+                .batch
+                .into_legacy()?
+                .into_iter()
+                .collect::<HashSet<_>>(),
             vec![part_records[1][1].clone(), part_records[2][1].clone()]
                 .into_iter()
                 .collect::<HashSet<_>>()
         );
 
         // no more records left
-        let prior_it = it;
-        let TopicRecordResponse {
-            iter: it,
-            records: rs,
-            status,
-        } = topic
-            .get_records_by_time(prior_it, span, QueryLimit::records(1))
+        let prior_it = result.iter;
+        let result = topic
+            .get_records_by_time(prior_it, span, RowLimit::records(1))
             .await;
-        assert_limit_unreached(&status);
-        assert_eq!(it, expected_it);
-        assert_eq!(rs, vec![]);
+        assert_limit_unreached(&result.batch.status);
+        assert_eq!(result.iter, expected_it);
+        assert_eq!(result.batch.into_legacy()?, vec![]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_schema_in_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let chunk_a = inferences_schema_a();
+        let chunk_b = inferences_schema_b();
+
+        let chunk_allocation = vec![
+            vec![&chunk_a, &chunk_a, &chunk_a, &chunk_b, &chunk_b],
+            vec![&chunk_a, &chunk_b, &chunk_a, &chunk_b, &chunk_b],
+            vec![&chunk_a, &chunk_a, &chunk_a, &chunk_a, &chunk_b],
+        ];
+        let names: Vec<_> = (0..=3)
+            .into_iter()
+            .map(|ix| format!("partition-{}", ix))
+            .collect();
+
+        fn to_iter(names: &Vec<String>, v: [usize; 3]) -> HashMap<String, usize> {
+            names.clone().into_iter().zip(v).collect()
+        }
+
+        for (name, chunks) in names.iter().zip(chunk_allocation.into_iter()) {
+            for chunk in chunks {
+                topic.extend(name, chunk.clone()).await?;
+                topic.get_partition(name).await.commit().await?;
+            }
+        }
+
+        let many_rows = RowLimit::records(100);
+
+        // first, we zip through all schema-a chunks at the start
+        let result = topic.get_records(HashMap::new(), many_rows).await;
+        assert_eq!(result.iter, to_iter(&names, [15, 5, 20]));
+        assert_eq!(result.batch.status, BatchStatus::SchemaChanged);
+
+        // now, the min partition (partition-1) has a schema change to schema-b.
+        // we set a row limit here so we can test final iteration over all
+        // partitions with schema-b later.
+        let result = topic.get_records(result.iter, RowLimit::records(5)).await;
+        assert_eq!(result.iter, to_iter(&names, [15, 10, 20]));
+        assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
+
+        // that same partition is still the min partition, but has
+        // briefly changed back to schema-a
+        let result = topic.get_records(result.iter, many_rows).await;
+        assert_eq!(result.iter, to_iter(&names, [15, 15, 20]));
+        assert_eq!(result.batch.status, BatchStatus::SchemaChanged);
+
+        // now it has changed back to schema-b, and we can resume iterating
+        // through all partitions.
+        let result = topic.get_records(result.iter, many_rows).await;
+        assert_eq!(result.iter, to_iter(&names, [25, 25, 25]));
+        assert!(result.batch.status.is_open());
 
         Ok(())
     }
@@ -460,7 +537,7 @@ mod test {
             .collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .append(&names[ix % parts], &vec![record.clone()])
+                .extend_records(&names[ix % parts], &vec![record.clone()])
                 .await?;
         }
 
@@ -472,21 +549,15 @@ mod test {
         assert!(fetch_count % parts != 0);
         assert!(records.len() % fetch_count != 0);
         for _ in 0..records.len() {
-            let TopicRecordResponse {
-                iter: next_it,
-                records: rs,
-                status,
-            } = topic
-                .get_records(it, QueryLimit::records(fetch_count))
-                .await;
+            let result = topic.get_records(it, RowLimit::records(fetch_count)).await;
 
             if fetched.len() + fetch_count >= records.len() {
-                assert_limit_unreached(&status);
+                assert_limit_unreached(&result.batch.status);
             } else {
-                assert_eq!(status, LimitStatus::RecordsExceeded);
+                assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
             }
-            fetched.extend(rs);
-            it = next_it;
+            fetched.extend(result.batch.into_legacy().unwrap());
+            it = result.iter;
         }
         assert_eq!(
             records.into_iter().collect::<HashSet<_>>(),
@@ -518,7 +589,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.append(&name, &vec![record.clone()]).await?;
+            topic.extend_records(&name, &vec![record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -533,9 +604,9 @@ mod test {
                 topic
                     .get_partition("partition-0")
                     .await
-                    .get_records(RecordIndex(0), QueryLimit::records(1000))
+                    .get_records(RecordIndex(0), RowLimit::records(1000))
                     .await
-                    .indexed
+                    .chunks
             ),
             vec![records[0].clone(), records[3].clone()]
         );
@@ -611,7 +682,7 @@ mod test {
                         })
                         .collect();
 
-                    t.append(&p, &rs).await.unwrap();
+                    t.extend_records(&p, &rs).await.unwrap();
                     if let Some(prev_ix) = prev {
                         tx.send(ix - prev_ix).await.unwrap();
                     }

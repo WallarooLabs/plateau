@@ -54,9 +54,9 @@ pub fn parse_time(tv: i64) -> DateTime<Utc> {
 
 /// A [SegmentChunk] packaged with its associated [Schema].
 #[derive(Clone)]
-pub(crate) struct SchemaChunk<S: Borrow<Schema> + Clone> {
-    pub(crate) schema: S,
-    pub(crate) chunk: SegmentChunk,
+pub struct SchemaChunk<S: Borrow<Schema> + Clone> {
+    pub schema: S,
+    pub chunk: SegmentChunk,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -310,9 +310,8 @@ impl IndexedChunk {
 
 impl From<IndexedChunk> for SegmentChunk {
     fn from(indexed: IndexedChunk) -> SegmentChunk {
-        let size = indexed.chunk.len();
         let mut arrays = indexed.chunk.into_arrays();
-        arrays.truncate(size - 1);
+        arrays.truncate(arrays.len() - 1);
         SegmentChunk::new(arrays)
     }
 }

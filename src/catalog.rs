@@ -160,7 +160,7 @@ mod test {
             catalog
                 .get_topic(&name)
                 .await
-                .append("default", &vec![record.clone()])
+                .extend_records("default", &vec![record.clone()])
                 .await?;
         }
 

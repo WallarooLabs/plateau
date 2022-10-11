@@ -19,7 +19,7 @@ use tracing::Instrument;
 use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
-use crate::partition::{LimitStatus, QueryLimit};
+use crate::limit::{BatchStatus, RowLimit};
 use crate::slog::{RecordIndex, SlogError};
 use crate::topic::{Record, TopicIterator, TopicRecordResponse};
 
@@ -72,13 +72,13 @@ enum RecordStatus {
     ByteLimited,
 }
 
-impl From<LimitStatus> for RecordStatus {
-    fn from(orig: LimitStatus) -> Self {
+impl From<BatchStatus> for RecordStatus {
+    fn from(orig: BatchStatus) -> Self {
         match orig {
-            LimitStatus::Unreached { .. } => RecordStatus::All,
-            LimitStatus::SchemaChange => RecordStatus::SchemaChange,
-            LimitStatus::BytesExceeded => RecordStatus::ByteLimited,
-            LimitStatus::RecordsExceeded => RecordStatus::RecordLimited,
+            BatchStatus::Open { .. } => RecordStatus::All,
+            BatchStatus::SchemaChanged => RecordStatus::SchemaChange,
+            BatchStatus::BytesExceeded => RecordStatus::ByteLimited,
+            BatchStatus::RecordsExceeded => RecordStatus::RecordLimited,
         }
     }
 }
@@ -110,6 +110,7 @@ struct ErrorMessage {
 enum ErrorReply {
     WriterBusy,
     InvalidQuery,
+    InvalidSchema,
     NoHeartbeat,
     Unknown,
 }
@@ -258,7 +259,7 @@ async fn topic_append(
         topic_name,
         partition_name
     );
-    let r = topic.append(&partition_name, &rs).await;
+    let r = topic.extend_records(&partition_name, &rs).await;
 
     Ok(Json::from(Inserted {
         span: Span::from_range(r.map_err(|e| {
@@ -316,26 +317,25 @@ async fn topic_iterate(
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
 
-    let TopicRecordResponse {
-        iter: next,
-        records: rs,
-        status,
-    } = if let Some(start) = query.start_time {
+    let result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
-            .get_records_by_time(position, times, QueryLimit::records(limit))
+            .get_records_by_time(position, times, RowLimit::records(limit))
             .await
     } else {
-        topic
-            .get_records(position, QueryLimit::records(limit))
-            .await
+        topic.get_records(position, RowLimit::records(limit)).await
     };
 
-    Ok(Json::from(TopicIterationReply {
-        records: serialize_records(rs),
-        next,
-        status: status.into(),
-    }))
+    let status = RecordStatus::from(result.batch.status);
+    if let Ok(records) = result.batch.into_legacy() {
+        Ok(Json::from(TopicIterationReply {
+            records: serialize_records(records),
+            next: result.iter,
+            status,
+        }))
+    } else {
+        Err(warp::reject::custom(ErrorReply::InvalidSchema))
+    }
 }
 
 #[get("/topic/{topic_name}/partition/{partition_name}/records")]
@@ -350,7 +350,7 @@ async fn partition_get_records(
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
-    let limit = QueryLimit::records(limit);
+    let limit = RowLimit::records(limit);
     let resp = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
@@ -366,24 +366,30 @@ async fn partition_get_records(
             .await
     };
 
-    let start = resp.indexed.get(0).and_then(|i| i.start());
+    let start = resp.chunks.get(0).and_then(|i| i.start());
     let end = resp
-        .indexed
+        .chunks
         .iter()
         .next_back()
         .and_then(|i| i.end().map(|ix| ix + 1));
     let range = start.zip(end).map(|(start, end)| start..end);
 
-    Ok(Json::from(Records {
-        span: range.map(Span::from_range),
-        status: resp.status.into(),
-        records: serialize_records(resp.indexed.into_iter().flat_map(|i| i.into_legacy())),
-    }))
+    let status = RecordStatus::from(resp.status);
+    if let Ok(records) = resp.into_legacy() {
+        Ok(Json::from(Records {
+            span: range.map(Span::from_range),
+            status,
+            records: serialize_records(records),
+        }))
+    } else {
+        Err(warp::reject::custom(ErrorReply::InvalidSchema))
+    }
 }
 
 async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
     let (code, message) = match err.find::<ErrorReply>() {
         Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query"),
+        Some(ErrorReply::InvalidSchema) => (StatusCode::BAD_REQUEST, "invalid schema"),
         Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy"),
         Some(ErrorReply::NoHeartbeat) => (StatusCode::INTERNAL_SERVER_ERROR, "no heartbeat"),
         Some(ErrorReply::Unknown) | None => (StatusCode::INTERNAL_SERVER_ERROR, "unknown error"),

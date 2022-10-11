@@ -18,6 +18,7 @@
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
 use crate::chunk::{estimate_size, parse_time, IndexedChunk, Schema, SchemaChunk};
+use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
 use crate::retention::Retention;
@@ -60,91 +61,6 @@ impl Default for Rolling {
     }
 }
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct QueryLimit {
-    pub max_records: usize,
-    pub max_bytes: usize,
-}
-
-impl Default for QueryLimit {
-    fn default() -> Self {
-        QueryLimit {
-            max_records: 10000,
-            max_bytes: 100 * 1024,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum LimitStatus {
-    Unreached {
-        remaining: QueryLimit,
-        schema: Option<Schema>,
-    },
-    SchemaChange,
-    BytesExceeded,
-    RecordsExceeded,
-}
-
-impl LimitStatus {
-    #[cfg(test)]
-    pub(crate) fn is_limited(&self) -> bool {
-        match self {
-            LimitStatus::Unreached { .. } => false,
-            _ => true,
-        }
-    }
-
-    pub(crate) fn after(&mut self, mut indexed: IndexedChunk) -> Option<IndexedChunk> {
-        match &self {
-            LimitStatus::Unreached { remaining, schema } => {
-                if schema
-                    .as_ref()
-                    .filter(|s| *s != &indexed.inner_schema)
-                    .is_some()
-                {
-                    *self = LimitStatus::SchemaChange;
-                    None
-                } else {
-                    *self = remaining.after(&mut indexed);
-                    Some(indexed)
-                }
-            }
-            _ => None,
-        }
-    }
-}
-
-impl QueryLimit {
-    pub fn records(max_records: usize) -> Self {
-        QueryLimit {
-            max_records,
-            ..QueryLimit::default()
-        }
-    }
-
-    pub(crate) fn after(&self, indexed: &mut IndexedChunk) -> LimitStatus {
-        let count: usize = indexed.chunk.len();
-        let bytes: usize = estimate_size(&indexed.chunk).unwrap_or(0);
-        if count >= self.max_records {
-            indexed.slice(0, self.max_records);
-            LimitStatus::RecordsExceeded
-        } else if bytes >= self.max_bytes {
-            // NOTE: byte-size slicing is much more complex in arrow, so we're
-            // punting for now.
-            LimitStatus::BytesExceeded
-        } else {
-            LimitStatus::Unreached {
-                remaining: QueryLimit {
-                    max_records: self.max_records - count,
-                    max_bytes: self.max_bytes - bytes,
-                },
-                schema: Some(indexed.inner_schema.clone()),
-            }
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub retain: Retention,
@@ -162,12 +78,6 @@ pub struct State {
     last_roll: Instant,
     messages: Slog,
     commits: watch::Receiver<RecordIndex>,
-}
-
-#[derive(Debug)]
-pub(crate) struct PartitionRecordResponse {
-    pub(crate) indexed: Vec<IndexedChunk>,
-    pub(crate) status: LimitStatus,
 }
 
 fn merge_ranges<T: Ord>(a: Range<T>, b: Range<T>) -> Range<T> {
@@ -261,7 +171,6 @@ impl Partition {
         format!("{}-{}", id.topic(), id.partition())
     }
 
-    #[cfg(test)]
     pub(crate) async fn extend_records(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
         self.extend(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
             .await
@@ -302,11 +211,7 @@ impl Partition {
             .chain(stream::iter(cached.into_iter()))
     }
 
-    pub(crate) async fn get_records(
-        &self,
-        start: RecordIndex,
-        limit: QueryLimit,
-    ) -> PartitionRecordResponse {
+    pub(crate) async fn get_records(&self, start: RecordIndex, limit: RowLimit) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
             .stream_with_active(self.manifest.stream_segments(&self.id, start), &state)
@@ -330,8 +235,8 @@ impl Partition {
         &self,
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
-        limit: QueryLimit,
-    ) -> PartitionRecordResponse {
+        limit: RowLimit,
+    ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
             .stream_with_active(
@@ -360,10 +265,10 @@ impl Partition {
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
-        let record_response = self.get_records(index, QueryLimit::records(1)).await;
+        let record_response = self.get_records(index, RowLimit::records(1)).await;
 
         record_response
-            .indexed
+            .chunks
             .into_iter()
             .map(|indexed| {
                 indexed
@@ -515,19 +420,16 @@ impl State {
 
     async fn get_records_from_segments<'a>(
         &'a self,
-        limit: QueryLimit,
+        limit: RowLimit,
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
         indices: impl Stream<Item = SegmentData> + 'a + Send,
-    ) -> PartitionRecordResponse {
+    ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
         // wasteful in many cases. this is why we require a lazy stream of
         // `indices` of all segments that could possibly have said data. the
         // manifest tracks this information in a performant fashion.
-        let mut status = LimitStatus::Unreached {
-            remaining: limit,
-            schema: None,
-        };
+        let mut batch = LimitedBatch::open(limit);
         // Feb 2022: this box / pin is necessary due to a bug in the rust
         // compiler. it has difficulty matching lifetimes across async fns and
         // closures. aggravated by using streams. issue with linked workaround:
@@ -558,13 +460,22 @@ impl State {
                     let after = indexed.filter(&filter(&indexed)).unwrap();
                     after
                 })
-                .scan(&mut status, move |status, indexed| {
-                    future::ready(status.after(indexed))
+                .scan(&mut batch, move |batch, indexed| {
+                    batch.extend_one(indexed);
+                    future::ready(if batch.status.is_open() {
+                        Some(true)
+                    } else {
+                        None
+                    })
                 }),
         );
 
-        let indexed = stream.collect().await;
-        PartitionRecordResponse { indexed, status }
+        // `scan` does the heavy lifting here, so we just need to drive the
+        // stream to completion. this might not be necessary if it's possible
+        // for `LimitedBatch` to gain `impl Sink`
+        stream.count().await;
+
+        batch
     }
 
     async fn retain(&self, partition: &Partition) {
@@ -712,9 +623,9 @@ pub mod test {
             let slice = Vec::from(&records[range.clone()]);
             assert_eq!(
                 deindex(
-                    t.get_records(RecordIndex(start), QueryLimit::records(limit))
+                    t.get_records(RecordIndex(start), RowLimit::records(limit))
                         .await
-                        .indexed
+                        .chunks
                 ),
                 slice
             );
@@ -743,13 +654,13 @@ pub mod test {
             .get_records_by_time(
                 RecordIndex(0),
                 parse_time(2)..=parse_time(3),
-                QueryLimit::default(),
+                RowLimit::default(),
             )
             .await;
 
         let mut chunk_slice = IndexedChunk::from_start(RecordIndex(0), chunk_a);
         chunk_slice.slice(2, 2);
-        assert_eq!(result.indexed, vec![chunk_slice]);
+        assert_eq!(result.chunks, vec![chunk_slice]);
 
         Ok(())
     }
@@ -830,39 +741,39 @@ pub mod test {
             let part = reattach(&dir, spec).await;
 
             let start = RecordIndex(0);
-            let result = part.get_records(start, QueryLimit::default()).await;
-            assert_eq!(result.status, LimitStatus::SchemaChange);
+            let result = part.get_records(start, RowLimit::default()).await;
+            assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
-                result.indexed,
+                result.chunks,
                 vec![IndexedChunk::from_start(
                     start,
                     SchemaChunk::from_legacy(records)?
                 )]
             );
 
-            let start = result.indexed.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, QueryLimit::default()).await;
-            assert_eq!(result.status, LimitStatus::SchemaChange);
+            let start = result.chunks.last().unwrap().end().unwrap() + 1;
+            let result = part.get_records(start, RowLimit::default()).await;
+            assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
-                result.indexed,
+                result.chunks,
                 vec![
                     IndexedChunk::from_start(start, chunk_a.clone()),
                     IndexedChunk::from_start(start + chunk_a.len(), chunk_a.clone())
                 ]
             );
 
-            let start = result.indexed.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, QueryLimit::default()).await;
-            assert!(!result.status.is_limited());
+            let start = result.chunks.last().unwrap().end().unwrap() + 1;
+            let result = part.get_records(start, RowLimit::default()).await;
+            assert!(result.status.is_open());
             assert_eq!(
-                result.indexed,
+                result.chunks,
                 vec![IndexedChunk::from_start(start, chunk_b.clone()),]
             );
 
-            let start = result.indexed.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, QueryLimit::default()).await;
-            assert!(!result.status.is_limited());
-            assert_eq!(result.indexed, vec![]);
+            let start = result.chunks.last().unwrap().end().unwrap() + 1;
+            let result = part.get_records(start, RowLimit::default()).await;
+            assert!(result.status.is_open());
+            assert_eq!(result.chunks, vec![]);
         }
 
         Ok(())
@@ -949,8 +860,8 @@ pub mod test {
         Ok(())
     }
 
-    pub(crate) fn assert_limit_unreached(status: &LimitStatus) {
-        assert!(!status.is_limited());
+    pub(crate) fn assert_limit_unreached(status: &BatchStatus) {
+        assert!(status.is_open());
     }
 
     #[tokio::test]
@@ -1000,45 +911,39 @@ pub mod test {
         }
 
         // fetch from start fast-forwards to first valid index
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = t.get_records(RecordIndex(0), QueryLimit::records(2)).await;
-        assert_eq!(status, LimitStatus::RecordsExceeded);
-        let start_index = is.iter().next().unwrap().start().unwrap();
-        assert_eq!(deindex(is), vec![records[3].clone(), records[4].clone()]);
+        let result = t.get_records(RecordIndex(0), RowLimit::records(2)).await;
+        assert_eq!(result.status, BatchStatus::RecordsExceeded);
+        let start_index = result.chunks.iter().next().unwrap().start().unwrap();
+        assert_eq!(
+            deindex(result.chunks),
+            vec![records[3].clone(), records[4].clone()]
+        );
 
         // iterate through from start
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = t.get_records(start_index, QueryLimit::records(2)).await;
-        assert_eq!(status, LimitStatus::RecordsExceeded);
-        let next_index = is.iter().next_back().unwrap().end().unwrap() + 1;
-        assert_eq!(deindex(is), vec![records[3].clone(), records[4].clone()]);
+        let result = t.get_records(start_index, RowLimit::records(2)).await;
+        assert_eq!(result.status, BatchStatus::RecordsExceeded);
+        let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
+        assert_eq!(
+            deindex(result.chunks),
+            vec![records[3].clone(), records[4].clone()]
+        );
 
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = t.get_records(next_index, QueryLimit::records(2)).await;
-        assert_eq!(status, LimitStatus::RecordsExceeded);
-        let next_index = is.iter().next_back().unwrap().end().unwrap() + 1;
-        assert_eq!(deindex(is), vec![records[5].clone(), records[6].clone()]);
+        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        assert_eq!(result.status, BatchStatus::RecordsExceeded);
+        let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
+        assert_eq!(
+            deindex(result.chunks),
+            vec![records[5].clone(), records[6].clone()]
+        );
 
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = t.get_records(next_index, QueryLimit::records(2)).await;
-        assert_limit_unreached(&status);
-        let next_index = is.iter().next_back().unwrap().end().unwrap() + 1;
-        assert_eq!(deindex(is), vec![records[7].clone()]);
+        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        assert_limit_unreached(&result.status);
+        let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
+        assert_eq!(deindex(result.chunks), vec![records[7].clone()]);
 
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = t.get_records(next_index, QueryLimit::records(2)).await;
-        assert_limit_unreached(&status);
-        assert_eq!(deindex(is), vec![]);
+        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        assert_limit_unreached(&result.status);
+        assert_eq!(deindex(result.chunks), vec![]);
 
         Ok(())
     }
@@ -1103,10 +1008,10 @@ pub mod test {
                             t.get_records_by_time(
                                 RecordIndex(start),
                                 query,
-                                QueryLimit::records(limit)
+                                RowLimit::records(limit)
                             )
                             .await
-                            .indexed
+                            .chunks
                         ),
                         time_slice
                     );
@@ -1129,40 +1034,42 @@ pub mod test {
         p.extend_records(&records).await?;
         let records = build_records((10..20).map(|_| (0, data.clone())));
         p.extend_records(&records).await?;
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = p
+        let result = p
             .get_records(
                 RecordIndex(0),
-                QueryLimit {
+                RowLimit {
                     max_records: 10,
                     max_bytes: 250,
                 },
             )
             .await;
 
-        assert_eq!(status, LimitStatus::BytesExceeded);
+        assert_eq!(result.status, BatchStatus::BytesExceeded);
         assert_eq!(
-            is.iter().map(|i| i.chunk.len()).collect::<Vec<_>>(),
+            result
+                .chunks
+                .iter()
+                .map(|i| i.chunk.len())
+                .collect::<Vec<_>>(),
             vec![6]
         );
 
-        let PartitionRecordResponse {
-            indexed: is,
-            status,
-        } = p
+        let result = p
             .get_records(
                 RecordIndex(0),
-                QueryLimit {
+                RowLimit {
                     max_records: 10,
                     max_bytes: 1,
                 },
             )
             .await;
-        assert_eq!(status, LimitStatus::BytesExceeded);
+        assert_eq!(result.status, BatchStatus::BytesExceeded);
         assert_eq!(
-            is.iter().map(|i| i.chunk.len()).collect::<Vec<_>>(),
+            result
+                .chunks
+                .iter()
+                .map(|i| i.chunk.len())
+                .collect::<Vec<_>>(),
             vec![6]
         );
 

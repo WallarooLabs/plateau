@@ -1719,6 +1719,7 @@ dependencies = [
  "chrono",
  "futures",
  "itermore",
+ "itertools",
  "log",
  "metrics",
  "metrics-exporter-prometheus",

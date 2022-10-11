@@ -1,6 +1,7 @@
 pub mod catalog;
 mod chunk;
 pub mod http;
+mod limit;
 mod manifest;
 pub mod metrics;
 mod partition;
