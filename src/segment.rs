@@ -209,7 +209,7 @@ impl SegmentWriter2 {
         &self.schema == schema
     }
 
-    pub fn log_arrow<S: Borrow<Schema>>(&mut self, data: SchemaChunk<S>) -> Result<()> {
+    pub fn log_arrow<S: Borrow<Schema> + Clone>(&mut self, data: SchemaChunk<S>) -> Result<()> {
         if !self.check_schema(data.schema.borrow()) {
             anyhow::bail!("cannot use different schemas within the same segment");
         }
@@ -354,8 +354,6 @@ impl SegmentReader2 {
     fn new(mut f: fs::File) -> Result<Self> {
         let metadata = read_metadata(&mut f)?;
         let schema = infer_schema(&metadata)?;
-
-        let schema = schema.filter(|_, f| f.name == "time" || f.name == "message");
 
         Ok(SegmentReader2 {
             reader: FileReader2::new(f, metadata.row_groups, schema.clone(), None, None, None),

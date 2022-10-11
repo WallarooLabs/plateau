@@ -27,7 +27,7 @@ use crate::segment::{CloseArrow, Record, Segment, SegmentWriter2};
 use anyhow::Result;
 use arrow2::datatypes::Schema;
 use chrono::{DateTime, Utc};
-use log::trace;
+use log::{debug, trace};
 use metrics::counter;
 use std::cmp::{max, min};
 use std::convert::TryFrom;
@@ -100,6 +100,7 @@ pub(crate) struct Slog {
     state: RwLock<State>,
 }
 
+#[derive(Clone, Debug)]
 struct MemorySegment {
     metadata: SegmentData,
     schema: Schema,
@@ -190,14 +191,7 @@ impl Slog {
     ) -> Option<Record> {
         self.iter_segment(segment)
             .await
-            .map(|chunk| {
-                SchemaChunk {
-                    schema: legacy_schema(),
-                    chunk,
-                }
-                .into_legacy()
-                .unwrap()
-            })
+            .map(|chunk| chunk.into_legacy().unwrap())
             .flatten()
             .skip(relative)
             .next()
@@ -206,16 +200,26 @@ impl Slog {
     pub(crate) async fn iter_segment<'a>(
         &'a self,
         ix: SegmentIndex,
-    ) -> Box<dyn Iterator<Item = SegmentChunk> + Send + 'a> {
+    ) -> Box<dyn Iterator<Item = SchemaChunk<Schema>> + Send + 'a> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
             return Box::new(std::iter::empty());
         }
 
         if let Some(in_mem) = state.get_segment(ix).await {
+            let schema = in_mem.schema.clone();
             // NOTE: the backing [Buffer] behind arrow2 arrays is actually
             // arc-ed, so this clone _should_ be relatively cheap.
-            return Box::new(in_mem.clone().into_iter());
+            return Box::new(
+                in_mem
+                    .chunks
+                    .clone()
+                    .into_iter()
+                    .map(move |chunk| SchemaChunk {
+                        schema: schema.clone(),
+                        chunk,
+                    }),
+            );
         }
 
         let segment = self.get_segment(ix);
@@ -225,7 +229,10 @@ impl Slog {
         }
 
         let (schema, iter) = segment.read2().unwrap().into_chunk_iter();
-        Box::new(iter.map(|c| c.unwrap()))
+        Box::new(iter.map(move |c| SchemaChunk {
+            schema: schema.clone(),
+            chunk: c.unwrap(),
+        }))
     }
 
     pub(crate) async fn append(&self, data: SchemaChunk<Schema>) -> Checkpoint {
@@ -282,6 +289,7 @@ impl State {
     pub(crate) async fn append(&mut self, d: SchemaChunk<Schema>) -> Checkpoint {
         if let Some(segment) = self.active.as_ref() {
             if segment.schema != d.schema {
+                debug!("schema change after {:?}", segment.metadata.index);
                 // TODO: bubble this failure up
                 self.roll().await.unwrap();
             }
@@ -323,14 +331,12 @@ impl State {
         }
     }
 
-    async fn get_segment(&self, ix: SegmentIndex) -> Option<&Vec<SegmentChunk>> {
+    async fn get_segment(&self, ix: SegmentIndex) -> Option<&MemorySegment> {
         if ix == self.active_checkpoint.segment {
-            self.active.as_ref().map(|a| &a.chunks)
+            self.active.as_ref()
         } else {
             match &self.pending {
-                Some(pending) if ix.next() == self.active_checkpoint.segment => {
-                    Some(&pending.chunks)
-                }
+                Some(pending) if ix.next() == self.active_checkpoint.segment => Some(&pending),
                 _ => None,
             }
         }

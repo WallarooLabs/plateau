@@ -1,8 +1,9 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
+use crate::chunk::{Schema, SchemaChunk};
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
-pub use crate::partition::{IndexedRecord, Rolling};
+pub use crate::partition::Rolling;
 use crate::partition::{LimitStatus, Partition, PartitionId, PartitionRecordResponse, QueryLimit};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
@@ -138,7 +139,9 @@ impl Topic {
 
     pub async fn append(&self, partition_name: &str, rs: &[Record]) -> Result<Range<RecordIndex>> {
         let partition = self.get_partition(partition_name).await;
-        partition.append(rs).await
+        partition
+            .extend(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
+            .await
     }
 
     #[cfg(test)]
@@ -209,17 +212,28 @@ impl Topic {
 
         read_starts.sort();
         let mut records = vec![];
-        let mut limit_left = LimitStatus::Unreached(limit);
+        let mut status = LimitStatus::Unreached {
+            remaining: limit,
+            schema: None,
+        };
         for (start, name) in read_starts.into_iter() {
             let partition = self.get_partition(&name).await;
-            if let LimitStatus::Unreached(remaining) = limit_left {
+            if let LimitStatus::Unreached { remaining, .. } = status {
                 let batch_response = fetch(partition, start, remaining).await;
-                limit_left = remaining.after(&batch_response.records);
+                let trimmed = batch_response
+                    .indexed
+                    .into_iter()
+                    .scan(&mut status, |status, indexed| status.after(indexed))
+                    .collect::<Vec<_>>();
 
-                if let Some(final_record) = batch_response.records.last() {
-                    iterator.insert(name, final_record.index.0 + 1);
+                if let Some(final_record) = trimmed.last().and_then(|indexed| indexed.end()) {
+                    iterator.insert(name, (final_record + 1).0);
                 }
-                records.extend(batch_response.records.into_iter().map(|ir| ir.data));
+                records.extend(
+                    trimmed
+                        .into_iter()
+                        .flat_map(|ir| ir.into_legacy().into_iter()),
+                );
             } else {
                 break;
             }
@@ -228,7 +242,7 @@ impl Topic {
         TopicRecordResponse {
             iter: iterator,
             records,
-            status: limit_left,
+            status,
         }
     }
 
@@ -465,6 +479,7 @@ mod test {
             } = topic
                 .get_records(it, QueryLimit::records(fetch_count))
                 .await;
+
             if fetched.len() + fetch_count >= records.len() {
                 assert_limit_unreached(&status);
             } else {
@@ -520,7 +535,7 @@ mod test {
                     .await
                     .get_records(RecordIndex(0), QueryLimit::records(1000))
                     .await
-                    .records
+                    .indexed
             ),
             vec![records[0].clone(), records[3].clone()]
         );

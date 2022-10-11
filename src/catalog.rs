@@ -191,11 +191,11 @@ mod test {
             let oldest_topic = catalog.get_topic("oldest").await;
             let p = oldest_topic.get_partition("default").await;
 
-            p.append(&oldest_records).await?;
+            p.extend_records(&oldest_records).await?;
             p.compact().await;
-            p.append(&oldest_records).await?;
+            p.extend_records(&oldest_records).await?;
             p.compact().await;
-            p.append(&oldest_records).await?;
+            p.extend_records(&oldest_records).await?;
             p.byte_size().await
         };
 
@@ -204,9 +204,9 @@ mod test {
             let name = format!("topic-{}", ix);
             let topic = catalog.get_topic(&name).await;
             let partition = topic.get_partition("default").await;
-            partition.append(&records).await?;
+            partition.extend_records(&records).await?;
             partition.compact().await;
-            partition.append(&records).await?;
+            partition.extend_records(&records).await?;
         }
 
         assert!(catalog.byte_size().await > catalog.config.retain.max_bytes);

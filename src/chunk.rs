@@ -1,9 +1,10 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
 use arrow2::array::{
-    Array, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array,
-    PrimitiveArray, Utf8Array,
+    Array, BooleanArray, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray,
+    MutableUtf8Array, PrimitiveArray, Utf8Array,
 };
 use arrow2::chunk::Chunk;
+use arrow2::compute::filter::filter_chunk;
 pub use arrow2::datatypes::Schema;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use chrono::{DateTime, Duration, TimeZone, Utc};
@@ -11,6 +12,8 @@ use parquet::data_type::ByteArray;
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
 use thiserror::Error;
+
+use crate::slog::RecordIndex;
 
 // currently unstable; don't need a const fn
 pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
@@ -45,8 +48,13 @@ pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
     .unwrap()
 }
 
+pub fn parse_time(tv: i64) -> DateTime<Utc> {
+    Utc.timestamp(0, 0) + Duration::milliseconds(tv)
+}
+
 /// A [SegmentChunk] packaged with its associated [Schema].
-pub(crate) struct SchemaChunk<S: Borrow<Schema>> {
+#[derive(Clone)]
+pub(crate) struct SchemaChunk<S: Borrow<Schema> + Clone> {
     pub(crate) schema: S,
     pub(crate) chunk: SegmentChunk,
 }
@@ -57,7 +65,11 @@ pub struct Record {
     pub message: ByteArray,
 }
 
-impl<S: Borrow<Schema>> SchemaChunk<S> {
+impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
+    pub fn len(&self) -> usize {
+        self.chunk.len()
+    }
+
     pub fn into_legacy(self) -> Result<Vec<Record>, ChunkError> {
         if self.schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
             return Err(ChunkError::BadColumn(0, "time"));
@@ -89,7 +101,7 @@ impl<S: Borrow<Schema>> SchemaChunk<S> {
             .values_iter()
             .zip(message.values_iter())
             .map(|(tv, m)| Record {
-                time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
+                time: parse_time(*tv),
                 message: ByteArray::from(m),
             })
             .collect())
@@ -131,8 +143,8 @@ impl SchemaChunk<Schema> {
             })?;
 
         let times = times.iter().map(|tv| tv.unwrap());
-        let start = Utc.timestamp(0, 0) + Duration::milliseconds(*times.clone().min().unwrap());
-        let end = Utc.timestamp(0, 0) + Duration::milliseconds(*times.max().unwrap());
+        let start = parse_time(*times.clone().min().unwrap());
+        let end = parse_time(*times.max().unwrap());
 
         Ok(start..=end)
     }
@@ -216,6 +228,92 @@ pub fn legacy_schema() -> Schema {
             Field::new("message", DataType::Utf8, false),
         ],
         metadata: Metadata::default(),
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct IndexedChunk {
+    pub(crate) inner_schema: Schema,
+    pub(crate) chunk: SegmentChunk,
+}
+
+impl IndexedChunk {
+    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>) -> IndexedChunk {
+        assert!(data.chunk.arrays().len() > 0);
+        let start = ix.0 as i32;
+        let size = data.chunk.len() as i32;
+        let mut arrays = data.chunk.into_arrays();
+        let indices = PrimitiveArray::<i32>::from_values(start..(start + size));
+        arrays.push(indices.boxed());
+        IndexedChunk {
+            inner_schema: data.schema,
+            chunk: SegmentChunk::new(arrays),
+        }
+    }
+
+    pub(crate) fn start(&self) -> Option<RecordIndex> {
+        self.indices()
+            .values()
+            .iter()
+            .next()
+            .map(|i| RecordIndex(*i as usize))
+    }
+
+    pub(crate) fn end(&self) -> Option<RecordIndex> {
+        self.indices()
+            .values()
+            .last()
+            .map(|i| RecordIndex(*i as usize))
+    }
+
+    pub(crate) fn indices(&self) -> &PrimitiveArray<i32> {
+        self.chunk
+            .arrays()
+            .last()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<PrimitiveArray<i32>>()
+            .unwrap()
+    }
+
+    pub(crate) fn times(&self) -> &PrimitiveArray<i64> {
+        &self.chunk.arrays()[0]
+            .as_any()
+            .downcast_ref::<PrimitiveArray<i64>>()
+            .unwrap()
+    }
+
+    pub(crate) fn slice(&mut self, offset: usize, len: usize) {
+        let arrays = std::mem::replace(&mut self.chunk, Chunk::new(vec![]))
+            .into_arrays()
+            .into_iter()
+            .map(|arr| arr.slice(offset, len))
+            .collect();
+
+        self.chunk = Chunk::new(arrays);
+    }
+
+    pub(crate) fn filter(
+        &self,
+        filter: &BooleanArray,
+    ) -> Result<IndexedChunk, arrow2::error::Error> {
+        Ok(IndexedChunk {
+            inner_schema: self.inner_schema.clone(),
+            chunk: filter_chunk(&self.chunk, filter)?,
+        })
+    }
+
+    pub(crate) fn into_legacy(self) -> Vec<Record> {
+        chunk_into_legacy(self.chunk)
+    }
+}
+
+impl From<IndexedChunk> for SegmentChunk {
+    fn from(indexed: IndexedChunk) -> SegmentChunk {
+        let size = indexed.chunk.len();
+        let mut arrays = indexed.chunk.into_arrays();
+        arrays.truncate(size - 1);
+        SegmentChunk::new(arrays)
     }
 }
 

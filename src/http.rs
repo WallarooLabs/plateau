@@ -64,6 +64,8 @@ struct Partitions {
 enum RecordStatus {
     /// All current records returned.
     All,
+    /// Record response was limited because the next chunk of records has a different schema.
+    SchemaChange,
     /// Record response was limited by record limit. Additional records exist.
     RecordLimited,
     /// Record response was limited by payload size limit. Additional records exist.
@@ -73,7 +75,8 @@ enum RecordStatus {
 impl From<LimitStatus> for RecordStatus {
     fn from(orig: LimitStatus) -> Self {
         match orig {
-            LimitStatus::Unreached(_) => RecordStatus::All,
+            LimitStatus::Unreached { .. } => RecordStatus::All,
+            LimitStatus::SchemaChange => RecordStatus::SchemaChange,
             LimitStatus::BytesExceeded => RecordStatus::ByteLimited,
             LimitStatus::RecordsExceeded => RecordStatus::RecordLimited,
         }
@@ -363,14 +366,18 @@ async fn partition_get_records(
             .await
     };
 
-    let start = resp.records.get(0).map(|r| r.index);
-    let end = resp.records.iter().next_back().map(|r| r.index + 1);
+    let start = resp.indexed.get(0).and_then(|i| i.start());
+    let end = resp
+        .indexed
+        .iter()
+        .next_back()
+        .and_then(|i| i.end().map(|ix| ix + 1));
     let range = start.zip(end).map(|(start, end)| start..end);
 
     Ok(Json::from(Records {
         span: range.map(Span::from_range),
         status: resp.status.into(),
-        records: serialize_records(resp.records.into_iter().map(|r| r.data)),
+        records: serialize_records(resp.indexed.into_iter().flat_map(|i| i.into_legacy())),
     }))
 }
 
