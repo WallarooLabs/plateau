@@ -97,9 +97,8 @@ dependencies = [
 
 [[package]]
 name = "arrow2"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "467e88c67d518f9992bb1f6c8faa202eaf93b0ce244889d241c9c44d0df0ab46"
+version = "0.14.1"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/upstream-0.14.1#0ac881da28139a7c2f593e46c3f486cd7abc905b"
 dependencies = [
  "ahash",
  "arrow-format",

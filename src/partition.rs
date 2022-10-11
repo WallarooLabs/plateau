@@ -16,12 +16,13 @@
 //! determine when to roll segments and expire old data. `Rolling` policies are
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
+use crate::chunk::{chunk_into_legacy, Schema, SchemaChunk};
 use crate::manifest::Manifest;
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
 use crate::retention::Retention;
 pub use crate::segment::Record;
-pub use crate::slog::{InternalIndex, RecordIndex};
-use crate::slog::{SegmentIndex, SegmentRecordIndex, Slog};
+pub use crate::slog::RecordIndex;
+use crate::slog::{SegmentIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{Stream, StreamExt};
@@ -148,12 +149,7 @@ impl Partition {
         let (segment, record) =
             Self::find_starting_index(&id, root.as_path(), &slog_name, &manifest).await;
 
-        let checkpoint = InternalIndex {
-            segment,
-            record: SegmentRecordIndex(0),
-        };
-
-        let (messages, mut writes) = Slog::attach(root.clone(), slog_name, checkpoint, record);
+        let (messages, mut writes) = Slog::attach(root.clone(), slog_name, segment, record);
 
         let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
@@ -228,10 +224,11 @@ impl Partition {
     pub(crate) async fn append(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
         let mut state = self.state.write().await;
         let start = state.messages.next_record_ix().await;
-        for r in rs {
-            state.roll_when_needed(&self).await?;
-            state.messages.append(r).await;
-        }
+        state.roll_when_needed(&self).await?;
+        state
+            .messages
+            .append(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
+            .await;
 
         Ok(start..(start + rs.len()))
     }
@@ -481,7 +478,7 @@ impl State {
                         .iter_segment(segment.index)
                         .into_stream()
                         .flat_map(|batches| stream::iter(batches))
-                        .flat_map(|rs| stream::iter(rs))
+                        .flat_map(|chunk| stream::iter(chunk_into_legacy(chunk)))
                         .enumerate()
                         .map(move |(index, data)| IndexedRecord {
                             index: RecordIndex(segment.records.start.0 + index),

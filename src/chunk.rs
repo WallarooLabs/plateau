@@ -1,19 +1,160 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
-use arrow2::array::{Array, FixedSizeListArray, ListArray, Utf8Array};
+use arrow2::array::{
+    Array, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array,
+    PrimitiveArray, Utf8Array,
+};
 use arrow2::chunk::Chunk;
-use arrow2::datatypes::DataType;
+pub use arrow2::datatypes::Schema;
+use arrow2::datatypes::{DataType, Field, Metadata};
+use chrono::{DateTime, Duration, TimeZone, Utc};
+use parquet::data_type::ByteArray;
+use std::borrow::Borrow;
+use std::ops::RangeInclusive;
 use thiserror::Error;
+
+// currently unstable; don't need a const fn
+pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
+    std::any::type_name::<T>()
+}
 
 #[derive(Error, Debug)]
 pub enum ChunkError {
     #[error("unsupported type: {0}")]
     Unsupported(String),
+    #[error("column {0} must be '{1}'")]
+    BadColumn(usize, &'static str),
+    #[error("column {0} type {1} != {2}")]
+    InvalidColumnType(&'static str, &'static str, &'static str),
+    #[error("could not encode 'message' to utf8")]
+    FailedEncoding,
+    #[error("array lengths do not match")]
+    LengthMismatch,
     // this should really never happen...
     #[error("datatype does not match actual type")]
     TypeMismatch,
 }
 
 pub(crate) type SegmentChunk = Chunk<Box<dyn Array>>;
+
+pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
+    SchemaChunk {
+        schema: legacy_schema(),
+        chunk,
+    }
+    .into_legacy()
+    .unwrap()
+}
+
+/// A [SegmentChunk] packaged with its associated [Schema].
+pub(crate) struct SchemaChunk<S: Borrow<Schema>> {
+    pub(crate) schema: S,
+    pub(crate) chunk: SegmentChunk,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Record {
+    pub time: DateTime<Utc>,
+    pub message: ByteArray,
+}
+
+impl<S: Borrow<Schema>> SchemaChunk<S> {
+    pub fn into_legacy(self) -> Result<Vec<Record>, ChunkError> {
+        if self.schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
+            return Err(ChunkError::BadColumn(0, "time"));
+        }
+        if self.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
+            return Err(ChunkError::BadColumn(1, "message"));
+        }
+
+        let arrays = self.chunk.into_arrays();
+        let time = arrays
+            .get(0)
+            .ok_or(ChunkError::BadColumn(0, "time"))
+            .and_then(|arr| {
+                arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
+                    ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
+                )
+            })?;
+        let message =
+            arrays
+                .get(1)
+                .ok_or(ChunkError::BadColumn(1, "message"))
+                .and_then(|arr| {
+                    arr.as_any().downcast_ref::<Utf8Array<i32>>().ok_or(
+                        ChunkError::InvalidColumnType("message", "utf8", type_name_of_val(arr)),
+                    )
+                })?;
+
+        Ok(time
+            .values_iter()
+            .zip(message.values_iter())
+            .map(|(tv, m)| Record {
+                time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
+                message: ByteArray::from(m),
+            })
+            .collect())
+    }
+}
+
+impl SchemaChunk<Schema> {
+    pub fn from_legacy(mut records: Vec<Record>) -> Result<Self, ChunkError> {
+        let mut times = MutablePrimitiveArray::<i64>::new();
+        let mut messages = MutableUtf8Array::<i32>::new();
+
+        for r in records.drain(..) {
+            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+            times.push(Some(dt.num_milliseconds()));
+            messages.push(Some(
+                r.message
+                    .as_utf8()
+                    .map_err(|_| ChunkError::FailedEncoding)?,
+            ));
+        }
+
+        Ok(SchemaChunk {
+            schema: legacy_schema(),
+            chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
+                .map_err(|_| ChunkError::LengthMismatch)?,
+        })
+    }
+
+    pub fn time_range(&self) -> Result<RangeInclusive<DateTime<Utc>>, ChunkError> {
+        let times = self
+            .chunk
+            .arrays()
+            .get(0)
+            .ok_or(ChunkError::BadColumn(0, "time"))
+            .and_then(|arr| {
+                arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
+                    ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
+                )
+            })?;
+
+        let times = times.iter().map(|tv| tv.unwrap());
+        let start = Utc.timestamp(0, 0) + Duration::milliseconds(*times.clone().min().unwrap());
+        let end = Utc.timestamp(0, 0) + Duration::milliseconds(*times.max().unwrap());
+
+        Ok(start..=end)
+    }
+}
+
+impl<'a> SchemaChunk<&'a Schema> {
+    pub fn iter_legacy(
+        schema: Schema,
+        iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
+    ) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
+        iter.map(move |chunk| {
+            chunk.and_then(|chunk| {
+                SchemaChunk {
+                    schema: &schema,
+                    chunk,
+                }
+                .into_legacy()
+                .map_err(Into::into)
+            })
+        })
+    }
+}
 
 fn estimate_array_size(arr: &Box<dyn Array>) -> Result<usize, ChunkError> {
     match arr.data_type() {
@@ -66,17 +207,31 @@ pub fn estimate_size(chunk: &SegmentChunk) -> Result<usize, ChunkError> {
     chunk.arrays().iter().map(|a| estimate_array_size(&a)).sum()
 }
 
+pub fn legacy_schema() -> Schema {
+    // TODO: better schema for timestamps.
+    // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
+    Schema {
+        fields: vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("message", DataType::Utf8, false),
+        ],
+        metadata: Metadata::default(),
+    }
+}
+
 #[cfg(test)]
 pub mod test {
     use super::*;
     use arrow2::array::PrimitiveArray;
-    use arrow2::datatypes::{Field, Metadata, Schema};
+    use arrow2::datatypes::{Field, Metadata};
 
-    pub fn inferences_schema_a() -> (Schema, SegmentChunk) {
+    pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
+        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-        let inner = PrimitiveArray::<f64>::from_values(vec![2.0, 4.0, 6.0, 8.0, 10.0]);
-        let outputs = inner;
+        let inner = PrimitiveArray::<f64>::from_values(vec![
+            2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
+        ]);
 
         // TODO: we need fixed size list array support, which currently is not
         // in arrow2's parquet io module.
@@ -90,9 +245,21 @@ pub mod test {
             None,
         );
         */
+        let offsets = vec![0, 2, 4, 6, 8, 10];
+        let outputs = ListArray::new(
+            DataType::List(Box::new(Field::new(
+                "inner",
+                inner.data_type().clone(),
+                false,
+            ))),
+            offsets.into(),
+            inner.boxed(),
+            None,
+        );
 
         let schema = Schema {
             fields: vec![
+                Field::new("time", time.data_type().clone(), false),
                 Field::new("inputs", inputs.data_type().clone(), false),
                 Field::new("mul", mul.data_type().clone(), false),
                 Field::new("outputs", outputs.data_type().clone(), false),
@@ -100,13 +267,20 @@ pub mod test {
             metadata: Metadata::default(),
         };
 
-        (
+        SchemaChunk {
             schema,
-            Chunk::try_new(vec![inputs.boxed(), mul.boxed(), outputs.boxed()]).unwrap(),
-        )
+            chunk: Chunk::try_new(vec![
+                time.boxed(),
+                inputs.boxed(),
+                mul.boxed(),
+                outputs.boxed(),
+            ])
+            .unwrap(),
+        }
     }
 
-    pub fn inferences_schema_b() -> (Schema, SegmentChunk) {
+    pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
+        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
             vec!["one", "two", "three", "four", "five"].into_iter(),
         );
@@ -114,26 +288,30 @@ pub mod test {
 
         let schema = Schema {
             fields: vec![
+                Field::new("time", time.data_type().clone(), false),
                 Field::new("inputs", inputs.data_type().clone(), false),
                 Field::new("outputs", outputs.data_type().clone(), false),
             ],
             metadata: Metadata::default(),
         };
 
-        (
+        SchemaChunk {
             schema,
-            Chunk::try_new(vec![inputs.boxed(), outputs.boxed()]).unwrap(),
-        )
+            chunk: Chunk::try_new(vec![time.boxed(), inputs.boxed(), outputs.boxed()]).unwrap(),
+        }
     }
 
     #[test]
     fn test_size_estimates() -> Result<(), ChunkError> {
         assert_eq!(
-            estimate_size(&inferences_schema_a().1)?,
-            5 * 4 + 5 * 4 + 5 * 8
+            estimate_size(&inferences_schema_a().chunk)?,
+            5 * 8 + 5 * 4 + 5 * 4 + 10 * 8
         );
         let numbers = 3 + 3 + 5 + 4 + 4;
-        assert_eq!(estimate_size(&inferences_schema_b().1)?, numbers + 5 * 4);
+        assert_eq!(
+            estimate_size(&inferences_schema_b().chunk)?,
+            5 * 8 + numbers + 5 * 4
+        );
         Ok(())
     }
 }

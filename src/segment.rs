@@ -14,6 +14,7 @@ use arrow2::io::parquet::write::{
     CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
 };
 use chrono::{DateTime, Duration, TimeZone, Utc};
+use std::borrow::Borrow;
 use std::convert::TryFrom;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
@@ -22,11 +23,11 @@ use std::iter;
 use std::sync::Arc;
 use std::{fs, path::Path, path::PathBuf};
 
-use parquet::data_type::ByteArray;
 #[cfg(test)]
 use parquet::{
     column::reader::ColumnReader,
     column::writer::ColumnWriter,
+    data_type::ByteArray,
     file::{
         properties::WriterProperties,
         reader::{FileReader, SerializedFileReader},
@@ -35,13 +36,8 @@ use parquet::{
     schema::parser::parse_message_type,
 };
 
-use crate::chunk::SegmentChunk;
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Record {
-    pub time: DateTime<Utc>,
-    pub message: ByteArray,
-}
+pub use crate::chunk::Record;
+use crate::chunk::{SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
@@ -213,17 +209,17 @@ impl SegmentWriter2 {
         &self.schema == schema
     }
 
-    pub fn log_arrow(&mut self, schema: &Schema, chunk: SegmentChunk) -> Result<()> {
-        if !self.check_schema(schema) {
+    pub fn log_arrow<S: Borrow<Schema>>(&mut self, data: SchemaChunk<S>) -> Result<()> {
+        if !self.check_schema(data.schema.borrow()) {
             anyhow::bail!("cannot use different schemas within the same segment");
         }
 
         let encodings: Vec<_> = iter::repeat(vec![Encoding::Plain])
-            .take(schema.fields.len())
+            .take(data.schema.borrow().fields.len())
             .collect();
 
         let row_groups = RowGroupIterator::try_new(
-            iter::once(Ok(chunk)),
+            iter::once(Ok(data.chunk)),
             &self.schema,
             self.options,
             encodings,
@@ -375,71 +371,11 @@ impl SegmentReader2 {
     }
 }
 
-pub fn parse_legacy(schema: &Schema, chunk: SegmentChunk) -> Result<Vec<Record>> {
-    if schema.fields.get(0).map(|f| f.name.as_str()) != Some("time") {
-        anyhow::bail!("first column must be time")
-    }
-    if schema.fields.get(1).map(|f| f.name.as_str()) != Some("message") {
-        anyhow::bail!("second column must be message")
-    }
-
-    let arrays = chunk.into_arrays();
-    let time = arrays
-        .get(0)
-        .ok_or(anyhow::anyhow!("missing 'time' column"))
-        .and_then(|arr| {
-            arr.as_any()
-                .downcast_ref::<PrimitiveArray<i64>>()
-                .ok_or(anyhow::anyhow!("invalid 'time' array"))
-        })?;
-    let message = arrays
-        .get(1)
-        .ok_or(anyhow::anyhow!("missing 'message' column"))
-        .and_then(|arr| {
-            arr.as_any()
-                .downcast_ref::<Utf8Array<i32>>()
-                .ok_or(anyhow::anyhow!("invalid 'message' array"))
-        })?;
-
-    Ok(time
-        .values_iter()
-        .zip(message.values_iter())
-        .map(|(tv, m)| Record {
-            time: Utc.timestamp(0, 0) + Duration::milliseconds(*tv),
-            message: ByteArray::from(m),
-        })
-        .collect())
-}
-
-pub fn legacy_schema() -> Schema {
-    // TODO: better schema for timestamps.
-    // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
-    Schema {
-        fields: vec![
-            Field::new("time", DataType::Int64, false),
-            Field::new("message", DataType::Utf8, false),
-        ],
-        metadata: Metadata::default(),
-    }
-}
-
-pub fn chunk_legacy(mut records: Vec<Record>) -> Result<SegmentChunk> {
-    let mut times = MutablePrimitiveArray::<i64>::new();
-    let mut messages = MutableUtf8Array::<i32>::new();
-
-    for r in records.drain(..) {
-        let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
-        times.push(Some(dt.num_milliseconds()));
-        messages.push(Some(r.message.as_utf8()?));
-    }
-
-    Chunk::try_new(vec![times.as_box(), messages.as_box()]).map_err(Into::into)
-}
-
 #[cfg(test)]
 pub mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::chunk::{legacy_schema, ChunkError};
     use tempfile::tempdir;
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
@@ -476,6 +412,16 @@ pub mod test {
         Ok(())
     }
 
+    fn collect_records(
+        schema: Schema,
+        iter: impl Iterator<Item = Result<SegmentChunk, anyhow::Error>>,
+    ) -> Vec<Record> {
+        SchemaChunk::iter_legacy(schema, iter)
+            .map(Result::unwrap)
+            .flatten()
+            .collect()
+    }
+
     #[test]
     fn round_trip1_2() -> Result<()> {
         let root = tempdir()?;
@@ -495,11 +441,7 @@ pub mod test {
 
         let r = s.read2()?;
         let (schema, iter) = r.into_chunk_iter();
-        assert_eq!(
-            iter.flat_map(|b| parse_legacy(&schema, b.unwrap()).unwrap())
-                .collect::<Vec<_>>(),
-            records
-        );
+        assert_eq!(collect_records(schema, iter), records);
         Ok(())
     }
 
@@ -514,20 +456,16 @@ pub mod test {
                 .map(|ix| (ix, format!("message-{}", ix))),
         );
 
-        let mut w = s.create2(legacy_schema())?;
-        let schema = &legacy_schema();
-        w.log_arrow(&schema, chunk_legacy(records[0..10].to_vec())?)?;
-        w.log_arrow(&schema, chunk_legacy(records[10..].to_vec())?)?;
+        let schema = legacy_schema();
+        let mut w = s.create2(schema.clone())?;
+        w.log_arrow(SchemaChunk::from_legacy(records[0..10].to_vec())?)?;
+        w.log_arrow(SchemaChunk::from_legacy(records[10..].to_vec())?)?;
         let size = w.close()?;
         assert!(size > 0);
 
         let r = s.read2()?;
         let (schema, iter) = r.into_chunk_iter();
-        assert_eq!(
-            iter.flat_map(|b| parse_legacy(&schema, b.unwrap()).unwrap())
-                .collect::<Vec<_>>(),
-            records
-        );
+        assert_eq!(collect_records(schema, iter), records);
         Ok(())
     }
 
@@ -537,12 +475,12 @@ pub mod test {
         let path = root.path().join("testing.parquet");
         let s = Segment::at(PathBuf::from(path));
 
-        let (a_schema, a) = inferences_schema_a();
-        let mut w = s.create2(a_schema.clone())?;
-        w.log_arrow(&a_schema, a)?;
-        let (b_schema, b) = inferences_schema_b();
-        assert!(!w.check_schema(&b_schema));
-        assert!(w.log_arrow(&b_schema, b).is_err());
+        let a = inferences_schema_a();
+        let mut w = s.create2(a.schema.clone())?;
+        w.log_arrow(a)?;
+        let b = inferences_schema_b();
+        assert!(!w.check_schema(&b.schema));
+        assert!(w.log_arrow(b).is_err());
         Ok(())
     }
 
