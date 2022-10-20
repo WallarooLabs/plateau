@@ -1716,6 +1716,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow2",
+ "bytes",
  "chrono",
  "futures",
  "itermore",

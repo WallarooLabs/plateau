@@ -2,12 +2,10 @@ use ::log::info;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future;
-use parquet::data_type::ByteArray;
 use rweb::*;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
@@ -16,22 +14,17 @@ use std::time::{Duration, SystemTime};
 use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 use tracing::Instrument;
-use warp::http::StatusCode;
 
 use crate::catalog::Catalog;
-use crate::limit::{BatchStatus, RowLimit};
+use crate::chunk::{Schema, SchemaChunk};
+use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::slog::{RecordIndex, SlogError};
-use crate::topic::{Record, TopicIterator, TopicRecordResponse};
+use crate::topic::{Record, TopicIterator};
 
-#[derive(Deserialize)]
-struct Insert {
-    records: Vec<String>,
-}
+mod chunk;
+mod error;
 
-#[derive(Schema, Deserialize)]
-struct InsertQuery {
-    time: Option<String>,
-}
+use self::error::{emit_error, ErrorReply};
 
 #[derive(Schema, Serialize)]
 struct Span {
@@ -99,22 +92,6 @@ struct RecordQuery {
     #[serde(rename = "time.end")]
     end_time: Option<String>,
 }
-
-#[derive(Schema, Serialize)]
-struct ErrorMessage {
-    message: String,
-    code: u16,
-}
-
-#[derive(Debug)]
-enum ErrorReply {
-    WriterBusy,
-    InvalidQuery,
-    InvalidSchema,
-    NoHeartbeat,
-    Unknown,
-}
-impl warp::reject::Reject for ErrorReply {}
 
 pub async fn serve<I>(
     addr: I,
@@ -229,37 +206,17 @@ async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection>
 async fn topic_append(
     topic_name: String,
     partition_name: String,
-    query: Query<InsertQuery>,
     #[data] catalog: Catalog,
-    #[json] request: Insert,
+    chunk: SchemaChunk<Schema>,
 ) -> Result<Json<Inserted>, Rejection> {
-    let query = query.into_inner();
-    let time = if let Some(s) = query.time {
-        if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
-            time.with_timezone(&Utc)
-        } else {
-            return Err(warp::reject::custom(ErrorReply::InvalidQuery));
-        }
-    } else {
-        Utc::now()
-    };
-    let rs: Vec<_> = request
-        .records
-        .into_iter()
-        .map(|m| Record {
-            time,
-            message: ByteArray::from(m.as_str()),
-        })
-        .collect();
-
     let topic = catalog.get_topic(&topic_name).await;
     info!(
         "appending {} to {}/{}",
-        rs.len(),
+        chunk.len(),
         topic_name,
         partition_name
     );
-    let r = topic.extend_records(&partition_name, &rs).await;
+    let r = topic.extend(&partition_name, chunk).await;
 
     Ok(Json::from(Inserted {
         span: Span::from_range(r.map_err(|e| {
@@ -300,8 +257,46 @@ struct TopicIterationQuery {
 #[derive(Schema, Serialize)]
 struct TopicIterationReply {
     records: Vec<String>,
+    #[serde(flatten)]
+    status: TopicIterationStatus,
+}
+
+#[derive(Schema, Serialize)]
+struct TopicIterationStatus {
     status: RecordStatus,
     next: TopicIterator,
+}
+
+// issue #4 on warp's github is accept content type negotiation.
+// we've been waiting since 2018...
+fn negotiate<F, J>(
+    content: Option<String>,
+    batch: LimitedBatch,
+    to_json: F,
+) -> Result<Box<dyn Reply>, Rejection>
+where
+    F: FnOnce(Vec<Record>) -> J,
+    J: Serialize + Send,
+{
+    match content.as_ref().map(|h| h.as_str()) {
+        None | Some("*/*") | Some("application/json") => {
+            if let Ok(records) = batch.into_legacy() {
+                Ok(Box::new(Json::from(to_json(records)).into_response()))
+            } else {
+                Err(warp::reject::custom(ErrorReply::InvalidSchema))
+            }
+        }
+        Some(chunk::ARROW_CONTENT) => {
+            chunk::to_reply(batch).map_err(|e| warp::reject::custom(ErrorReply::Arrow(e)))
+        }
+        Some(other) => Err(warp::reject::custom(ErrorReply::CannotEmit(
+            other.to_string(),
+        ))),
+    }
+}
+
+fn accept() -> impl Filter<Extract = (Option<String>,), Error = Rejection> + Copy {
+    warp::filters::header::optional("accept")
 }
 
 #[post("/topic/{topic_name}/records")]
@@ -309,15 +304,16 @@ struct TopicIterationReply {
 async fn topic_iterate(
     topic_name: String,
     query: Query<TopicIterationQuery>,
+    #[filter = "accept"] content: Option<String>,
     #[json] position: Option<TopicIterator>,
     #[data] catalog: Catalog,
-) -> Result<Json<TopicIterationReply>, Rejection> {
+) -> Result<Box<dyn Reply>, Rejection> {
     let query = query.into_inner();
     let topic = catalog.get_topic(&topic_name).await;
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
 
-    let result = if let Some(start) = query.start_time {
+    let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_records_by_time(position, times, RowLimit::records(limit))
@@ -326,16 +322,22 @@ async fn topic_iterate(
         topic.get_records(position, RowLimit::records(limit)).await
     };
 
-    let status = RecordStatus::from(result.batch.status);
-    if let Ok(records) = result.batch.into_legacy() {
-        Ok(Json::from(TopicIterationReply {
-            records: serialize_records(records),
-            next: result.iter,
-            status,
-        }))
-    } else {
-        Err(warp::reject::custom(ErrorReply::InvalidSchema))
-    }
+    let status = TopicIterationStatus {
+        next: result.iter,
+        status: RecordStatus::from(result.batch.status),
+    };
+
+    result.batch.schema.as_mut().map(|schema| {
+        schema.metadata.insert(
+            "status".to_string(),
+            serde_json::to_string(&status).unwrap(),
+        );
+    });
+
+    negotiate(content, result.batch, move |records| TopicIterationReply {
+        records: serialize_records(records),
+        status,
+    })
 }
 
 #[get("/topic/{topic_name}/partition/{partition_name}/records")]
@@ -344,14 +346,15 @@ async fn partition_get_records(
     topic_name: String,
     partition_name: String,
     query: Query<RecordQuery>,
+    #[filter = "accept"] content: Option<String>,
     #[data] catalog: Catalog,
-) -> Result<Json<Records>, Rejection> {
+) -> Result<Box<dyn Reply>, Rejection> {
     let query = query.into_inner();
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let limit = RowLimit::records(limit);
-    let resp = if let Some(start) = query.start_time {
+    let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_partition(&partition_name)
@@ -366,41 +369,27 @@ async fn partition_get_records(
             .await
     };
 
-    let start = resp.chunks.get(0).and_then(|i| i.start());
-    let end = resp
+    let start = result.chunks.get(0).and_then(|i| i.start());
+    let end = result
         .chunks
         .iter()
         .next_back()
         .and_then(|i| i.end().map(|ix| ix + 1));
     let range = start.zip(end).map(|(start, end)| start..end);
 
-    let status = RecordStatus::from(resp.status);
-    if let Ok(records) = resp.into_legacy() {
-        Ok(Json::from(Records {
-            span: range.map(Span::from_range),
-            status,
-            records: serialize_records(records),
-        }))
-    } else {
-        Err(warp::reject::custom(ErrorReply::InvalidSchema))
-    }
-}
-
-async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
-    let (code, message) = match err.find::<ErrorReply>() {
-        Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query"),
-        Some(ErrorReply::InvalidSchema) => (StatusCode::BAD_REQUEST, "invalid schema"),
-        Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy"),
-        Some(ErrorReply::NoHeartbeat) => (StatusCode::INTERNAL_SERVER_ERROR, "no heartbeat"),
-        Some(ErrorReply::Unknown) | None => (StatusCode::INTERNAL_SERVER_ERROR, "unknown error"),
-    };
-
-    let json = warp::reply::json(&ErrorMessage {
-        code: code.as_u16(),
-        message: message.into(),
+    let status = RecordStatus::from(result.status);
+    result.schema.as_mut().map(|schema| {
+        schema.metadata.insert(
+            "status".to_string(),
+            serde_json::to_string(&status).unwrap(),
+        );
     });
 
-    Ok(warp::reply::with_status(json, code))
+    negotiate(content, result, move |records| Records {
+        span: range.map(Span::from_range),
+        status,
+        records: serialize_records(records),
+    })
 }
 
 fn serialize_records<I: IntoIterator<Item = Record>>(rs: I) -> Vec<String> {

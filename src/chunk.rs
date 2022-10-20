@@ -37,7 +37,7 @@ pub enum ChunkError {
     TypeMismatch,
 }
 
-pub(crate) type SegmentChunk = Chunk<Box<dyn Array>>;
+pub type SegmentChunk = Chunk<Box<dyn Array>>;
 
 pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
     SchemaChunk {
@@ -66,27 +66,41 @@ pub struct Record {
 }
 
 impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
+    pub fn new(schema: S, chunk: SegmentChunk) -> Result<Self, ChunkError> {
+        Self::get_time(chunk.arrays(), schema.borrow())?;
+        Ok(SchemaChunk { schema, chunk })
+    }
+
+    fn get_time<'a>(
+        arrays: &'a [Box<dyn Array>],
+        schema: &Schema,
+    ) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
+        if schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
+            return Err(ChunkError::BadColumn(0, "time"));
+        } else {
+            arrays
+                .get(0)
+                .ok_or(ChunkError::BadColumn(0, "time"))
+                .and_then(|arr| {
+                    arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
+                        ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
+                    )
+                })
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.chunk.len()
     }
 
     pub fn into_legacy(self) -> Result<Vec<Record>, ChunkError> {
-        if self.schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
-            return Err(ChunkError::BadColumn(0, "time"));
-        }
+        let arrays = self.chunk.into_arrays();
+
+        let time = Self::get_time(&arrays, self.schema.borrow())?;
         if self.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
             return Err(ChunkError::BadColumn(1, "message"));
         }
 
-        let arrays = self.chunk.into_arrays();
-        let time = arrays
-            .get(0)
-            .ok_or(ChunkError::BadColumn(0, "time"))
-            .and_then(|arr| {
-                arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
-                    ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
-                )
-            })?;
         let message =
             arrays
                 .get(1)

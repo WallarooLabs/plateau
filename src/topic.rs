@@ -234,7 +234,7 @@ impl Topic {
                 if matches!(batch_response.status, BatchStatus::SchemaChanged) {
                     any_schema_change = true;
                 }
-                if batch.schema_matches(&batch_response) {
+                if batch.compatible_with(&batch_response) {
                     batch.extend(batch_response);
 
                     if let Some(final_record) =

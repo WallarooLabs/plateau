@@ -77,11 +77,19 @@ impl LimitedBatch {
         }
     }
 
-    pub fn schema_matches(&self, other: &LimitedBatch) -> bool {
-        self.schema.is_none() || other.schema.as_ref() == self.schema.as_ref()
+    pub fn compatible_with(&self, other: &LimitedBatch) -> bool {
+        self.schema
+            .as_ref()
+            .zip(other.schema.as_ref())
+            .map(|(a, b)| a != b)
+            != Some(true)
     }
 
     pub fn extend_one(&mut self, mut indexed: IndexedChunk) {
+        if indexed.chunk.len() == 0 {
+            return;
+        }
+
         match self.status {
             BatchStatus::Open { remaining } => {
                 let schema = self

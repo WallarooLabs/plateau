@@ -14,7 +14,8 @@ metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 thiserror = "1"
 
-arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_parquet", "compute_filter", "compute_comparison"] }
+arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_parquet", "compute_filter", "compute_comparison"] }
+bytes = "1.2"
 openssl = { version = "*", features = ["vendored"] }
 parquet = "6.4"
 pretty_env_logger = "0.4"

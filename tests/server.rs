@@ -1,9 +1,91 @@
 use anyhow::Result;
+use arrow2::array::{Array, ListArray, PrimitiveArray, Utf8Array};
+use arrow2::chunk::Chunk;
+use arrow2::datatypes::{DataType, Field, Metadata};
+use arrow2::io::ipc::{read, write};
+use plateau::chunk::{Schema, SchemaChunk, SegmentChunk};
 use plateau::http;
 use plateau::http::TestServer;
 use reqwest::Client;
 use serde_json::json;
+use std::io::Cursor;
 use std::time::Duration;
+
+pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+    let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
+    let inner = PrimitiveArray::<f64>::from_values(vec![
+        2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
+    ]);
+
+    // TODO: we need fixed size list array support, which currently is not
+    // in arrow2's parquet io module.
+    /*
+    let outputs = FixedSizeListArray::new(
+        DataType::FixedSizeList(
+            Box::new(Field::new("inner", inner.data_type().clone(), false)),
+            2,
+        ),
+        inner.to_boxed(),
+        None,
+    );
+    */
+    let offsets = vec![0, 2, 4, 6, 8, 10];
+    let outputs = ListArray::new(
+        DataType::List(Box::new(Field::new(
+            "inner",
+            inner.data_type().clone(),
+            false,
+        ))),
+        offsets.into(),
+        inner.boxed(),
+        None,
+    );
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("inputs", inputs.data_type().clone(), false),
+            Field::new("mul", mul.data_type().clone(), false),
+            Field::new("outputs", outputs.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![
+            time.boxed(),
+            inputs.boxed(),
+            mul.boxed(),
+            outputs.boxed(),
+        ])
+        .unwrap(),
+    }
+}
+
+pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+    let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
+        vec!["one", "two", "three", "four", "five"].into_iter(),
+    );
+    let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("inputs", inputs.data_type().clone(), false),
+            Field::new("outputs", outputs.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![time.boxed(), inputs.boxed(), outputs.boxed()]).unwrap(),
+    }
+}
 
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
     let records: Vec<_> = vec![body.to_string()]
@@ -21,6 +103,65 @@ async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
         .unwrap()
         .error_for_status()
         .unwrap();
+}
+
+const ARROW_CONTENT: &'static str = "application/vnd.apache.arrow.file";
+
+async fn chunk_append(client: &Client, url: &str, data: SchemaChunk<Schema>) -> Result<()> {
+    let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+    let options = write::WriteOptions { compression: None };
+    let mut writer = write::FileWriter::new(bytes, data.schema, None, options);
+
+    writer.start()?;
+    writer.write(&data.chunk, None)?;
+    writer.finish()?;
+
+    client
+        .post(url)
+        .header("Content-Type", ARROW_CONTENT)
+        .body(writer.into_inner().into_inner())
+        .send()
+        .await?
+        .error_for_status()
+        .map_err(Into::into)
+        .map(|_| ())
+}
+
+async fn read_next_chunks(
+    client: &Client,
+    url: &str,
+    iter: Option<serde_json::Value>,
+    limit: impl Into<Option<usize>>,
+) -> Result<(Schema, Vec<SegmentChunk>)> {
+    let mut response = client.post(url).json(&json!({}));
+
+    if let Some(limit) = limit.into() {
+        response = response.query(&[("limit", limit)]);
+    }
+
+    if let Some(it) = iter {
+        response = response.json(&it);
+    }
+
+    response = response.header("Accept", ARROW_CONTENT);
+    let bytes = response.send().await?.error_for_status()?.bytes().await?;
+
+    let mut cursor = Cursor::new(bytes);
+    let metadata = read::read_file_metadata(&mut cursor)?;
+    let schema = metadata.schema.clone();
+    let reader = read::FileReader::new(cursor, metadata, None, None);
+    let chunks = reader.collect::<Result<Vec<_>, _>>()?;
+
+    Ok((schema, chunks))
+}
+
+fn next_from_schema(schema: &Schema) -> Result<serde_json::Value> {
+    let status: serde_json::Value = serde_json::from_str(schema.metadata.get("status").unwrap())?;
+    Ok(status.get("next").unwrap().clone())
+}
+
+fn schema_field_names(schema: &Schema) -> Vec<String> {
+    schema.fields.iter().map(|f| f.name.to_string()).collect()
 }
 
 async fn fetch_topic_records(
@@ -223,6 +364,71 @@ async fn topic_status_byte_limited() {
     // plateau always finishes the current record when we hit the byte limit, so we expect to have
     // one more than the actual hard limit caculated above
     assert_response_length(&json_response, message_limit + 1);
+}
+
+#[tokio::test]
+async fn topic_iterate_schema_change() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    let chunk_a = inferences_schema_a();
+    let chunk_b = inferences_schema_b();
+
+    for _ in 0..10 {
+        chunk_append(
+            &client,
+            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+            chunk_a.clone(),
+        )
+        .await?;
+    }
+
+    for _ in 0..5 {
+        chunk_append(
+            &client,
+            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+            chunk_b.clone(),
+        )
+        .await?;
+    }
+
+    // test record-limited request, should get 'RecordLimited' response and fewer results
+    let topic_url = topic_records_url(&server, &topic_name);
+    let (schema, response): (Schema, Vec<SegmentChunk>) =
+        read_next_chunks(&client, topic_url.as_str(), Some(json!({})), 29).await?;
+    assert_eq!(
+        response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
+        vec![5, 5, 5, 5, 5, 4]
+    );
+    assert_eq!(
+        schema_field_names(&schema),
+        schema_field_names(&chunk_a.schema)
+    );
+
+    let next = next_from_schema(&schema)?;
+    let (schema, response): (Schema, Vec<SegmentChunk>) =
+        read_next_chunks(&client, topic_url.as_str(), Some(next), 29).await?;
+    assert_eq!(
+        response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
+        vec![1, 5, 5, 5, 5]
+    );
+    assert_eq!(
+        schema_field_names(&schema),
+        schema_field_names(&chunk_a.schema)
+    );
+
+    let next = next_from_schema(&schema)?;
+    let (schema, response): (Schema, Vec<SegmentChunk>) =
+        read_next_chunks(&client, topic_url.as_str(), Some(next), 29).await?;
+    assert_eq!(
+        response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
+        vec![5, 5, 5, 5, 5]
+    );
+    assert_eq!(
+        schema_field_names(&schema),
+        schema_field_names(&chunk_b.schema)
+    );
+
+    Ok(())
 }
 
 #[tokio::test]

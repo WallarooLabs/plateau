@@ -1,5 +1,5 @@
 pub mod catalog;
-mod chunk;
+pub mod chunk;
 pub mod http;
 mod limit;
 mod manifest;
