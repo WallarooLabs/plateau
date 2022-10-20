@@ -1,0 +1,35 @@
+[package]
+name = "plateau"
+description = "A low-profile event and log aggregator"
+license = "MIT"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1"
+futures = "0.3"
+itertools = "0.10"
+log = "0.4"
+metrics = "0.16"
+metrics-exporter-prometheus = "0.5"
+thiserror = "1"
+
+arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_parquet", "compute_filter", "compute_comparison"] }
+bytes = "1.2"
+openssl = { version = "*", features = ["vendored"] }
+parquet = "6.4"
+pretty_env_logger = "0.4"
+rweb = { version = "0.15", features = ["openapi"] }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+tempfile = "3.2"
+tracing = "0.1"
+tokio-stream = { version = "0.1", features = ["signal"] }
+chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.5", features = [ "chrono", "sqlite", "runtime-tokio-rustls" ] }
+
+[dev-dependencies]
+itermore = "0.1"
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { version = "1.1", features = ["v4", "fast-rng"]}
