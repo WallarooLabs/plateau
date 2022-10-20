@@ -17,8 +17,8 @@
 //! determine when to roll segments and expire old data. `Rolling` policies are
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
-use crate::chunk::{estimate_size, parse_time, IndexedChunk, Schema, SchemaChunk};
-use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
+use crate::chunk::{parse_time, IndexedChunk, Schema, SchemaChunk};
+use crate::limit::{LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
 use crate::retention::Retention;
@@ -171,6 +171,7 @@ impl Partition {
         format!("{}-{}", id.topic(), id.partition())
     }
 
+    #[cfg(test)]
     pub(crate) async fn extend_records(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
         self.extend(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
             .await
@@ -524,6 +525,7 @@ impl State {
 pub mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;

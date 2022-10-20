@@ -224,7 +224,7 @@ fn estimate_array_size(arr: &Box<dyn Array>) -> Result<usize, ChunkError> {
             .downcast_ref::<ListArray<i64>>()
             .ok_or(ChunkError::TypeMismatch)
             .and_then(|arr| estimate_array_size(arr.values())),
-        t => Err(ChunkError::Unsupported(String::from(std::stringify!(t)))),
+        t => Err(ChunkError::Unsupported(format!("{:?}", t))),
     }
 }
 
@@ -317,6 +317,7 @@ impl IndexedChunk {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn into_legacy(self) -> Vec<Record> {
         chunk_into_legacy(self.chunk)
     }

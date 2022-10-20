@@ -2,18 +2,15 @@
 //!
 //! Currently, the only supported segment format is local Parquet files.
 use anyhow::Result;
-use arrow2::array::{
-    MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray, Utf8Array,
-};
-use arrow2::chunk::Chunk;
-use arrow2::datatypes::{DataType, Field, Metadata, Schema};
+use arrow2::datatypes::Schema;
 use arrow2::io::parquet::read::FileReader as FileReader2;
 use arrow2::io::parquet::read::{infer_schema, read_metadata};
 use arrow2::io::parquet::write::FileWriter as FileWriter2;
 use arrow2::io::parquet::write::{
     CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
 };
-use chrono::{DateTime, Duration, TimeZone, Utc};
+#[cfg(test)]
+use chrono::{Duration, TimeZone, Utc};
 use std::borrow::Borrow;
 use std::convert::TryFrom;
 #[cfg(test)]
@@ -372,8 +369,8 @@ impl SegmentReader2 {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::chunk::legacy_schema;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
-    use crate::chunk::{legacy_schema, ChunkError};
     use tempfile::tempdir;
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {

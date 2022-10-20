@@ -1,6 +1,6 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
-use crate::chunk::{legacy_schema, Schema, SchemaChunk, SegmentChunk};
+use crate::chunk::{Schema, SchemaChunk};
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
