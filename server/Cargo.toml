@@ -13,7 +13,7 @@ log = "0.4"
 metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 thiserror = "1"
-
+plateau-transport = { path = "../transport" }
 arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_parquet", "compute_filter", "compute_comparison"] }
 bytes = "1.2"
 openssl = { version = "*", features = ["vendored"] }

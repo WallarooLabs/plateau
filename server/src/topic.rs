@@ -13,6 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream;
 use futures::stream::StreamExt;
+use plateau_transport::TopicIterator;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Range, RangeInclusive};
@@ -28,8 +29,6 @@ pub struct Topic {
     partitions: RwLock<PartitionMap>,
     config: PartitionConfig,
 }
-
-pub type TopicIterator = HashMap<String, usize>;
 
 pub(crate) struct TopicRecordResponse {
     pub(crate) iter: TopicIterator,

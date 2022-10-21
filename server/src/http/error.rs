@@ -1,6 +1,6 @@
 use arrow2::error::Error as ArrowError;
+use plateau_transport::ErrorMessage;
 use rweb::*;
-use serde::Serialize;
 use std::convert::Infallible;
 use warp::http::StatusCode;
 use warp::reject::Reject;
@@ -22,12 +22,6 @@ pub(crate) enum ErrorReply {
     Unknown,
 }
 impl Reject for ErrorReply {}
-
-#[derive(Schema, Serialize)]
-struct ErrorMessage {
-    message: String,
-    code: u16,
-}
 
 pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
     let (code, message) = match err.find::<ErrorReply>() {

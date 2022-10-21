@@ -2,10 +2,10 @@ use ::log::info;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future;
-use rweb::*;
-use serde::{Deserialize, Serialize};
+
+use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Query, Rejection, Reply};
+use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
@@ -15,54 +15,33 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+use plateau_transport::{
+    Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic, TopicIterationQuery,
+    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+};
+
 use crate::catalog::Catalog;
 use crate::chunk::{Schema, SchemaChunk};
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::slog::{RecordIndex, SlogError};
-use crate::topic::{Record, TopicIterator};
+use crate::topic::Record;
 
 mod chunk;
 mod error;
 
 use self::error::{emit_error, ErrorReply};
 
-#[derive(Schema, Serialize)]
-struct Span {
-    start: usize,
-    end: usize,
+trait FromRange {
+    fn from_range(r: Range<RecordIndex>) -> Self;
 }
 
-impl Span {
+impl FromRange for Span {
     fn from_range(r: Range<RecordIndex>) -> Self {
         Span {
             start: r.start.0,
             end: r.end.0,
         }
     }
-}
-
-#[derive(Schema, Serialize)]
-struct Inserted {
-    span: Span,
-}
-
-#[derive(Schema, Serialize)]
-struct Partitions {
-    partitions: HashMap<String, Span>,
-}
-
-// abstracted over lower-level status so as to not leak
-/// Status of the record request query.
-#[derive(Schema, Serialize)]
-enum RecordStatus {
-    /// All current records returned.
-    All,
-    /// Record response was limited because the next chunk of records has a different schema.
-    SchemaChange,
-    /// Record response was limited by record limit. Additional records exist.
-    RecordLimited,
-    /// Record response was limited by payload size limit. Additional records exist.
-    ByteLimited,
 }
 
 impl From<BatchStatus> for RecordStatus {
@@ -74,23 +53,6 @@ impl From<BatchStatus> for RecordStatus {
             BatchStatus::RecordsExceeded => RecordStatus::RecordLimited,
         }
     }
-}
-
-#[derive(Schema, Serialize)]
-struct Records {
-    span: Option<Span>,
-    status: RecordStatus,
-    records: Vec<String>,
-}
-
-#[derive(Schema, Deserialize)]
-struct RecordQuery {
-    start: usize,
-    limit: Option<usize>,
-    #[serde(rename = "time.start")]
-    start_time: Option<String>,
-    #[serde(rename = "time.end")]
-    end_time: Option<String>,
 }
 
 pub async fn serve<I>(
@@ -181,16 +143,6 @@ async fn healthcheck(#[data] catalog: Catalog) -> Result<Json<serde_json::Value>
     }
 }
 
-#[derive(Schema, Serialize)]
-struct Topics {
-    topics: Vec<Topic>,
-}
-
-#[derive(Schema, Serialize)]
-struct Topic {
-    name: String,
-}
-
 #[get("/topics")]
 #[openapi(id = "get_topics")]
 async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection> {
@@ -243,28 +195,6 @@ async fn topic_get_partitions(
             .map(|(partition, range)| (partition, Span::from_range(range)))
             .collect(),
     }))
-}
-
-#[derive(Schema, Deserialize)]
-struct TopicIterationQuery {
-    limit: Option<usize>,
-    #[serde(rename = "time.start")]
-    start_time: Option<String>,
-    #[serde(rename = "time.end")]
-    end_time: Option<String>,
-}
-
-#[derive(Schema, Serialize)]
-struct TopicIterationReply {
-    records: Vec<String>,
-    #[serde(flatten)]
-    status: TopicIterationStatus,
-}
-
-#[derive(Schema, Serialize)]
-struct TopicIterationStatus {
-    status: RecordStatus,
-    next: TopicIterator,
 }
 
 // issue #4 on warp's github is accept content type negotiation.

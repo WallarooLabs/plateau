@@ -7,25 +7,15 @@ use parquet::data_type::ByteArray;
 use rweb::filters::BoxedFilter;
 use rweb::openapi::{ComponentDescriptor, ComponentOrInlineSchema, Entity};
 use rweb::*;
-use serde::Deserialize;
 use std::borrow::Cow;
-use std::io::{Cursor, Seek, Write};
+use std::io::Cursor;
 use warp::http::StatusCode;
-use warp::reply::Response;
+
+use plateau_transport::{Insert, InsertQuery};
 
 use super::error::ErrorReply;
 use crate::chunk::{Record, Schema, SchemaChunk, SegmentChunk};
 use crate::limit::LimitedBatch;
-
-#[derive(Schema, Deserialize)]
-struct InsertQuery {
-    time: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct Insert {
-    records: Vec<String>,
-}
 
 pub(crate) const ARROW_CONTENT: &'static str = "application/vnd.apache.arrow.file";
 
