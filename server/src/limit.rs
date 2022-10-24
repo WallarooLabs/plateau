@@ -1,7 +1,7 @@
 use crate::chunk::{estimate_size, IndexedChunk, Record, Schema, SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Copy, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct RowLimit {
     pub max_records: usize,
     pub max_bytes: usize,
@@ -55,10 +55,7 @@ pub(crate) enum BatchStatus {
 
 impl BatchStatus {
     pub(crate) fn is_open(&self) -> bool {
-        match self {
-            BatchStatus::Open { .. } => true,
-            _ => false,
-        }
+        matches!(self, BatchStatus::Open { .. })
     }
 }
 
@@ -86,29 +83,26 @@ impl LimitedBatch {
     }
 
     pub fn extend_one(&mut self, mut indexed: IndexedChunk) {
-        if indexed.chunk.len() == 0 {
+        if indexed.chunk.is_empty() {
             return;
         }
 
-        match self.status {
-            BatchStatus::Open { remaining } => {
-                let schema = self
-                    .schema
-                    .get_or_insert_with(|| indexed.inner_schema.clone());
-                self.status = if schema != &indexed.inner_schema {
-                    BatchStatus::SchemaChanged
-                } else {
-                    let status = remaining.after(&mut indexed);
-                    self.chunks.push(indexed);
-                    status
-                };
-            }
-            _ => {}
+        if let BatchStatus::Open { remaining } = self.status {
+            let schema = self
+                .schema
+                .get_or_insert_with(|| indexed.inner_schema.clone());
+            self.status = if schema != &indexed.inner_schema {
+                BatchStatus::SchemaChanged
+            } else {
+                let status = remaining.after(&mut indexed);
+                self.chunks.push(indexed);
+                status
+            };
         }
     }
 
     pub fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
-        if self.chunks.len() == 0 {
+        if self.chunks.is_empty() {
             return Ok(vec![]);
         }
 

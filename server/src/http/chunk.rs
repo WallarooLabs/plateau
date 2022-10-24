@@ -17,13 +17,13 @@ use super::error::ErrorReply;
 use crate::chunk::{Record, Schema, SchemaChunk, SegmentChunk};
 use crate::limit::LimitedBatch;
 
-pub(crate) const ARROW_CONTENT: &'static str = "application/vnd.apache.arrow.file";
+pub(crate) const ARROW_CONTENT: &str = "application/vnd.apache.arrow.file";
 
 impl FromRequest for SchemaChunk<Schema> {
     type Filter = BoxedFilter<(SchemaChunk<Schema>,)>;
 
     fn new() -> Self::Filter {
-        let limit = body::content_length_limit(1 * 1024 * 1024);
+        let limit = body::content_length_limit(1024 * 1024);
 
         let time = query().and_then(|query: InsertQuery| async move {
             if let Some(s) = query.time {

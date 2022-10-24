@@ -57,7 +57,7 @@ impl Topic {
         }
     }
 
-    fn partition_root(root: &PathBuf, name: &str) -> PathBuf {
+    fn partition_root(root: &Path, name: &str) -> PathBuf {
         root.join(name)
     }
 

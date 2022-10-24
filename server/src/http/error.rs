@@ -55,7 +55,7 @@ pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible>
 
     let json = warp::reply::json(&ErrorMessage {
         code: code.as_u16(),
-        message: message.into(),
+        message,
     });
 
     Ok(warp::reply::with_status(json, code))

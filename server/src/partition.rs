@@ -181,7 +181,7 @@ impl Partition {
         let size = chunk.len();
         let mut state = self.state.write().await;
         let start = state.messages.next_record_ix().await;
-        state.roll_when_needed(&self).await?;
+        state.roll_when_needed(self).await?;
         state.messages.append(chunk).await;
 
         Ok(start..(start + size))
@@ -202,8 +202,7 @@ impl Partition {
         state: &RwLockReadGuard<'a, State>,
     ) -> impl Stream<Item = SegmentData> + 'a + Send {
         let cached = state.messages.cached_segment_data().await;
-        let cached_segments: Vec<SegmentIndex> =
-            cached.iter().map(|data| data.index.clone()).collect();
+        let cached_segments: Vec<SegmentIndex> = cached.iter().map(|data| data.index).collect();
         // due to checkpoints, segment data for the active / pending segment may
         // already be stored in the manifest. we want to always only use
         // in-memory data as it is fresher.
@@ -293,7 +292,7 @@ impl Partition {
             .iter()
             .map(|data| data.records.clone())
             .chain(stored.into_iter())
-            .reduce(|merged, range| merge_ranges(merged, range))
+            .reduce(merge_ranges)
     }
 
     pub(crate) async fn byte_size(&self) -> usize {
@@ -346,7 +345,7 @@ impl Partition {
 
     pub(crate) async fn remove_oldest(&self) {
         let state = self.state.read().await;
-        state.remove_oldest(&self).await;
+        state.remove_oldest(self).await;
     }
 
     #[cfg(test)]
@@ -359,7 +358,7 @@ impl Partition {
 
 impl State {
     async fn roll(&mut self, partition: &Partition) -> Result<()> {
-        if let Some(_) = self.messages.active_segment_data().await {
+        if self.messages.active_segment_data().await.is_some() {
             let pending = self.messages.pending_segment_data().await;
             self.messages.roll().await?;
             // without this wait, a rare race condition can occur:
@@ -383,7 +382,7 @@ impl State {
                 self.wait_for_record(pending.records.end).await;
             }
             self.last_roll = Instant::now();
-            self.retain(&partition).await;
+            self.retain(partition).await;
         }
 
         Ok(())
@@ -449,7 +448,7 @@ impl State {
                     self.messages
                         .iter_segment(segment.index)
                         .into_stream()
-                        .flat_map(|batches| stream::iter(batches))
+                        .flat_map(stream::iter)
                         .scan(segment.records.start.0, move |start, data| {
                             let index = RecordIndex(*start);
                             *start += data.chunk.len();
@@ -458,8 +457,7 @@ impl State {
                 })
                 .map(|indexed| {
                     // now, winnow down to the data we care about.
-                    let after = indexed.filter(&filter(&indexed)).unwrap();
-                    after
+                    indexed.filter(&filter(&indexed)).unwrap()
                 })
                 .scan(&mut batch, move |batch, indexed| {
                     batch.extend_one(indexed);

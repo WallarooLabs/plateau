@@ -39,6 +39,7 @@ pub enum ChunkError {
 
 pub type SegmentChunk = Chunk<Box<dyn Array>>;
 
+#[allow(dead_code)]
 pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
     SchemaChunk {
         schema: legacy_schema(),
@@ -76,21 +77,27 @@ impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
         schema: &Schema,
     ) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
         if schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
-            return Err(ChunkError::BadColumn(0, "time"));
+            Err(ChunkError::BadColumn(0, "time"))
         } else {
             arrays
                 .get(0)
                 .ok_or(ChunkError::BadColumn(0, "time"))
                 .and_then(|arr| {
-                    arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
-                        ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
-                    )
+                    arr.as_any()
+                        .downcast_ref::<PrimitiveArray<i64>>()
+                        .ok_or_else(|| {
+                            ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr))
+                        })
                 })
         }
     }
 
     pub fn len(&self) -> usize {
         self.chunk.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunk.is_empty()
     }
 
     pub fn into_legacy(self) -> Result<Vec<Record>, ChunkError> {
@@ -101,15 +108,16 @@ impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
             return Err(ChunkError::BadColumn(1, "message"));
         }
 
-        let message =
-            arrays
-                .get(1)
-                .ok_or(ChunkError::BadColumn(1, "message"))
-                .and_then(|arr| {
-                    arr.as_any().downcast_ref::<Utf8Array<i32>>().ok_or(
-                        ChunkError::InvalidColumnType("message", "utf8", type_name_of_val(arr)),
-                    )
-                })?;
+        let message = arrays
+            .get(1)
+            .ok_or(ChunkError::BadColumn(1, "message"))
+            .and_then(|arr| {
+                arr.as_any()
+                    .downcast_ref::<Utf8Array<i32>>()
+                    .ok_or_else(|| {
+                        ChunkError::InvalidColumnType("message", "utf8", type_name_of_val(arr))
+                    })
+            })?;
 
         Ok(time
             .values_iter()
@@ -151,9 +159,11 @@ impl SchemaChunk<Schema> {
             .get(0)
             .ok_or(ChunkError::BadColumn(0, "time"))
             .and_then(|arr| {
-                arr.as_any().downcast_ref::<PrimitiveArray<i64>>().ok_or(
-                    ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr)),
-                )
+                arr.as_any()
+                    .downcast_ref::<PrimitiveArray<i64>>()
+                    .ok_or_else(|| {
+                        ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr))
+                    })
             })?;
 
         let times = times.iter().map(|tv| tv.unwrap());
@@ -182,7 +192,7 @@ impl<'a> SchemaChunk<&'a Schema> {
     }
 }
 
-fn estimate_array_size(arr: &Box<dyn Array>) -> Result<usize, ChunkError> {
+fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
     match arr.data_type() {
         DataType::UInt8 => Ok(arr.len()),
         DataType::UInt16 => Ok(arr.len() * 2),
@@ -213,24 +223,28 @@ fn estimate_array_size(arr: &Box<dyn Array>) -> Result<usize, ChunkError> {
             .as_any()
             .downcast_ref::<ListArray<i32>>()
             .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values())),
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
         DataType::FixedSizeList(_, _) => arr
             .as_any()
             .downcast_ref::<FixedSizeListArray>()
             .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values())),
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
         DataType::LargeList(_) => arr
             .as_any()
             .downcast_ref::<ListArray<i64>>()
             .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values())),
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
         t => Err(ChunkError::Unsupported(format!("{:?}", t))),
     }
 }
 
 /// Estimate the size of a [Chunk]. The estimate does not include null bitmaps or extent buffers.
 pub fn estimate_size(chunk: &SegmentChunk) -> Result<usize, ChunkError> {
-    chunk.arrays().iter().map(|a| estimate_array_size(&a)).sum()
+    chunk
+        .arrays()
+        .iter()
+        .map(|a| estimate_array_size(a.as_ref()))
+        .sum()
 }
 
 pub fn legacy_schema() -> Schema {
@@ -253,7 +267,7 @@ pub(crate) struct IndexedChunk {
 
 impl IndexedChunk {
     pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>) -> IndexedChunk {
-        assert!(data.chunk.arrays().len() > 0);
+        assert!(!data.chunk.arrays().is_empty());
         let start = ix.0 as i32;
         let size = data.chunk.len() as i32;
         let mut arrays = data.chunk.into_arrays();
@@ -291,7 +305,7 @@ impl IndexedChunk {
     }
 
     pub(crate) fn times(&self) -> &PrimitiveArray<i64> {
-        &self.chunk.arrays()[0]
+        self.chunk.arrays()[0]
             .as_any()
             .downcast_ref::<PrimitiveArray<i64>>()
             .unwrap()

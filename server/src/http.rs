@@ -124,7 +124,7 @@ impl TestServer {
 }
 
 impl Drop for TestServer {
-    fn drop(&mut self) -> () {
+    fn drop(&mut self) {
         self.end_tx.try_send(()).unwrap();
     }
 }
@@ -208,7 +208,7 @@ where
     F: FnOnce(Vec<Record>) -> J,
     J: Serialize + Send,
 {
-    match content.as_ref().map(|h| h.as_str()) {
+    match content.as_deref() {
         None | Some("*/*") | Some("application/json") => {
             if let Ok(records) = batch.into_legacy() {
                 Ok(Box::new(Json::from(to_json(records)).into_response()))
@@ -257,12 +257,12 @@ async fn topic_iterate(
         status: RecordStatus::from(result.batch.status),
     };
 
-    result.batch.schema.as_mut().map(|schema| {
+    if let Some(schema) = result.batch.schema.as_mut() {
         schema.metadata.insert(
             "status".to_string(),
             serde_json::to_string(&status).unwrap(),
         );
-    });
+    }
 
     negotiate(content, result.batch, move |records| TopicIterationReply {
         records: serialize_records(records),
@@ -308,12 +308,12 @@ async fn partition_get_records(
     let range = start.zip(end).map(|(start, end)| start..end);
 
     let status = RecordStatus::from(result.status);
-    result.schema.as_mut().map(|schema| {
+    if let Some(schema) = result.schema.as_mut() {
         schema.metadata.insert(
             "status".to_string(),
             serde_json::to_string(&status).unwrap(),
         );
-    });
+    }
 
     negotiate(content, result, move |records| Records {
         span: range.map(Span::from_range),

@@ -10,7 +10,7 @@ impl Default for Retention {
     fn default() -> Self {
         Retention {
             max_segment_count: Some(10000),
-            max_bytes: 1 * 1024 * 1024 * 1024,
+            max_bytes: 1024 * 1024 * 1024,
         }
     }
 }

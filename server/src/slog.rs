@@ -300,7 +300,7 @@ impl State {
                 .unwrap_or(0),
         );
         let first = self.active_first_record_ix;
-        let index = self.active_checkpoint.segment.clone();
+        let index = self.active_checkpoint.segment;
         let data_time_range = d.time_range().unwrap();
 
         let size = d.chunk.len();
@@ -317,7 +317,7 @@ impl State {
                     index,
                     size,
                     records: first..(first + size),
-                    time: data_time_range.clone(),
+                    time: data_time_range,
                 },
                 chunks: vec![d.chunk],
             });
@@ -334,7 +334,7 @@ impl State {
             self.active.as_ref()
         } else {
             match &self.pending {
-                Some(pending) if ix.next() == self.active_checkpoint.segment => Some(&pending),
+                Some(pending) if ix.next() == self.active_checkpoint.segment => Some(pending),
                 _ => None,
             }
         }
@@ -415,7 +415,9 @@ impl Drop for State {
         let (tx, _) = mpsc::channel(1);
         let messages = std::mem::replace(&mut self.writer, tx);
         drop(messages);
-        self.handle.take().map(|h| h.join().unwrap());
+        if let Some(h) = self.handle.take() {
+            h.join().unwrap();
+        }
     }
 }
 

@@ -130,7 +130,7 @@ impl Segment {
 
     pub(crate) fn read2(&self) -> Result<SegmentReader2> {
         let file = fs::File::open(&self.path)?;
-        Ok(SegmentReader2::new(file)?)
+        SegmentReader2::new(file)
     }
 }
 

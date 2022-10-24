@@ -45,7 +45,7 @@ impl Catalog {
     }
 
     pub async fn last_checkpoint(&self) -> SystemTime {
-        self.last_checkpoint.read().await.clone()
+        *self.last_checkpoint.read().await
     }
 
     pub async fn checkpoint(&self) {

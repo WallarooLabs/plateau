@@ -54,7 +54,7 @@ impl PartitionId {
 
     pub fn segment_id(&self, segment: SegmentIndex) -> SegmentId<&PartitionId> {
         SegmentId {
-            partition_id: &self,
+            partition_id: self,
             segment,
         }
     }
@@ -147,7 +147,7 @@ fn row_get_option_record(row: &SqliteRow, index: usize) -> Option<RecordIndex> {
 }
 
 impl SegmentIndex {
-    fn to_row(&self) -> i64 {
+    fn to_row(self) -> i64 {
         i64::try_from(self.0).unwrap()
     }
 
@@ -160,7 +160,7 @@ impl SegmentIndex {
 }
 
 impl RecordIndex {
-    fn to_row(&self) -> i64 {
+    fn to_row(self) -> i64 {
         i64::try_from(self.0).unwrap()
     }
 
@@ -217,7 +217,7 @@ impl Manifest {
     }
 
     /// Upserts data for a segment with the given identifier.
-    pub(crate) async fn update(&self, id: &PartitionId, data: &SegmentData) -> () {
+    pub(crate) async fn update(&self, id: &PartitionId, data: &SegmentData) {
         sqlx::query(
             "
             INSERT INTO segments(
