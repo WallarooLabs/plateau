@@ -19,7 +19,7 @@
 //! Load is shed by failing any roll or checkpoint operation while an existing
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
-use crate::chunk::{SchemaChunk, SegmentChunk};
+use crate::chunk::TimeRange;
 use crate::manifest::SegmentData;
 #[cfg(test)]
 use crate::segment::Record;
@@ -29,6 +29,7 @@ use arrow2::datatypes::Schema;
 use chrono::{DateTime, Utc};
 use log::{debug, trace};
 use metrics::counter;
+use plateau_transport::{SchemaChunk, SegmentChunk};
 use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::ops::{Add, AddAssign, Range, RangeInclusive};
@@ -188,9 +189,11 @@ impl Slog {
         segment: SegmentIndex,
         relative: usize,
     ) -> Option<Record> {
+        use crate::chunk::LegacyRecords;
+
         self.iter_segment(segment)
             .await
-            .map(|chunk| chunk.into_legacy().unwrap())
+            .map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
             .flatten()
             .skip(relative)
             .next()
@@ -498,6 +501,8 @@ fn spawn_slog_thread(
 
 #[cfg(test)]
 mod test {
+    use crate::chunk::LegacyRecords;
+
     use super::*;
     use chrono::{TimeZone, Utc};
     use parquet::data_type::ByteArray;
@@ -521,7 +526,7 @@ mod test {
             })
             .collect();
 
-        let chunk = SchemaChunk::from_legacy(records.clone())?;
+        let chunk = SchemaChunk::try_from(LegacyRecords(records.clone()))?;
 
         let first = slog.append(chunk).await;
         for ix in 0..3 {
@@ -539,7 +544,7 @@ mod test {
             Some((RecordIndex(0)..RecordIndex(3), true))
         );
 
-        let chunk = SchemaChunk::from_legacy(records.clone())?;
+        let chunk = SchemaChunk::try_from(LegacyRecords(records.clone()))?;
         let second = slog.append(chunk).await;
         assert!(slog.roll().await.is_ok());
         assert_eq!(

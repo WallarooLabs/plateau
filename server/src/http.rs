@@ -17,11 +17,11 @@ use tracing::Instrument;
 
 use plateau_transport::{
     Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic, TopicIterationQuery,
-    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics, CONTENT_TYPE_ARROW,
 };
 
 use crate::catalog::Catalog;
-use crate::chunk::{Schema, SchemaChunk};
+use crate::http::chunk::SchemaChunkRequest;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::slog::{RecordIndex, SlogError};
 use crate::topic::Record;
@@ -159,16 +159,16 @@ async fn topic_append(
     topic_name: String,
     partition_name: String,
     #[data] catalog: Catalog,
-    chunk: SchemaChunk<Schema>,
+    chunk: SchemaChunkRequest,
 ) -> Result<Json<Inserted>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
     info!(
         "appending {} to {}/{}",
-        chunk.len(),
+        chunk.0.len(),
         topic_name,
         partition_name
     );
-    let r = topic.extend(&partition_name, chunk).await;
+    let r = topic.extend(&partition_name, chunk.0).await;
 
     Ok(Json::from(Inserted {
         span: Span::from_range(r.map_err(|e| {
@@ -216,7 +216,7 @@ where
                 Err(warp::reject::custom(ErrorReply::InvalidSchema))
             }
         }
-        Some(chunk::ARROW_CONTENT) => {
+        Some(CONTENT_TYPE_ARROW) => {
             chunk::to_reply(batch).map_err(|e| warp::reject::custom(ErrorReply::Arrow(e)))
         }
         Some(other) => Err(warp::reject::custom(ErrorReply::CannotEmit(

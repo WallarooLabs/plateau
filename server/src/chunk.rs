@@ -9,6 +9,7 @@ pub use arrow2::datatypes::Schema;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use parquet::data_type::ByteArray;
+use plateau_transport::{SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
 use thiserror::Error;
@@ -37,27 +38,19 @@ pub enum ChunkError {
     TypeMismatch,
 }
 
-pub type SegmentChunk = Chunk<Box<dyn Array>>;
+pub(crate) struct LegacyRecords(pub(crate) Vec<Record>);
 
-#[allow(dead_code)]
 pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
-    SchemaChunk {
+    LegacyRecords::try_from(SchemaChunk {
         schema: legacy_schema(),
         chunk,
-    }
-    .into_legacy()
+    })
     .unwrap()
+    .0
 }
 
 pub fn parse_time(tv: i64) -> DateTime<Utc> {
     Utc.timestamp(0, 0) + Duration::milliseconds(tv)
-}
-
-/// A [SegmentChunk] packaged with its associated [Schema].
-#[derive(Clone)]
-pub struct SchemaChunk<S: Borrow<Schema> + Clone> {
-    pub schema: S,
-    pub chunk: SegmentChunk,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -66,45 +59,14 @@ pub struct Record {
     pub message: ByteArray,
 }
 
-impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
-    pub fn new(schema: S, chunk: SegmentChunk) -> Result<Self, ChunkError> {
-        Self::get_time(chunk.arrays(), schema.borrow())?;
-        Ok(SchemaChunk { schema, chunk })
-    }
+impl<S: Borrow<Schema> + Clone> TryFrom<SchemaChunk<S>> for LegacyRecords {
+    type Error = ChunkError;
 
-    fn get_time<'a>(
-        arrays: &'a [Box<dyn Array>],
-        schema: &Schema,
-    ) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
-        if schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
-            Err(ChunkError::BadColumn(0, "time"))
-        } else {
-            arrays
-                .get(0)
-                .ok_or(ChunkError::BadColumn(0, "time"))
-                .and_then(|arr| {
-                    arr.as_any()
-                        .downcast_ref::<PrimitiveArray<i64>>()
-                        .ok_or_else(|| {
-                            ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr))
-                        })
-                })
-        }
-    }
+    fn try_from(orig: SchemaChunk<S>) -> Result<Self, Self::Error> {
+        let arrays = orig.chunk.into_arrays();
 
-    pub fn len(&self) -> usize {
-        self.chunk.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.chunk.is_empty()
-    }
-
-    pub fn into_legacy(self) -> Result<Vec<Record>, ChunkError> {
-        let arrays = self.chunk.into_arrays();
-
-        let time = Self::get_time(&arrays, self.schema.borrow())?;
-        if self.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
+        let time = get_time(&arrays, orig.schema.borrow())?;
+        if orig.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
             return Err(ChunkError::BadColumn(1, "message"));
         }
 
@@ -119,40 +81,52 @@ impl<S: Borrow<Schema> + Clone> SchemaChunk<S> {
                     })
             })?;
 
-        Ok(time
-            .values_iter()
-            .zip(message.values_iter())
-            .map(|(tv, m)| Record {
-                time: parse_time(*tv),
-                message: ByteArray::from(m),
-            })
-            .collect())
+        Ok(LegacyRecords(
+            time.values_iter()
+                .zip(message.values_iter())
+                .map(|(tv, m)| Record {
+                    time: parse_time(*tv),
+                    message: ByteArray::from(m),
+                })
+                .collect(),
+        ))
     }
 }
 
-impl SchemaChunk<Schema> {
-    pub fn from_legacy(mut records: Vec<Record>) -> Result<Self, ChunkError> {
-        let mut times = MutablePrimitiveArray::<i64>::new();
-        let mut messages = MutableUtf8Array::<i32>::new();
-
-        for r in records.drain(..) {
-            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
-            times.push(Some(dt.num_milliseconds()));
-            messages.push(Some(
-                r.message
-                    .as_utf8()
-                    .map_err(|_| ChunkError::FailedEncoding)?,
-            ));
-        }
-
-        Ok(SchemaChunk {
-            schema: legacy_schema(),
-            chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
-                .map_err(|_| ChunkError::LengthMismatch)?,
-        })
+fn get_time<'a>(
+    arrays: &'a [Box<dyn Array>],
+    schema: &Schema,
+) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
+    if schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
+        Err(ChunkError::BadColumn(0, "time"))
+    } else {
+        arrays
+            .get(0)
+            .ok_or(ChunkError::BadColumn(0, "time"))
+            .and_then(|arr| {
+                arr.as_any()
+                    .downcast_ref::<PrimitiveArray<i64>>()
+                    .ok_or_else(|| {
+                        ChunkError::InvalidColumnType("time", "i64", type_name_of_val(arr))
+                    })
+            })
     }
+}
 
-    pub fn time_range(&self) -> Result<RangeInclusive<DateTime<Utc>>, ChunkError> {
+pub fn new_schema_chunk<S: Borrow<Schema> + Clone>(
+    schema: S,
+    chunk: SegmentChunk,
+) -> Result<SchemaChunk<S>, ChunkError> {
+    get_time(chunk.arrays(), schema.borrow())?;
+    Ok(SchemaChunk { schema, chunk })
+}
+
+pub trait TimeRange {
+    fn time_range(&self) -> Result<RangeInclusive<DateTime<Utc>>, ChunkError>;
+}
+
+impl TimeRange for SchemaChunk<Schema> {
+    fn time_range(&self) -> Result<RangeInclusive<DateTime<Utc>>, ChunkError> {
         let times = self
             .chunk
             .arrays()
@@ -174,22 +148,46 @@ impl SchemaChunk<Schema> {
     }
 }
 
-impl<'a> SchemaChunk<&'a Schema> {
-    pub fn iter_legacy(
-        schema: Schema,
-        iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
-    ) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
-        iter.map(move |chunk| {
-            chunk.and_then(|chunk| {
-                SchemaChunk {
-                    schema: &schema,
-                    chunk,
-                }
-                .into_legacy()
-                .map_err(Into::into)
-            })
+impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
+    type Error = ChunkError;
+
+    fn try_from(value: LegacyRecords) -> Result<Self, Self::Error> {
+        let mut records = value.0;
+        let mut times = MutablePrimitiveArray::<i64>::new();
+        let mut messages = MutableUtf8Array::<i32>::new();
+
+        for r in records.drain(..) {
+            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+            times.push(Some(dt.num_milliseconds()));
+            messages.push(Some(
+                r.message
+                    .as_utf8()
+                    .map_err(|_| ChunkError::FailedEncoding)?,
+            ));
+        }
+
+        Ok(SchemaChunk {
+            schema: legacy_schema(),
+            chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
+                .map_err(|_| ChunkError::LengthMismatch)?,
         })
     }
+}
+
+pub fn iter_legacy(
+    schema: Schema,
+    iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
+) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
+    iter.map(move |chunk| {
+        chunk.and_then(|chunk| {
+            LegacyRecords::try_from(SchemaChunk {
+                schema: &schema,
+                chunk,
+            })
+            .map_err(Into::into)
+            .map(|r| r.0)
+        })
+    })
 }
 
 fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {

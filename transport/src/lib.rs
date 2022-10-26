@@ -1,5 +1,6 @@
-use std::collections::HashMap;
+use std::{borrow::Borrow, collections::HashMap};
 
+use arrow2::{array::Array, chunk::Chunk, datatypes::Schema as ArrowSchema};
 use rweb::Schema;
 use serde::{Deserialize, Serialize};
 
@@ -97,4 +98,25 @@ pub struct Topic {
 pub struct ErrorMessage {
     pub message: String,
     pub code: u16,
+}
+
+pub const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.file";
+
+pub type SegmentChunk = Chunk<Box<dyn Array>>;
+
+/// A [SegmentChunk] packaged with its associated [ArrowSchema].
+#[derive(Clone)]
+pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone> {
+    pub schema: S,
+    pub chunk: SegmentChunk,
+}
+
+impl<S: Borrow<ArrowSchema> + Clone> SchemaChunk<S> {
+    pub fn len(&self) -> usize {
+        self.chunk.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunk.is_empty()
+    }
 }

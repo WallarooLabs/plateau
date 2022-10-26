@@ -3,13 +3,15 @@ use arrow2::array::{Array, ListArray, PrimitiveArray, Utf8Array};
 use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use arrow2::io::ipc::{read, write};
-use plateau::chunk::{Schema, SchemaChunk, SegmentChunk};
+use plateau::chunk::Schema;
 use plateau::http;
 use plateau::http::TestServer;
 use reqwest::Client;
 use serde_json::json;
 use std::io::Cursor;
 use std::time::Duration;
+
+use plateau_transport::{SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
 
 pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
@@ -105,8 +107,6 @@ async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
         .unwrap();
 }
 
-const ARROW_CONTENT: &'static str = "application/vnd.apache.arrow.file";
-
 async fn chunk_append(client: &Client, url: &str, data: SchemaChunk<Schema>) -> Result<()> {
     let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
     let options = write::WriteOptions { compression: None };
@@ -118,7 +118,7 @@ async fn chunk_append(client: &Client, url: &str, data: SchemaChunk<Schema>) -> 
 
     client
         .post(url)
-        .header("Content-Type", ARROW_CONTENT)
+        .header("Content-Type", CONTENT_TYPE_ARROW)
         .body(writer.into_inner().into_inner())
         .send()
         .await?
@@ -143,7 +143,7 @@ async fn read_next_chunks(
         response = response.json(&it);
     }
 
-    response = response.header("Accept", ARROW_CONTENT);
+    response = response.header("Accept", CONTENT_TYPE_ARROW);
     let bytes = response.send().await?.error_for_status()?.bytes().await?;
 
     let mut cursor = Cursor::new(bytes);

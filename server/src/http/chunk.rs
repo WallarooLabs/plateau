@@ -2,25 +2,32 @@ use arrow2::error::Error as ArrowError;
 use arrow2::io::ipc::{read, write};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use hyper::body::Body;
 use parquet::data_type::ByteArray;
-use rweb::filters::BoxedFilter;
-use rweb::openapi::{ComponentDescriptor, ComponentOrInlineSchema, Entity};
-use rweb::*;
+use rweb::{
+    body,
+    filters::BoxedFilter,
+    header,
+    http::StatusCode,
+    hyper::{self, body::Body},
+    openapi::{ComponentDescriptor, ComponentOrInlineSchema, Entity},
+    reject, Filter, FromRequest,
+};
+use rweb::{query, Reply};
 use std::borrow::Cow;
 use std::io::Cursor;
-use warp::http::StatusCode;
 
-use plateau_transport::{Insert, InsertQuery};
+use plateau_transport::{Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
 
-use super::error::ErrorReply;
-use crate::chunk::{Record, Schema, SchemaChunk, SegmentChunk};
-use crate::limit::LimitedBatch;
+use crate::{
+    chunk::{new_schema_chunk, LegacyRecords, Record, Schema},
+    http::error::ErrorReply,
+    limit::LimitedBatch,
+};
 
-pub(crate) const ARROW_CONTENT: &str = "application/vnd.apache.arrow.file";
+pub(crate) struct SchemaChunkRequest(pub(crate) SchemaChunk<Schema>);
 
-impl FromRequest for SchemaChunk<Schema> {
-    type Filter = BoxedFilter<(SchemaChunk<Schema>,)>;
+impl FromRequest for SchemaChunkRequest {
+    type Filter = BoxedFilter<(SchemaChunkRequest,)>;
 
     fn new() -> Self::Filter {
         let limit = body::content_length_limit(1024 * 1024);
@@ -30,7 +37,7 @@ impl FromRequest for SchemaChunk<Schema> {
                 if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
                     Ok(time.with_timezone(&Utc))
                 } else {
-                    Err(warp::reject::custom(ErrorReply::InvalidQuery))
+                    Err(reject::custom(ErrorReply::InvalidQuery))
                 }
             } else {
                 Ok(Utc::now())
@@ -51,12 +58,13 @@ impl FromRequest for SchemaChunk<Schema> {
                         })
                         .collect();
 
-                    SchemaChunk::from_legacy(records)
+                    SchemaChunk::try_from(LegacyRecords(records))
                         .map_err(|_| reject::custom(ErrorReply::BadEncoding))
+                        .map(SchemaChunkRequest)
                 });
 
         let content_type = header::<String>("content-type").and_then(|content_type| async move {
-            if content_type == ARROW_CONTENT {
+            if content_type == CONTENT_TYPE_ARROW {
                 Ok(())
             } else {
                 Err(reject::custom(ErrorReply::CannotAccept(content_type)))
@@ -75,8 +83,10 @@ impl FromRequest for SchemaChunk<Schema> {
                     let mut reader = read::FileReader::new(cursor, metadata, None, None);
                     if let Some(chunk) = reader.next() {
                         let chunk = chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
-                        Ok(SchemaChunk::new(schema, chunk)
-                            .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?)
+                        Ok(SchemaChunkRequest(
+                            new_schema_chunk(schema, chunk)
+                                .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
+                        ))
                     } else {
                         Err(reject::custom(ErrorReply::EmptyBody))
                     }
@@ -87,7 +97,7 @@ impl FromRequest for SchemaChunk<Schema> {
 }
 
 // TODO: this seems unlikely to be correct
-impl Entity for SchemaChunk<Schema> {
+impl Entity for SchemaChunkRequest {
     fn type_name() -> Cow<'static, str> {
         Cow::from("SchemaChunk")
     }
@@ -113,7 +123,7 @@ pub(crate) fn to_reply(batch: LimitedBatch) -> Result<Box<dyn Reply>, ArrowError
     let bytes = writer.into_inner().into_inner();
     Ok(Box::new(
         hyper::Response::builder()
-            .header("Content-Type", ARROW_CONTENT)
+            .header("Content-Type", CONTENT_TYPE_ARROW)
             .status(StatusCode::OK)
             .body::<Body>(bytes.into())
             .unwrap(),

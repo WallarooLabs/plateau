@@ -8,3 +8,5 @@ edition = "2021"
 [dependencies]
 serde = "1.0"
 rweb = "0.15"
+arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_parquet", "compute_filter", "compute_comparison"] }
+chrono = "0.4"

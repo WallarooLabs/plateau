@@ -390,8 +390,8 @@ impl Manifest {
             GROUP BY partition
         ",
         )
-        .bind(&id.topic())
-        .bind(&id.partition())
+        .bind(id.topic())
+        .bind(id.partition())
         .map(|row| {
             match (
                 row_get_option_record(&row, 0),

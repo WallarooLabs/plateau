@@ -1,5 +1,7 @@
-use crate::chunk::{estimate_size, IndexedChunk, Record, Schema, SchemaChunk, SegmentChunk};
+use crate::chunk::{estimate_size, iter_legacy, IndexedChunk, Record, Schema};
 use serde::{Deserialize, Serialize};
+
+use plateau_transport::SegmentChunk;
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct RowLimit {
@@ -108,7 +110,7 @@ impl LimitedBatch {
 
         if let Some(schema) = self.schema {
             use itertools::Itertools;
-            SchemaChunk::iter_legacy(
+            iter_legacy(
                 schema,
                 self.chunks
                     .into_iter()

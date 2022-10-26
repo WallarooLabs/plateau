@@ -34,7 +34,7 @@ use parquet::{
 };
 
 pub use crate::chunk::Record;
-use crate::chunk::{SchemaChunk, SegmentChunk};
+use plateau_transport::{SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
@@ -249,7 +249,7 @@ pub(crate) trait CloseArrow: Sized {
     /// Return an estimate of the on-disk size of this file. Note that this
     /// will _not_ include the final metadata footer.
     fn size_estimate(&self) -> Result<usize> {
-        Ok(usize::try_from(fs::metadata(&self.get_path())?.len())?)
+        Ok(usize::try_from(fs::metadata(self.get_path())?.len())?)
     }
 
     fn close(mut self) -> Result<usize> {
@@ -369,8 +369,8 @@ impl SegmentReader2 {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::chunk::legacy_schema;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::chunk::{iter_legacy, legacy_schema, LegacyRecords};
     use tempfile::tempdir;
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
@@ -411,7 +411,7 @@ pub mod test {
         schema: Schema,
         iter: impl Iterator<Item = Result<SegmentChunk, anyhow::Error>>,
     ) -> Vec<Record> {
-        SchemaChunk::iter_legacy(schema, iter)
+        iter_legacy(schema, iter)
             .map(Result::unwrap)
             .flatten()
             .collect()
@@ -453,8 +453,12 @@ pub mod test {
 
         let schema = legacy_schema();
         let mut w = s.create2(schema.clone())?;
-        w.log_arrow(SchemaChunk::from_legacy(records[0..10].to_vec())?)?;
-        w.log_arrow(SchemaChunk::from_legacy(records[10..].to_vec())?)?;
+        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
+            records[0..10].to_vec(),
+        ))?)?;
+        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
+            records[10..].to_vec(),
+        ))?)?;
         let size = w.close()?;
         assert!(size > 0);
 

@@ -1,6 +1,6 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
-use crate::chunk::{Schema, SchemaChunk};
+use crate::chunk::{LegacyRecords, Schema};
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::partition::Config as PartitionConfig;
@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream;
 use futures::stream::StreamExt;
-use plateau_transport::TopicIterator;
+use plateau_transport::{SchemaChunk, TopicIterator};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::{Range, RangeInclusive};
@@ -152,7 +152,7 @@ impl Topic {
     ) -> Result<Range<RecordIndex>> {
         self.extend(
             partition_name,
-            SchemaChunk::from_legacy(rs.to_vec()).unwrap(),
+            SchemaChunk::try_from(LegacyRecords(rs.to_vec())).unwrap(),
         )
         .await
     }
@@ -339,7 +339,10 @@ mod test {
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
             topic
-                .extend(&name, SchemaChunk::from_legacy(vec![record.clone()])?)
+                .extend(
+                    &name,
+                    SchemaChunk::try_from(LegacyRecords(vec![record.clone()]))?,
+                )
                 .await?;
         }
 
@@ -389,7 +392,7 @@ mod test {
             topic
                 .extend(
                     &names[ix % 3],
-                    SchemaChunk::from_legacy(vec![record.clone()])?,
+                    SchemaChunk::try_from(LegacyRecords(vec![record.clone()]))?,
                 )
                 .await?;
         }

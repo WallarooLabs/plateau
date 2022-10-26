@@ -17,7 +17,7 @@
 //! determine when to roll segments and expire old data. `Rolling` policies are
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
-use crate::chunk::{parse_time, IndexedChunk, Schema, SchemaChunk};
+use crate::chunk::{parse_time, IndexedChunk, Schema};
 use crate::limit::{LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
@@ -37,6 +37,7 @@ use futures::FutureExt;
 use futures::{future, stream};
 use log::{error, info, trace};
 use metrics::{counter, gauge};
+use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::ops::{Range, RangeInclusive};
@@ -173,7 +174,9 @@ impl Partition {
 
     #[cfg(test)]
     pub(crate) async fn extend_records(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
-        self.extend(SchemaChunk::from_legacy(rs.to_vec()).unwrap())
+        use crate::chunk::LegacyRecords;
+
+        self.extend(SchemaChunk::try_from(LegacyRecords(rs.to_vec())).unwrap())
             .await
     }
 
@@ -449,11 +452,14 @@ impl State {
                         .iter_segment(segment.index)
                         .into_stream()
                         .flat_map(stream::iter)
-                        .scan(segment.records.start.0, move |start, data| {
-                            let index = RecordIndex(*start);
-                            *start += data.chunk.len();
-                            future::ready(Some(IndexedChunk::from_start(index, data)))
-                        })
+                        .scan(
+                            segment.records.start.0,
+                            move |start: &mut usize, data: SchemaChunk<Schema>| {
+                                let index = RecordIndex(*start);
+                                *start += data.chunk.len();
+                                future::ready(Some(IndexedChunk::from_start(index, data)))
+                            },
+                        )
                 })
                 .map(|indexed| {
                     // now, winnow down to the data we care about.
@@ -523,6 +529,7 @@ impl State {
 pub mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::chunk::LegacyRecords;
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
@@ -747,7 +754,7 @@ pub mod test {
                 result.chunks,
                 vec![IndexedChunk::from_start(
                     start,
-                    SchemaChunk::from_legacy(records)?
+                    SchemaChunk::try_from(LegacyRecords(records))?
                 )]
             );
 
