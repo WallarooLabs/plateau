@@ -428,6 +428,11 @@ async fn topic_iterate_schema_change() -> Result<()> {
         schema_field_names(&chunk_b.schema)
     );
 
+    // this is a horrible hack that resolves a race condition where the slog threads are still
+    // writing but the tempdir is deleted, resulting in intermittent test failures.
+    //TODO: graceful shutdown of test server
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
     Ok(())
 }
 

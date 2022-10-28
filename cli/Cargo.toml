@@ -1,0 +1,16 @@
+[package]
+name = "plateau-cli"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+plateau-transport = { path = "../transport", features = ["structopt-cli"] }
+plateau-client = { path = "../client" }
+structopt = "0.3"
+url = "2.3"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+anyhow = "1.0"
+futures = "0.3"

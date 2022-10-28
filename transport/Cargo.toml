@@ -2,11 +2,16 @@
 name = "plateau-transport"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.60"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 serde = "1.0"
 rweb = "0.15"
-arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_parquet", "compute_filter", "compute_comparison"] }
+structopt = { version = "0.3", optional = true }
+arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_ipc_read_async", "io_parquet", "compute_filter", "compute_comparison"] }
 chrono = "0.4"
+
+[features]
+structopt-cli = ["dep:structopt"]
