@@ -2,7 +2,7 @@
 //!
 //! Currently, the only supported segment format is local Parquet files.
 use anyhow::Result;
-use arrow2::datatypes::Schema;
+use arrow2::datatypes::{DataType, Field, Schema};
 use arrow2::io::parquet::read::FileReader as FileReader2;
 use arrow2::io::parquet::read::{infer_schema, read_metadata};
 use arrow2::io::parquet::write::FileWriter as FileWriter2;
@@ -201,6 +201,13 @@ pub struct SegmentWriter2 {
     options: WriteOptions,
 }
 
+fn array_count(f: &Field) -> usize {
+    match f.data_type() {
+        DataType::Struct(fs) => fs.iter().map(array_count).sum(),
+        _ => 1,
+    }
+}
+
 impl SegmentWriter2 {
     pub fn check_schema(&self, schema: &Schema) -> bool {
         &self.schema == schema
@@ -211,8 +218,16 @@ impl SegmentWriter2 {
             anyhow::bail!("cannot use different schemas within the same segment");
         }
 
-        let encodings: Vec<_> = iter::repeat(vec![Encoding::Plain])
-            .take(data.schema.borrow().fields.len())
+        let encodings: Vec<_> = data
+            .schema
+            .borrow()
+            .fields
+            .iter()
+            .map(|field| {
+                iter::repeat(Encoding::Plain)
+                    .take(array_count(field))
+                    .collect()
+            })
             .collect();
 
         let row_groups = RowGroupIterator::try_new(
@@ -369,7 +384,7 @@ impl SegmentReader2 {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{iter_legacy, legacy_schema, LegacyRecords};
     use tempfile::tempdir;
 
@@ -480,6 +495,18 @@ pub mod test {
         let b = inferences_schema_b();
         assert!(!w.check_schema(&b.schema));
         assert!(w.log_arrow(b).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn nested() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(PathBuf::from(path));
+
+        let a = inferences_nested();
+        let mut w = s.create2(a.schema.clone())?;
+        w.log_arrow(a)?;
         Ok(())
     }
 

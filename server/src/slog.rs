@@ -447,6 +447,7 @@ fn spawn_slog_thread(
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
+                            trace!("segment change {:?} {:?}", id, segment);
                             writer.close().expect("sealed segment");
                             None
                         } else {
@@ -454,6 +455,7 @@ fn spawn_slog_thread(
                         }
                     });
                     let (schema, ref mut writer, _) = current.get_or_insert_with(|| {
+                        trace!("opening segment {:?}", segment);
                         (
                             schema.clone(),
                             new_segment.create2(schema).expect("segment creation"),
@@ -474,8 +476,10 @@ fn spawn_slog_thread(
                     let size = writer.size_estimate().expect("segment size estimate");
 
                     if seal {
+                        current
+                            .take()
+                            .map(|(_, w, _)| w.close().expect("segment close"));
                         trace!("sealed {:?} {:?}", segment, records);
-                        current.take().map(|(_, w, _)| w.close().expect(""));
                     }
 
                     let response = WriteResult {

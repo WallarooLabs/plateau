@@ -528,7 +528,7 @@ impl State {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::LegacyRecords;
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
@@ -716,6 +716,26 @@ pub mod test {
                 part.get_record_by_index(RecordIndex(records.len())).await,
                 None
             );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_nested() -> Result<()> {
+        let (dir, part) = partition(Config::default()).await?;
+        let spec = {
+            part.extend(inferences_nested()).await?;
+            part.commit().await?;
+            to_spec(part)
+        };
+
+        {
+            let part = reattach(&dir, spec).await;
+
+            let start = RecordIndex(0);
+            let result = part.get_records(start, RowLimit::default()).await;
+            assert_eq!(result.chunks.len(), 1);
         }
 
         Ok(())

@@ -1,7 +1,7 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
 use arrow2::array::{
     Array, BooleanArray, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray,
-    MutableUtf8Array, PrimitiveArray, Utf8Array,
+    MutableUtf8Array, PrimitiveArray, StructArray, Utf8Array,
 };
 use arrow2::chunk::Chunk;
 use arrow2::compute::filter::filter_chunk;
@@ -232,6 +232,16 @@ fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
             .downcast_ref::<ListArray<i64>>()
             .ok_or(ChunkError::TypeMismatch)
             .and_then(|arr| estimate_array_size(arr.values().as_ref())),
+        DataType::Struct(_) => arr
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or(ChunkError::TypeMismatch)
+            .and_then(|arr| {
+                arr.values()
+                    .iter()
+                    .map(|inner| estimate_array_size(inner.as_ref()))
+                    .sum()
+            }),
         t => Err(ChunkError::Unsupported(format!("{:?}", t))),
     }
 }
@@ -425,17 +435,52 @@ pub mod test {
         }
     }
 
+    pub(crate) fn inferences_nested() -> SchemaChunk<Schema> {
+        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+
+        let a = inferences_schema_a();
+        let b = inferences_schema_b();
+
+        let a_struct = StructArray::new(
+            DataType::Struct(a.schema.fields),
+            a.chunk.into_arrays(),
+            None,
+        );
+        let b_struct = StructArray::new(
+            DataType::Struct(b.schema.fields),
+            b.chunk.into_arrays(),
+            None,
+        );
+
+        let schema = Schema {
+            fields: vec![
+                Field::new("time", time.data_type().clone(), false),
+                Field::new("input", a_struct.data_type().clone(), false),
+                Field::new("output", b_struct.data_type().clone(), false),
+            ],
+            metadata: Metadata::default(),
+        };
+
+        SchemaChunk {
+            schema,
+            chunk: Chunk::try_new(vec![time.boxed(), a_struct.boxed(), b_struct.boxed()]).unwrap(),
+        }
+    }
+
     #[test]
     fn test_size_estimates() -> Result<(), ChunkError> {
-        assert_eq!(
-            estimate_size(&inferences_schema_a().chunk)?,
-            5 * 8 + 5 * 4 + 5 * 4 + 10 * 8
-        );
+        let time_size = 5 * 8;
+        let a_size = time_size + 5 * 4 + 5 * 4 + 10 * 8;
+        assert_eq!(estimate_size(&inferences_schema_a().chunk)?, a_size);
         let numbers = 3 + 3 + 5 + 4 + 4;
+        let b_size = time_size + numbers + 5 * 4;
+        assert_eq!(estimate_size(&inferences_schema_b().chunk)?, b_size);
+
         assert_eq!(
-            estimate_size(&inferences_schema_b().chunk)?,
-            5 * 8 + numbers + 5 * 4
+            estimate_size(&inferences_nested().chunk)?,
+            time_size + a_size + b_size
         );
+
         Ok(())
     }
 }
