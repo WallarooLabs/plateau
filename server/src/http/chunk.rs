@@ -1,5 +1,5 @@
-use arrow2::error::Error as ArrowError;
-use arrow2::io::ipc::{read, write};
+use crate::arrow2::error::Error as ArrowError;
+use crate::arrow2::io::ipc::{read, write};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use parquet::data_type::ByteArray;

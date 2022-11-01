@@ -17,6 +17,11 @@
 //! determine when to roll segments and expire old data. `Rolling` policies are
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
+use crate::arrow2::array::BooleanArray;
+#[cfg(test)]
+use crate::arrow2::compute::comparison::eq_scalar;
+use crate::arrow2::compute::comparison::gt_eq_scalar;
+use crate::arrow2::scalar::PrimitiveScalar;
 use crate::chunk::{parse_time, IndexedChunk, Schema};
 use crate::limit::{LimitedBatch, RowLimit};
 use crate::manifest::Manifest;
@@ -26,11 +31,6 @@ pub use crate::segment::Record;
 pub use crate::slog::RecordIndex;
 use crate::slog::{SegmentIndex, Slog};
 use anyhow::Result;
-use arrow2::array::BooleanArray;
-#[cfg(test)]
-use arrow2::compute::comparison::eq_scalar;
-use arrow2::compute::comparison::gt_eq_scalar;
-use arrow2::scalar::PrimitiveScalar;
 use chrono::{DateTime, Utc};
 use futures::stream::{Stream, StreamExt};
 use futures::FutureExt;

@@ -6,6 +6,7 @@ use arrow2::io::ipc::{read, write};
 use plateau::chunk::Schema;
 use plateau::http;
 use plateau::http::TestServer;
+use plateau_transport::arrow2;
 use reqwest::Client;
 use serde_json::json;
 use std::io::Cursor;

@@ -4,7 +4,8 @@ use std::{pin::Pin, str::FromStr};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
-use plateau_transport::{
+pub use plateau_transport::{
+    arrow2,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
     ArrowError, ArrowSchema, Insert, InsertQuery, Inserted, Partitions, RecordQuery, Records,
     SchemaChunk, TopicIterationQuery, TopicIterationReply, TopicIterator, Topics,

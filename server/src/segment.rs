@@ -1,14 +1,14 @@
 //! A segment contains a bundle of time and logically indexed records.
 //!
 //! Currently, the only supported segment format is local Parquet files.
-use anyhow::Result;
-use arrow2::datatypes::{DataType, Field, Schema};
-use arrow2::io::parquet::read::FileReader as FileReader2;
-use arrow2::io::parquet::read::{infer_schema, read_metadata};
-use arrow2::io::parquet::write::FileWriter as FileWriter2;
-use arrow2::io::parquet::write::{
+use crate::arrow2::datatypes::{DataType, Field, Schema};
+use crate::arrow2::io::parquet::read::FileReader as FileReader2;
+use crate::arrow2::io::parquet::read::{infer_schema, read_metadata};
+use crate::arrow2::io::parquet::write::FileWriter as FileWriter2;
+use crate::arrow2::io::parquet::write::{
     CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
 };
+use anyhow::Result;
 #[cfg(test)]
 use chrono::{Duration, TimeZone, Utc};
 use std::borrow::Borrow;

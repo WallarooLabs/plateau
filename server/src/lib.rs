@@ -9,3 +9,5 @@ mod retention;
 mod segment;
 mod slog;
 mod topic;
+
+use plateau_transport::arrow2;

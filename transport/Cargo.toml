@@ -10,7 +10,18 @@ rust-version = "1.60"
 serde = "1.0"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }
-arrow2 = { git="https://github.com/WallarooLabs/arrow2", branch="fmurphy/upstream-0.14.1", features = ["io_ipc", "io_ipc_read_async", "io_parquet", "compute_filter", "compute_comparison"] }
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/main", features = [
+    "compute_aggregate",
+    "compute_cast",
+    "compute_comparison",
+    "compute_concatenate",
+    "compute_filter",
+    "io_parquet",
+    "io_ipc",
+    "io_ipc_read_async",
+    "io_json",
+    "io_flight",
+] }
 chrono = "0.4"
 
 [features]

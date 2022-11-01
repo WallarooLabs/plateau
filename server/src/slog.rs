@@ -19,13 +19,12 @@
 //! Load is shed by failing any roll or checkpoint operation while an existing
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
-use crate::chunk::TimeRange;
+use crate::chunk::{Schema, TimeRange};
 use crate::manifest::SegmentData;
 #[cfg(test)]
 use crate::segment::Record;
 use crate::segment::{CloseArrow, Segment, SegmentWriter2};
 use anyhow::Result;
-use arrow2::datatypes::Schema;
 use chrono::{DateTime, Utc};
 use log::{debug, trace};
 use metrics::counter;

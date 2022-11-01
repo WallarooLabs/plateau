@@ -1,4 +1,4 @@
-use arrow2::error::Error as ArrowError;
+use crate::arrow2::error::Error as ArrowError;
 use plateau_transport::ErrorMessage;
 use rweb::*;
 use std::convert::Infallible;

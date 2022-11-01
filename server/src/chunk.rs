@@ -1,12 +1,12 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
-use arrow2::array::{
+use crate::arrow2::array::{
     Array, BooleanArray, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray,
     MutableUtf8Array, PrimitiveArray, StructArray, Utf8Array,
 };
-use arrow2::chunk::Chunk;
-use arrow2::compute::filter::filter_chunk;
-pub use arrow2::datatypes::Schema;
-use arrow2::datatypes::{DataType, Field, Metadata};
+use crate::arrow2::chunk::Chunk;
+use crate::arrow2::compute::filter::filter_chunk;
+pub use crate::arrow2::datatypes::Schema;
+use crate::arrow2::datatypes::{DataType, Field, Metadata};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use parquet::data_type::ByteArray;
 use plateau_transport::{SchemaChunk, SegmentChunk};
@@ -332,7 +332,7 @@ impl IndexedChunk {
     pub(crate) fn filter(
         &self,
         filter: &BooleanArray,
-    ) -> Result<IndexedChunk, arrow2::error::Error> {
+    ) -> Result<IndexedChunk, crate::arrow2::error::Error> {
         Ok(IndexedChunk {
             inner_schema: self.inner_schema.clone(),
             chunk: filter_chunk(&self.chunk, filter)?,
@@ -356,8 +356,8 @@ impl From<IndexedChunk> for SegmentChunk {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use arrow2::array::PrimitiveArray;
-    use arrow2::datatypes::{Field, Metadata};
+    use crate::arrow2::array::PrimitiveArray;
+    use crate::arrow2::datatypes::{Field, Metadata};
 
     pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);

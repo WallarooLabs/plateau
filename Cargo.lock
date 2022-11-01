@@ -101,13 +101,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df5d25bc6d676271277120c41ef28760fe0a9f070677a58db621c0f983f9c20"
 dependencies = [
  "planus",
+ "prost",
+ "prost-derive",
  "serde",
 ]
 
 [[package]]
 name = "arrow2"
 version = "0.14.1"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/upstream-0.14.1#0ac881da28139a7c2f593e46c3f486cd7abc905b"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/main#1764df84de69528a749ea6a9833940c92c19ca5d"
 dependencies = [
  "ahash",
  "arrow-format",
@@ -122,6 +124,10 @@ dependencies = [
  "foreign_vec",
  "futures",
  "hash_hasher",
+ "indexmap",
+ "json-deserializer",
+ "lexical-core",
+ "multiversion",
  "num-traits",
  "parquet2",
  "simdutf8",
@@ -1195,6 +1201,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "json-deserializer"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d784d2d481d0bace3450572391d6076dd6d10c66c0ebc1a0be037b3b420664bd"
+dependencies = [
+ "indexmap",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1879,7 +1894,6 @@ name = "plateau"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow2",
  "bytes",
  "chrono",
  "futures",
@@ -2012,6 +2026,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ea3d908b0e36316caf9e9e2c4625cdde190a7e6f440d794667ed17a1855e725"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "prost"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71adf41db68aa0daaefc69bb30bcd68ded9b9abaad5d1fbb6304c4fb390e083e"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b670f45da57fb8542ebdbb6105a925fe571b67f9e7ed9f47a06a84e72b4e7cc"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
