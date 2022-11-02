@@ -2,7 +2,6 @@ use crate::arrow2::error::Error as ArrowError;
 use crate::arrow2::io::ipc::{read, write};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use parquet::data_type::ByteArray;
 use rweb::{
     body,
     filters::BoxedFilter,
@@ -54,7 +53,7 @@ impl FromRequest for SchemaChunkRequest {
                         .into_iter()
                         .map(|m| Record {
                             time,
-                            message: ByteArray::from(m.as_str()),
+                            message: m.into_bytes(),
                         })
                         .collect();
 

@@ -278,7 +278,6 @@ mod test {
     use crate::partition::test::{assert_limit_unreached, deindex};
     use crate::retention::Retention;
     use chrono::{TimeZone, Utc};
-    use parquet::data_type::ByteArray;
     use std::collections::HashSet;
     use std::convert::TryFrom;
     use std::iter::FromIterator;
@@ -302,7 +301,7 @@ mod test {
         s.into_iter()
             .map(|(ts, is)| Record {
                 time: Utc.timestamp(ts, 0),
-                message: ByteArray::from(is.into().as_str()),
+                message: is.into().into_bytes(),
             })
             .collect()
     }
@@ -585,7 +584,7 @@ mod test {
             .into_iter()
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 
@@ -663,9 +662,7 @@ mod test {
                     .into_iter()
                     .map(|message| Record {
                         time: Utc.timestamp(0, 0),
-                        message: ByteArray::from(
-                            format!("{{ \"data\": \"{}-{}\" }}", data, message).as_str(),
-                        ),
+                        message: format!("{{ \"data\": \"{}-{}\" }}", data, message).into_bytes(),
                     })
                     .collect();
 

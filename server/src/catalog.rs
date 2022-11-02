@@ -134,7 +134,6 @@ mod test {
     use crate::segment::Record;
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
-    use parquet::data_type::ByteArray;
     use tempfile::{tempdir, TempDir};
 
     async fn catalog() -> (TempDir, Catalog) {
@@ -151,7 +150,7 @@ mod test {
             .into_iter()
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 

@@ -8,7 +8,6 @@ use crate::arrow2::compute::filter::filter_chunk;
 pub use crate::arrow2::datatypes::Schema;
 use crate::arrow2::datatypes::{DataType, Field, Metadata};
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use parquet::data_type::ByteArray;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
@@ -53,10 +52,10 @@ pub fn parse_time(tv: i64) -> DateTime<Utc> {
     Utc.timestamp(0, 0) + Duration::milliseconds(tv)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
     pub time: DateTime<Utc>,
-    pub message: ByteArray,
+    pub message: Vec<u8>,
 }
 
 impl<S: Borrow<Schema> + Clone> TryFrom<SchemaChunk<S>> for LegacyRecords {
@@ -86,7 +85,7 @@ impl<S: Borrow<Schema> + Clone> TryFrom<SchemaChunk<S>> for LegacyRecords {
                 .zip(message.values_iter())
                 .map(|(tv, m)| Record {
                     time: parse_time(*tv),
-                    message: ByteArray::from(m),
+                    message: m.bytes().collect(),
                 })
                 .collect(),
         ))
@@ -160,9 +159,9 @@ impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
             let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
             times.push(Some(dt.num_milliseconds()));
             messages.push(Some(
-                r.message
-                    .as_utf8()
-                    .map_err(|_| ChunkError::FailedEncoding)?,
+                std::str::from_utf8(&r.message)
+                    .map_err(|_| ChunkError::FailedEncoding)?
+                    .to_string(),
             ));
         }
 

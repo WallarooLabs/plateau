@@ -533,7 +533,6 @@ pub mod test {
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
-    use parquet::data_type::ByteArray;
     use std::convert::TryInto;
     use tempfile::{tempdir, TempDir};
 
@@ -561,7 +560,7 @@ pub mod test {
             .into_iter()
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 
@@ -602,7 +601,7 @@ pub mod test {
             .into_iter()
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 
@@ -688,7 +687,7 @@ pub mod test {
             .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(format!("record-{}", ix).as_str()),
+                message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
 
@@ -747,7 +746,7 @@ pub mod test {
             .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(format!("record-{}", ix).as_str()),
+                message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
 
@@ -812,7 +811,7 @@ pub mod test {
             .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(format!("record-{}", ix).as_str()),
+                message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
 
@@ -920,7 +919,7 @@ pub mod test {
             .enumerate()
             .map(|(ix, message)| Record {
                 time: Utc.timestamp(ix.try_into().unwrap(), 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 
@@ -1002,7 +1001,7 @@ pub mod test {
             .zip(times.iter())
             .map(|(message, ix)| Record {
                 time: Utc.timestamp(*ix, 0),
-                message: ByteArray::from(*message),
+                message: message.bytes().collect(),
             })
             .collect();
 

@@ -324,7 +324,7 @@ async fn partition_get_records(
 
 fn serialize_records<I: IntoIterator<Item = Record>>(rs: I) -> Vec<String> {
     rs.into_iter()
-        .map(|r| String::from_utf8(r.message.data().to_vec()).unwrap())
+        .map(|r| String::from_utf8(r.message).unwrap())
         .collect()
 }
 

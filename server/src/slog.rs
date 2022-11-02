@@ -508,7 +508,6 @@ mod test {
 
     use super::*;
     use chrono::{TimeZone, Utc};
-    use parquet::data_type::ByteArray;
     use std::path::PathBuf;
     use tempfile::tempdir;
 
@@ -525,7 +524,7 @@ mod test {
             .into_iter()
             .map(|message| Record {
                 time: Utc.timestamp(0, 0),
-                message: ByteArray::from(message),
+                message: message.bytes().collect(),
             })
             .collect();
 

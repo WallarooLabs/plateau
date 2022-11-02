@@ -38,13 +38,10 @@ use plateau_transport::{SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
-impl Eq for Record {}
-
-#[cfg(test)]
 impl Hash for Record {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.time.hash(state);
-        let data_string = String::from_utf8(self.message.data().to_vec()).unwrap();
+        let data_string = String::from_utf8(self.message.clone()).unwrap();
         data_string.hash(state);
     }
 }
@@ -152,7 +149,7 @@ impl SegmentWriter {
         for r in record.drain(..) {
             let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
             times.push(dt.num_milliseconds());
-            messages.push(r.message);
+            messages.push(ByteArray::from(r.message));
         }
 
         if let Some(mut col_writer) = row_group_writer.next_column()? {
@@ -348,7 +345,10 @@ impl SegmentReader {
                 .zip(arrs.into_iter())
                 .map(|(tv, message)| {
                     let time = Utc.timestamp(0, 0) + Duration::milliseconds(tv);
-                    Record { time, message }
+                    Record {
+                        time,
+                        message: message.data().to_vec(),
+                    }
                 })
                 .collect();
 
@@ -391,7 +391,7 @@ pub mod test {
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
             time: Utc.timestamp(ix, 0),
-            message: ByteArray::from(message.as_str()),
+            message: message.into_bytes(),
         })
         .collect()
     }
