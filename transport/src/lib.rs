@@ -143,9 +143,9 @@ impl SchemaChunk<ArrowSchema> {
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
         let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
         let options = write::WriteOptions { compression: None };
-        let mut writer = write::StreamWriter::new(bytes, options);
+        let mut writer = write::FileWriter::new(bytes, self.schema.clone(), None, options);
 
-        writer.start(&self.schema, None)?;
+        writer.start()?;
         writer.write(&self.chunk, None)?;
         writer.finish()?;
 

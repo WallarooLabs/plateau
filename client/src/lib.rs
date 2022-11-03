@@ -1,11 +1,12 @@
 //! General-use client library for accessing plateau.
-use std::{pin::Pin, str::FromStr};
+use std::{io::Cursor, pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
 pub use plateau_transport::{
     arrow2,
+    arrow2::io::ipc,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
     ArrowError, ArrowSchema, Insert, InsertQuery, Inserted, Partitions, RecordQuery, Records,
     SchemaChunk, TopicIterationQuery, TopicIterationReply, TopicIterator, Topics,
@@ -259,21 +260,22 @@ impl Insertion for SizedArrowStream {
     }
 }
 
-async fn stream_into_schemachunk(
-    stream: Pin<Box<dyn ArrowStream>>,
-) -> Result<SchemaChunk<ArrowSchema>, Error> {
-    let mut async_reader = stream.into_async_read();
-    let metadata = read_stream_metadata_async(&mut async_reader)
-        .await
-        .map_err(Error::ArrowSerialize)?;
+fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+    let mut cursor = Cursor::new(bytes);
+    let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
     let schema = metadata.schema.clone();
-    let mut arrow_reader = AsyncStreamReader::new(&mut async_reader, metadata);
-    let chunk = arrow_reader
-        .try_next()
-        .await
-        .map_err(Error::ArrowSerialize)?
-        .ok_or(Error::EmptyStream)?;
-    Ok(SchemaChunk { schema, chunk })
+    let reader = ipc::read::FileReader::new(cursor, metadata, None, None);
+    let chunks = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Error::ArrowDeserialize)?;
+
+    Ok(chunks
+        .into_iter()
+        .map(|chunk| SchemaChunk {
+            schema: schema.clone(),
+            chunk,
+        })
+        .collect())
 }
 
 /// Trait for providing iteration through a topic's record, providing records in a specific
@@ -321,19 +323,23 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Iterate<SchemaChunk<ArrowSchema>> for Client {
+impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
     /// Iterate over a topic, returning records in [SchemaChunk<Schema>] format.
     async fn iterate_topic<'a>(
         &self,
         topic_name: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
-    ) -> Result<SchemaChunk<ArrowSchema>, Error> {
-        let stream = process_request_into_stream(add_arrow_accept_header(
+    ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+        let bytes = process_request(add_arrow_accept_header(
             self.iteration_request(topic_name, params, position)?,
         ))
-        .await?;
-        stream_into_schemachunk(stream).await
+        .await?
+        .bytes()
+        .await
+        .map_err(Error::Server)?;
+
+        bytes_into_schemachunk(bytes)
     }
 }
 
@@ -386,7 +392,7 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Retrieve<SchemaChunk<ArrowSchema>> for Client {
+impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
     /// [Records] (plaintext) format.
     async fn get_records(
@@ -394,14 +400,18 @@ impl Retrieve<SchemaChunk<ArrowSchema>> for Client {
         topic_name: impl AsRef<str> + Send,
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
-    ) -> Result<SchemaChunk<ArrowSchema>, Error> {
-        let stream = process_request_into_stream(add_arrow_accept_header(self.retrieve_request(
+    ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+        let bytes = process_request(add_arrow_accept_header(self.retrieve_request(
             topic_name,
             partition_name,
             params,
         )?))
-        .await?;
-        stream_into_schemachunk(stream).await
+        .await?
+        .bytes()
+        .await
+        .map_err(Error::Server)?;
+
+        bytes_into_schemachunk(bytes)
     }
 }
 
