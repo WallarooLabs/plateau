@@ -38,6 +38,7 @@ use plateau_transport::{SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
+#[allow(clippy::derive_hash_xor_eq)]
 impl Hash for Record {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.time.hash(state);
@@ -399,7 +400,7 @@ pub mod test {
     fn round_trip() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
         let records: Vec<_> = build_records(
             (0..20)
                 .into_iter()
@@ -426,17 +427,14 @@ pub mod test {
         schema: Schema,
         iter: impl Iterator<Item = Result<SegmentChunk, anyhow::Error>>,
     ) -> Vec<Record> {
-        iter_legacy(schema, iter)
-            .map(Result::unwrap)
-            .flatten()
-            .collect()
+        iter_legacy(schema, iter).flat_map(Result::unwrap).collect()
     }
 
     #[test]
     fn round_trip1_2() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
         let records: Vec<_> = build_records(
             (0..20)
                 .into_iter()
@@ -459,7 +457,7 @@ pub mod test {
     fn round_trip2() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
         let records: Vec<_> = build_records(
             (0..20)
                 .into_iter()
@@ -467,7 +465,7 @@ pub mod test {
         );
 
         let schema = legacy_schema();
-        let mut w = s.create2(schema.clone())?;
+        let mut w = s.create2(schema)?;
         w.log_arrow(SchemaChunk::try_from(LegacyRecords(
             records[0..10].to_vec(),
         ))?)?;
@@ -487,7 +485,7 @@ pub mod test {
     fn schema_change() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
 
         let a = inferences_schema_a();
         let mut w = s.create2(a.schema.clone())?;
@@ -502,7 +500,7 @@ pub mod test {
     fn nested() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
 
         let a = inferences_nested();
         let mut w = s.create2(a.schema.clone())?;
@@ -514,7 +512,7 @@ pub mod test {
     fn large_records() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(PathBuf::from(path));
+        let s = Segment::at(path);
         let large: String = (0..100 * 1024).map(|_| "x").collect();
         let records: Vec<_> = build_records(
             (0..20)

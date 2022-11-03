@@ -192,10 +192,8 @@ impl Slog {
 
         self.iter_segment(segment)
             .await
-            .map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
-            .flatten()
-            .skip(relative)
-            .next()
+            .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
+            .nth(relative)
     }
 
     pub(crate) async fn iter_segment<'a>(
@@ -531,10 +529,10 @@ mod test {
         let chunk = SchemaChunk::try_from(LegacyRecords(records.clone()))?;
 
         let first = slog.append(chunk).await;
-        for ix in 0..3 {
+        for (ix, record) in records.iter().enumerate() {
             assert_eq!(
                 slog.get_record(first.segment, ix).await,
-                Some(records[ix].clone())
+                Some(record.clone())
             );
         }
         slog.roll().await?;
@@ -557,10 +555,10 @@ mod test {
             Some((RecordIndex(3)..RecordIndex(6), true))
         );
 
-        for ix in 0..3 {
+        for (ix, record) in records.iter().enumerate() {
             assert_eq!(
                 slog.get_record(second.segment, ix).await,
-                Some(records[ix].clone())
+                Some(record.clone())
             );
         }
 

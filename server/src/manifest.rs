@@ -515,7 +515,7 @@ mod test {
         let id = PartitionId::new("topic", "");
         let root = tempdir().unwrap();
         let path = root.path().join("testing.sqlite");
-        let state = Manifest::attach(PathBuf::from(path)).await;
+        let state = Manifest::attach(path).await;
         assert_eq!(state.get_max_segment(&id).await, None);
 
         let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
@@ -573,9 +573,9 @@ mod test {
         let topic = "topic";
         let root = tempdir().unwrap();
         let path = root.path().join("testing.sqlite");
-        let state = Manifest::attach(PathBuf::from(path)).await;
-        let a = PartitionId::new(&topic, "a");
-        let b = PartitionId::new(&topic, "b");
+        let state = Manifest::attach(path).await;
+        let a = PartitionId::new(topic, "a");
+        let b = PartitionId::new(topic, "b");
 
         let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
         for ix in 0..10 {
@@ -640,10 +640,10 @@ mod test {
         let other = "other_topic";
         let root = tempdir().unwrap();
         let path = root.path().join("testing.sqlite");
-        let state = Manifest::attach(PathBuf::from(path)).await;
-        let a = PartitionId::new(&topic, "a");
-        let b = PartitionId::new(&other, "a");
-        let c = PartitionId::new(&topic, "b");
+        let state = Manifest::attach(path).await;
+        let a = PartitionId::new(topic, "a");
+        let b = PartitionId::new(other, "a");
+        let c = PartitionId::new(topic, "b");
 
         let data = SegmentData {
             index: SegmentIndex(0),
@@ -668,7 +668,7 @@ mod test {
                     },
                 )
                 .await;
-            assert_eq!(state.get_size(Scope::Partition(&p)).await, 10);
+            assert_eq!(state.get_size(Scope::Partition(p)).await, 10);
         }
         assert_eq!(state.get_size(Scope::Topic(a.topic())).await, 20);
         assert_eq!(state.get_size(Scope::Topic(c.topic())).await, 20);
@@ -687,7 +687,7 @@ mod test {
         let id = PartitionId::new(topic, partition);
         let root = tempdir().unwrap();
         let path = root.path().join("testing.sqlite");
-        let state = Manifest::attach(PathBuf::from(path)).await;
+        let state = Manifest::attach(path).await;
         assert_eq!(state.get_max_segment(&id).await, None);
 
         let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
@@ -761,7 +761,7 @@ mod test {
         let id = PartitionId::new(topic, partition);
         let root = tempdir().unwrap();
         let path = root.path().join("testing.sqlite");
-        let state = Manifest::attach(PathBuf::from(path)).await;
+        let state = Manifest::attach(path).await;
         assert_eq!(state.get_max_segment(&id).await, None);
 
         async fn add_record(
@@ -799,10 +799,7 @@ mod test {
                     .map(|data| data.index)
                     .collect::<Vec<_>>()
                     .await,
-                segments
-                    .into_iter()
-                    .map(|ix| SegmentIndex(ix))
-                    .collect::<Vec<_>>(),
+                segments.into_iter().map(SegmentIndex).collect::<Vec<_>>(),
                 "query {:?}",
                 times
             );

@@ -192,7 +192,7 @@ impl Partition {
 
     #[cfg(test)]
     pub(crate) async fn commit(&self) -> Result<()> {
-        self.state.write().await.commit(&self).await
+        self.state.write().await.commit(self).await
     }
 
     pub(crate) async fn checkpoint(&self) {
@@ -354,8 +354,8 @@ impl Partition {
     #[cfg(test)]
     pub(crate) async fn compact(&self) {
         let mut state = self.state.write().await;
-        state.commit(&self).await.expect("commit failed");
-        state.retain(&self).await;
+        state.commit(self).await.expect("commit failed");
+        state.retain(self).await;
     }
 }
 
@@ -565,7 +565,7 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -606,7 +606,7 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
 
         if commit {
@@ -694,7 +694,7 @@ pub mod test {
         let (dir, part) = partition(segment_3s()).await?;
         let spec = {
             for record in records.iter() {
-                part.extend_records(&vec![record.clone()]).await?;
+                part.extend_records(&[record.clone()]).await?;
             }
             part.commit().await?;
             to_spec(part)
@@ -818,7 +818,7 @@ pub mod test {
         let (dir, part) = partition(segment_3s()).await?;
         {
             for record in records.iter() {
-                part.extend_records(&vec![record.clone()]).await?;
+                part.extend_records(&[record.clone()]).await?;
             }
             part.commit().await?;
         }
@@ -862,7 +862,7 @@ pub mod test {
 
         // now, test that we can write and persist still.
         for record in records.iter() {
-            part.extend_records(&vec![record.clone()]).await?;
+            part.extend_records(&[record.clone()]).await?;
         }
         part.commit().await?;
 
@@ -909,7 +909,6 @@ pub mod test {
                     max_segment_count: Some(1),
                     ..Retention::default()
                 },
-                ..Config::default()
             },
         )
         .await;
@@ -924,7 +923,7 @@ pub mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
         t.commit().await?;
 
@@ -933,13 +932,13 @@ pub mod test {
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
 
         // fetch from start fast-forwards to first valid index
         let result = t.get_records(RecordIndex(0), RowLimit::records(2)).await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
-        let start_index = result.chunks.iter().next().unwrap().start().unwrap();
+        let start_index = result.chunks.first().unwrap().start().unwrap();
         assert_eq!(
             deindex(result.chunks),
             vec![records[3].clone(), records[4].clone()]
@@ -1006,13 +1005,13 @@ pub mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
         t.commit().await?;
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.extend_records(&vec![record.clone()]).await?;
+            t.extend_records(&[record.clone()]).await?;
         }
 
         let min_time = times.iter().cloned().min().unwrap();

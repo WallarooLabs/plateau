@@ -485,8 +485,8 @@ mod test {
             .map(|ix| format!("partition-{}", ix))
             .collect();
 
-        fn to_iter(names: &Vec<String>, v: [usize; 3]) -> HashMap<String, usize> {
-            names.clone().into_iter().zip(v).collect()
+        fn to_iter(names: &[String], v: [usize; 3]) -> HashMap<String, usize> {
+            names.iter().cloned().zip(v).collect()
         }
 
         for (name, chunks) in names.iter().zip(chunk_allocation.into_iter()) {
@@ -538,7 +538,7 @@ mod test {
             .collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .extend_records(&names[ix % parts], &vec![record.clone()])
+                .extend_records(&names[ix % parts], &[record.clone()])
                 .await?;
         }
 
@@ -590,7 +590,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.extend_records(&name, &vec![record.clone()]).await?;
+            topic.extend_records(&name, &[record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
