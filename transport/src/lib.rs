@@ -1,6 +1,11 @@
 use std::{borrow::Borrow, collections::HashMap, io::Cursor};
 
-use arrow2::{array::Array, chunk::Chunk, io::ipc::write};
+use arrow2::{
+    array::{Array, StructArray},
+    chunk::Chunk,
+    datatypes::Field,
+    io::ipc::write,
+};
 use rweb::Schema;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "structopt-cli")]
@@ -139,6 +144,13 @@ impl<S: Borrow<ArrowSchema> + Clone> SchemaChunk<S> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PathError {
+    Empty,
+    KeyMissing(Vec<String>),
+    NotStruct(Vec<String>),
+}
+
 impl SchemaChunk<ArrowSchema> {
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
         let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
@@ -150,5 +162,109 @@ impl SchemaChunk<ArrowSchema> {
         writer.finish()?;
 
         Ok(writer.into_inner().into_inner())
+    }
+
+    pub fn get_array<'a>(
+        &self,
+        path: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Box<dyn Array>, PathError> {
+        let mut it = path.into_iter();
+        let start = it.next().ok_or(PathError::Empty)?;
+        let mut current_path = vec![start];
+        let collect_path =
+            |path: Vec<&'a str>| path.iter().map(|k| String::from(*k)).collect::<Vec<_>>();
+        let key_missing = |path| PathError::KeyMissing(collect_path(path));
+        let mut current = index_into(current_path[0], &self.schema.fields, self.chunk.arrays())
+            .ok_or_else(|| key_missing(std::mem::take(&mut current_path)))?;
+
+        for key in it {
+            match current.as_any().downcast_ref::<StructArray>() {
+                Some(arr) => {
+                    current_path.push(key);
+                    current = index_into(key, arr.fields(), arr.values())
+                        .ok_or_else(|| key_missing(std::mem::take(&mut current_path)))?
+                }
+                None => return Err(PathError::NotStruct(collect_path(current_path))),
+            }
+        }
+
+        Ok(current)
+    }
+}
+
+fn index_into(key: &str, fields: &[Field], arrays: &[Box<dyn Array>]) -> Option<Box<dyn Array>> {
+    fields
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, f)| if f.name == key { Some(ix) } else { None })
+        .next()
+        .and_then(|ix| arrays.get(ix).cloned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow2::array::PrimitiveArray;
+    use arrow2::datatypes::{DataType, Field, Metadata, Schema};
+
+    #[test]
+    fn test_get_array() {
+        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+        let index = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+
+        let grandchild_struct = StructArray::new(
+            DataType::Struct(vec![Field::new("index", index.data_type().clone(), false)]),
+            vec![index.clone().boxed()],
+            None,
+        );
+
+        let child_struct = StructArray::new(
+            DataType::Struct(vec![Field::new(
+                "grandchild",
+                grandchild_struct.data_type().clone(),
+                false,
+            )]),
+            vec![grandchild_struct.clone().boxed()],
+            None,
+        );
+
+        let schema = Schema {
+            fields: vec![
+                Field::new("time", time.data_type().clone(), false),
+                Field::new("child", child_struct.data_type().clone(), false),
+            ],
+            metadata: Metadata::default(),
+        };
+
+        let test = SchemaChunk {
+            schema,
+            chunk: Chunk::try_new(vec![time.clone().boxed(), child_struct.clone().boxed()])
+                .unwrap(),
+        };
+
+        assert_eq!(test.get_array(["time"]), Ok(time.boxed()));
+        assert_eq!(test.get_array(["child"]), Ok(child_struct.boxed()));
+        assert_eq!(
+            test.get_array(["child", "grandchild"]),
+            Ok(grandchild_struct.boxed())
+        );
+        assert_eq!(
+            test.get_array(["child", "grandchild", "index"]),
+            Ok(index.boxed())
+        );
+
+        assert_eq!(test.get_array([]), Err(PathError::Empty));
+        assert_eq!(
+            test.get_array(["child", "missing", "wrong"]),
+            Err(PathError::KeyMissing(vec![
+                "child".to_string(),
+                "missing".to_string()
+            ]))
+        );
+
+        assert_eq!(
+            test.get_array(["time", "incorrect", "wrong"]),
+            Err(PathError::NotStruct(vec!["time".to_string()]))
+        );
     }
 }
