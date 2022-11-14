@@ -4,14 +4,16 @@ use arrow2::{
     array::{Array, StructArray},
     chunk::Chunk,
     datatypes::Field,
-    io::ipc::write,
+    io::ipc::{read, write},
 };
 use rweb::Schema;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
 
+use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
+use thiserror::Error;
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
@@ -144,14 +146,18 @@ impl<S: Borrow<ArrowSchema> + Clone> SchemaChunk<S> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum PathError {
+    #[error("provided path was empty")]
     Empty,
+    #[error("key not found: {0:?}")]
     KeyMissing(Vec<String>),
+    #[error("not a struct array: {0:?}")]
     NotStruct(Vec<String>),
 }
 
 impl SchemaChunk<ArrowSchema> {
+    /// Serialize this [SchemaChunk] into Arrow IPC bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
         let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
         let options = write::WriteOptions { compression: None };
@@ -164,10 +170,70 @@ impl SchemaChunk<ArrowSchema> {
         Ok(writer.into_inner().into_inner())
     }
 
+    /// Deserialize a [SchemaChunk] from Arrow IPC bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArrowError> {
+        let mut cursor = Cursor::new(bytes);
+        let metadata = read::read_file_metadata(&mut cursor)?;
+        let schema = metadata.schema.clone();
+        let mut reader = read::FileReader::new(cursor, metadata, None, None);
+
+        Ok(SchemaChunk {
+            chunk: reader.next().unwrap()?,
+            schema,
+        })
+    }
+
+    /// List keys for all nested struct arrays within this [SchemaChunk].
+    pub fn tables(&self) -> Vec<Vec<String>> {
+        let mut keys = vec![];
+        for field in &self.schema.fields {
+            collect_keys(&mut keys, field, true);
+        }
+        keys
+    }
+
+    /// Get a nested struct array within this [SchemaChunk].
+    pub fn get_table<'a>(
+        &self,
+        path: impl IntoIterator<Item = &'a str>,
+    ) -> Result<SchemaChunk<ArrowSchema>, PathError> {
+        let (key, arr) = self.get_key_array(path)?;
+
+        match arr.as_any().downcast_ref::<StructArray>() {
+            Some(arr) => Ok(SchemaChunk {
+                chunk: Chunk::new(arr.values().to_vec()),
+                schema: ArrowSchema {
+                    fields: arr.fields().to_vec(),
+                    metadata: Metadata::default(),
+                },
+            }),
+            None => Err(PathError::NotStruct(
+                key.into_iter().map(|s| s.to_string()).collect(),
+            )),
+        }
+    }
+
+    /// List keys for all nested arrow non-struct arrays within this [SchemaChunk].
+    pub fn arrays(&self) -> Vec<Vec<String>> {
+        let mut keys = vec![];
+        for field in &self.schema.fields {
+            collect_keys(&mut keys, field, false);
+        }
+        keys
+    }
+
+    /// Get a nested non-struct array within this [SchemaChunk].
     pub fn get_array<'a>(
         &self,
         path: impl IntoIterator<Item = &'a str>,
     ) -> Result<Box<dyn Array>, PathError> {
+        Ok(self.get_key_array(path)?.1)
+    }
+
+    fn get_key_array<'a>(
+        &self,
+        path: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(Vec<&'a str>, Box<dyn Array>), PathError> {
         let mut it = path.into_iter();
         let start = it.next().ok_or(PathError::Empty)?;
         let mut current_path = vec![start];
@@ -188,7 +254,53 @@ impl SchemaChunk<ArrowSchema> {
             }
         }
 
-        Ok(current)
+        Ok((current_path, current))
+    }
+}
+
+fn collect_keys(keys: &mut Vec<Vec<String>>, field: &Field, tables: bool) {
+    let mut path = vec![field.name.clone()];
+    let mut stack = match field.data_type() {
+        DataType::Struct(fields) => {
+            if tables {
+                keys.push(path.clone());
+            }
+            vec![fields.iter()]
+        }
+        _ => {
+            if !tables {
+                keys.push(path.clone());
+            }
+            vec![]
+        }
+    };
+
+    while let Some(top) = stack.last_mut() {
+        match top.next() {
+            Some(field) => match field.data_type() {
+                DataType::Struct(fields) => {
+                    path.push(field.name.clone());
+                    stack.push(fields.iter());
+                    if tables {
+                        keys.push(path.clone());
+                    }
+                }
+                _ => {
+                    if !tables {
+                        keys.push(
+                            path.iter()
+                                .chain(std::iter::once(&field.name))
+                                .cloned()
+                                .collect(),
+                        );
+                    }
+                }
+            },
+            None => {
+                stack.pop();
+                path.pop();
+            }
+        }
     }
 }
 
@@ -207,8 +319,15 @@ mod tests {
     use arrow2::array::PrimitiveArray;
     use arrow2::datatypes::{DataType, Field, Metadata, Schema};
 
-    #[test]
-    fn test_get_array() {
+    fn nested_chunk() -> (
+        SchemaChunk<ArrowSchema>,
+        (
+            Box<dyn Array>,
+            Box<dyn Array>,
+            Box<dyn Array>,
+            Box<dyn Array>,
+        ),
+    ) {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let index = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
 
@@ -236,21 +355,46 @@ mod tests {
             metadata: Metadata::default(),
         };
 
-        let test = SchemaChunk {
-            schema,
-            chunk: Chunk::try_new(vec![time.clone().boxed(), child_struct.clone().boxed()])
-                .unwrap(),
-        };
+        (
+            SchemaChunk {
+                schema,
+                chunk: Chunk::try_new(vec![time.clone().boxed(), child_struct.clone().boxed()])
+                    .unwrap(),
+            },
+            (
+                time.boxed(),
+                child_struct.boxed(),
+                grandchild_struct.boxed(),
+                index.boxed(),
+            ),
+        )
+    }
 
-        assert_eq!(test.get_array(["time"]), Ok(time.boxed()));
-        assert_eq!(test.get_array(["child"]), Ok(child_struct.boxed()));
+    #[test]
+    fn test_get_array() {
+        let (test, (time, child_struct, grandchild_struct, index)) = nested_chunk();
+
+        assert_eq!(test.get_array(["time"]), Ok(time));
+        assert_eq!(test.get_array(["child"]), Ok(child_struct));
         assert_eq!(
             test.get_array(["child", "grandchild"]),
-            Ok(grandchild_struct.boxed())
+            Ok(grandchild_struct)
         );
         assert_eq!(
             test.get_array(["child", "grandchild", "index"]),
-            Ok(index.boxed())
+            Ok(index.clone())
+        );
+        assert_eq!(
+            test.get_table(["child"])
+                .unwrap()
+                .get_array(["grandchild", "index"]),
+            Ok(index.clone())
+        );
+        assert_eq!(
+            test.get_table(["child", "grandchild"])
+                .unwrap()
+                .get_array(["index"]),
+            Ok(index)
         );
 
         assert_eq!(test.get_array([]), Err(PathError::Empty));
@@ -265,6 +409,62 @@ mod tests {
         assert_eq!(
             test.get_array(["time", "incorrect", "wrong"]),
             Err(PathError::NotStruct(vec!["time".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_nesting() {
+        let (test, _) = nested_chunk();
+
+        assert_eq!(
+            test.tables(),
+            vec![
+                vec!["child".to_string()],
+                vec!["child".to_string(), "grandchild".to_string()]
+            ]
+        );
+
+        assert_eq!(
+            test.arrays(),
+            vec![
+                vec!["time".to_string()],
+                vec![
+                    "child".to_string(),
+                    "grandchild".to_string(),
+                    "index".to_string()
+                ]
+            ]
+        );
+
+        let child = test.get_table(["child"]).unwrap();
+        assert_eq!(child.tables(), vec![vec!["grandchild".to_string()]]);
+        assert_eq!(
+            child.arrays(),
+            vec![vec!["grandchild".to_string(), "index".to_string()]]
+        );
+
+        let grandchild = child.get_table(["grandchild"]).unwrap();
+        let empty: Vec<Vec<String>> = vec![];
+        assert_eq!(grandchild.tables(), empty);
+        assert_eq!(grandchild.arrays(), vec![vec!["index".to_string()]]);
+
+        let grandchild = test.get_table(["child", "grandchild"]).unwrap();
+        assert_eq!(grandchild.tables(), empty);
+        assert_eq!(grandchild.arrays(), vec![vec!["index".to_string()]]);
+    }
+
+    #[test]
+    fn test_to_from_bytes() {
+        let (original, _) = nested_chunk();
+
+        let test = SchemaChunk::from_bytes(&original.to_bytes().unwrap()).unwrap();
+
+        assert_eq!(
+            test.tables(),
+            vec![
+                vec!["child".to_string()],
+                vec!["child".to_string(), "grandchild".to_string()]
+            ]
         );
     }
 }

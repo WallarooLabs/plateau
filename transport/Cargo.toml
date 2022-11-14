@@ -23,6 +23,7 @@ arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/ma
     "io_flight",
 ] }
 chrono = "0.4"
+thiserror = "1.0"
 
 [features]
 structopt-cli = ["dep:structopt"]
