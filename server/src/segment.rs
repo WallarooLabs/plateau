@@ -211,7 +211,10 @@ impl SegmentWriter2 {
         &self.schema == schema
     }
 
-    pub fn log_arrow<S: Borrow<Schema> + Clone>(&mut self, data: SchemaChunk<S>) -> Result<()> {
+    pub fn log_arrow<S: Borrow<Schema> + Clone + PartialEq>(
+        &mut self,
+        data: SchemaChunk<S>,
+    ) -> Result<()> {
         if !self.check_schema(data.schema.borrow()) {
             anyhow::bail!("cannot use different schemas within the same segment");
         }

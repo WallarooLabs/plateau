@@ -1,5 +1,5 @@
 use crate::arrow2::error::Error as ArrowError;
-use plateau_transport::ErrorMessage;
+use plateau_transport::{ErrorMessage, PathError};
 use rweb::*;
 use std::convert::Infallible;
 use warp::http::StatusCode;
@@ -11,6 +11,7 @@ use crate::chunk::ChunkError;
 pub(crate) enum ErrorReply {
     Arrow(ArrowError),
     Chunk(ChunkError),
+    Path(PathError),
     EmptyBody,
     WriterBusy,
     InvalidQuery,
@@ -28,6 +29,7 @@ pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible>
         Some(ErrorReply::EmptyBody) => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
         Some(ErrorReply::Arrow(e)) => (StatusCode::BAD_REQUEST, format!("arrow error: {}", e)),
         Some(ErrorReply::Chunk(e)) => (StatusCode::BAD_REQUEST, format!("chunk error: {}", e)),
+        Some(ErrorReply::Path(e)) => (StatusCode::BAD_REQUEST, format!("invalid path: {}", e)),
         Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
         Some(ErrorReply::InvalidSchema) => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
         Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy".to_string()),

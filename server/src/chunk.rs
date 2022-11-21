@@ -58,7 +58,7 @@ pub struct Record {
     pub message: Vec<u8>,
 }
 
-impl<S: Borrow<Schema> + Clone> TryFrom<SchemaChunk<S>> for LegacyRecords {
+impl<S: Borrow<Schema> + Clone + PartialEq> TryFrom<SchemaChunk<S>> for LegacyRecords {
     type Error = ChunkError;
 
     fn try_from(orig: SchemaChunk<S>) -> Result<Self, Self::Error> {
@@ -112,7 +112,7 @@ fn get_time<'a>(
     }
 }
 
-pub fn new_schema_chunk<S: Borrow<Schema> + Clone>(
+pub fn new_schema_chunk<S: Borrow<Schema> + Clone + PartialEq>(
     schema: S,
     chunk: SegmentChunk,
 ) -> Result<SchemaChunk<S>, ChunkError> {

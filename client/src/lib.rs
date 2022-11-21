@@ -23,6 +23,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("URL parse error: {0}")]
     UrlParse(#[from] url::ParseError),
+    #[error("Query serialization error: {0}")]
+    QuerySerialization(#[from] serde_qs::Error),
     #[error("Error sending request: {0}")]
     SendingRequest(reqwest::Error),
     #[error("Error from server: {0}")]
@@ -152,17 +154,17 @@ impl Client {
         partition_name: impl AsRef<str>,
         params: &RecordQuery,
     ) -> Result<RequestBuilder, Error> {
-        Ok(self
-            .http_client
-            .get(
-                self.server_url
-                    .join("topic/")?
-                    .join(add_trailing_slash(topic_name).as_ref())?
-                    .join("partition/")?
-                    .join(add_trailing_slash(partition_name).as_ref())?
-                    .join("records")?,
-            )
-            .query(params))
+        let mut url = self
+            .server_url
+            .join("topic/")?
+            .join(add_trailing_slash(topic_name).as_ref())?
+            .join("partition/")?
+            .join(add_trailing_slash(partition_name).as_ref())?
+            .join("records")?;
+
+        url.set_query(Some(&serde_qs::to_string(params)?));
+
+        Ok(self.http_client.get(url))
     }
 
     fn iteration_request<'a>(
@@ -171,15 +173,14 @@ impl Client {
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>>,
     ) -> Result<RequestBuilder, Error> {
-        let base_request = self
-            .http_client
-            .post(
-                self.server_url
-                    .join("topic/")?
-                    .join(add_trailing_slash(topic_name).as_ref())?
-                    .join("records")?,
-            )
-            .query(params);
+        let mut url = self
+            .server_url
+            .join("topic/")?
+            .join(add_trailing_slash(topic_name).as_ref())?
+            .join("records")?;
+        url.set_query(Some(&serde_qs::to_string(params)?));
+
+        let base_request = self.http_client.post(url);
 
         Ok(match position.into() {
             Some(position) => base_request.json(&position),
@@ -196,16 +197,15 @@ impl Client {
         query: &InsertQuery,
         records: impl Insertion,
     ) -> Result<Inserted, Error> {
-        let builder = self
-            .http_client
-            .post(
-                self.server_url
-                    .join("topic/")?
-                    .join(add_trailing_slash(topic_name).as_ref())?
-                    .join("partition/")?
-                    .join(partition_name.as_ref())?,
-            )
-            .query(query);
+        let mut url = self
+            .server_url
+            .join("topic/")?
+            .join(add_trailing_slash(topic_name).as_ref())?
+            .join("partition/")?
+            .join(partition_name.as_ref())?;
+
+        url.set_query(Some(&serde_qs::to_string(query)?));
+        let builder = self.http_client.post(url).query(query);
         process_deserialize_request(records.add_to_request(builder)?).await
     }
 }
@@ -431,9 +431,9 @@ mod tests {
             chunk::Chunk,
             datatypes::{Field, Metadata},
         },
-        ArrowSchema, Insert, InsertQuery, Inserted, Partitions, RecordQuery, RecordStatus, Records,
-        SchemaChunk, Span, Topic, TopicIterationQuery, TopicIterationReply, TopicIterationStatus,
-        Topics, CONTENT_TYPE_ARROW,
+        ArrowSchema, DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery,
+        RecordStatus, Records, SchemaChunk, Span, Topic, TopicIterationQuery, TopicIterationReply,
+        TopicIterationStatus, Topics, CONTENT_TYPE_ARROW,
     };
     use tokio_util::io::ReaderStream;
 
@@ -628,6 +628,7 @@ mod tests {
                     limit: Some(4),
                     start_time: None,
                     end_time: None,
+                    data_focus: DataFocus::default(),
                 },
                 &None,
             )
@@ -655,6 +656,7 @@ mod tests {
                     limit: Some(4),
                     start_time: None,
                     end_time: None,
+                    data_focus: DataFocus::default(),
                 },
                 &Some(HashMap::from([("part-1".to_owned(), 4)])),
             )

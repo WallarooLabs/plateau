@@ -53,6 +53,24 @@ pub struct Records {
 
 #[derive(Schema, Debug, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+pub struct DataFocus {
+    /// Data sets to return for this query.
+    #[serde(default)]
+    pub dataset: Vec<String>,
+    /// When specified, flattens the output data sets into a single table. Uses
+    /// the given separator to join nested keys.
+    #[serde(default, rename = "dataset.separator")]
+    pub dataset_separator: Option<String>,
+}
+
+impl DataFocus {
+    pub fn is_some(&self) -> bool {
+        !self.dataset.is_empty() || self.dataset_separator.is_some()
+    }
+}
+
+#[derive(Schema, Debug, Default, Deserialize, Serialize)]
+#[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
 pub struct RecordQuery {
     /// Start position
     pub start: usize,
@@ -65,6 +83,9 @@ pub struct RecordQuery {
     /// RFC3339 end time for records (required if start time exists)
     #[serde(rename = "time.end")]
     pub end_time: Option<String>,
+    #[serde(flatten)]
+    #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
+    pub data_focus: DataFocus,
 }
 
 /// Status of the record request query.
@@ -92,6 +113,9 @@ pub struct TopicIterationQuery {
     /// RFC3339 end time for records (required if start time exists)
     #[serde(rename = "time.end")]
     pub end_time: Option<String>,
+    #[serde(flatten)]
+    #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
+    pub data_focus: DataFocus,
 }
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
@@ -130,13 +154,13 @@ pub const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.file";
 pub type SegmentChunk = Chunk<Box<dyn Array>>;
 
 /// A [SegmentChunk] packaged with its associated [ArrowSchema].
-#[derive(Debug, Clone)]
-pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone> {
+#[derive(Debug, Clone, PartialEq)]
+pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone + PartialEq> {
     pub schema: S,
     pub chunk: SegmentChunk,
 }
 
-impl<S: Borrow<ArrowSchema> + Clone> SchemaChunk<S> {
+impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
     pub fn len(&self) -> usize {
         self.chunk.len()
     }
@@ -180,6 +204,67 @@ impl SchemaChunk<ArrowSchema> {
         Ok(SchemaChunk {
             chunk: reader.next().unwrap()?,
             schema,
+        })
+    }
+
+    /// Convert a [StructArray] into a [SchemaChunk]
+    pub fn from_struct(s: &StructArray) -> SchemaChunk<ArrowSchema> {
+        SchemaChunk {
+            chunk: Chunk::new(s.values().to_vec()),
+            schema: ArrowSchema {
+                fields: s.fields().to_vec(),
+                metadata: Metadata::default(),
+            },
+        }
+    }
+
+    /// Convert a [StructArray] into a [SchemaChunk]
+    pub fn to_struct(&self) -> StructArray {
+        // TODO: nullable
+        StructArray::new(
+            DataType::Struct(self.schema.fields.clone()),
+            self.chunk.arrays().to_vec(),
+            None,
+        )
+    }
+
+    /// Focus a new [SchemaChunk] on particular `dataset` keys, and flatten it
+    /// into a single [StructArray] if a `separator` is given.
+    ///
+    /// If a single dataset is specified, return the array(s) directly without
+    /// any nesting.
+    pub fn focus(&self, focus: &DataFocus) -> Result<Self, PathError> {
+        let mut fields = vec![];
+        let mut arrays = vec![];
+        for path in focus.dataset.iter() {
+            let split = focus
+                .dataset_separator
+                .as_ref()
+                .map(|s| path.split(s.as_str()).collect::<Vec<_>>())
+                .unwrap_or_else(|| vec![path.as_str()]);
+            let arr = self.get_array(split)?;
+
+            if let Some(s) = focus.dataset_separator.as_ref() {
+                gather_flat_arrays(&mut fields, &mut arrays, path, arr, s);
+            } else {
+                // TODO: nullable
+                fields.push(Field::new(path, arr.data_type().clone(), false));
+                arrays.push(arr);
+            }
+        }
+
+        if arrays.len() == 1 {
+            if let Some(s) = arrays[0].as_any().downcast_ref::<StructArray>() {
+                return Ok(Self::from_struct(s));
+            }
+        }
+
+        Ok(SchemaChunk {
+            chunk: Chunk::new(arrays),
+            schema: ArrowSchema {
+                fields,
+                metadata: Metadata::default(),
+            },
         })
     }
 
@@ -255,6 +340,54 @@ impl SchemaChunk<ArrowSchema> {
         }
 
         Ok((current_path, current))
+    }
+}
+
+fn gather_flat_arrays(
+    fields: &mut Vec<Field>,
+    arrays: &mut Vec<Box<dyn Array>>,
+    key: &str,
+    arr: Box<dyn Array>,
+    separator: &str,
+) {
+    let mut path = vec![key.to_string()];
+    let mut stack = match arr.as_any().downcast_ref::<StructArray>() {
+        Some(s) => {
+            vec![s.fields().iter().zip(s.values().iter())]
+        }
+        None => {
+            // TODO nullable
+            fields.push(Field::new(key.to_string(), arr.data_type().clone(), false));
+            arrays.push(arr.clone());
+            vec![]
+        }
+    };
+
+    while let Some(top) = stack.last_mut() {
+        match top.next() {
+            Some((field, arr)) => match arr.as_any().downcast_ref::<StructArray>() {
+                Some(s) => {
+                    path.push(field.name.clone());
+                    stack.push(s.fields().iter().zip(s.values().iter()));
+                }
+                _ => {
+                    let mut name = path.as_slice().join(separator);
+                    name.push_str(separator);
+                    name.push_str(&field.name);
+
+                    fields.push(Field::new(
+                        name,
+                        field.data_type().clone(),
+                        field.is_nullable,
+                    ));
+                    arrays.push(arr.clone());
+                }
+            },
+            None => {
+                stack.pop();
+                path.pop();
+            }
+        }
     }
 }
 
@@ -409,6 +542,61 @@ mod tests {
         assert_eq!(
             test.get_array(["time", "incorrect", "wrong"]),
             Err(PathError::NotStruct(vec!["time".to_string()]))
+        );
+    }
+
+    #[test]
+    fn test_focus() {
+        let (test, (time, child_struct, _grandchild_struct, _index)) = nested_chunk();
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                dataset_separator: None
+            })
+            .unwrap(),
+            SchemaChunk::from_struct(child_struct.as_any().downcast_ref().unwrap())
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["time".to_string()],
+                dataset_separator: None
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["time"]]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["time".to_string()],
+                dataset_separator: None
+            })
+            .unwrap()
+            .get_array(["time"])
+            .unwrap(),
+            time
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                dataset_separator: Some(".".to_string())
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["child.grandchild.index"]]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["time".to_string(), "child".to_string()],
+                dataset_separator: Some(".".to_string())
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["time"], vec!["child.grandchild.index"]]
         );
     }
 

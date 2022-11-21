@@ -3,9 +3,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future;
 
-use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Query, Rejection, Reply};
+use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Rejection, Reply};
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::json;
+use serde_qs;
 use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
 use std::path::PathBuf;
@@ -16,8 +18,9 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use plateau_transport::{
-    Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic, TopicIterationQuery,
-    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics, CONTENT_TYPE_ARROW,
+    DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic,
+    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+    CONTENT_TYPE_ARROW,
 };
 
 use crate::catalog::Catalog;
@@ -202,6 +205,7 @@ async fn topic_get_partitions(
 fn negotiate<F, J>(
     content: Option<String>,
     batch: LimitedBatch,
+    focus: DataFocus,
     to_json: F,
 ) -> Result<Box<dyn Reply>, Rejection>
 where
@@ -216,9 +220,7 @@ where
                 Err(warp::reject::custom(ErrorReply::InvalidSchema))
             }
         }
-        Some(CONTENT_TYPE_ARROW) => {
-            chunk::to_reply(batch).map_err(|e| warp::reject::custom(ErrorReply::Arrow(e)))
-        }
+        Some(CONTENT_TYPE_ARROW) => chunk::to_reply(batch, focus).map_err(warp::reject::custom),
         Some(other) => Err(warp::reject::custom(ErrorReply::CannotEmit(
             other.to_string(),
         ))),
@@ -229,16 +231,22 @@ fn accept() -> impl Filter<Extract = (Option<String>,), Error = Rejection> + Cop
     warp::filters::header::optional("accept")
 }
 
+fn nonstrict_query<T>() -> impl Filter<Extract = (T,), Error = Rejection> + Clone
+where
+    T: DeserializeOwned + Send + 'static,
+{
+    serde_qs::warp::query(serde_qs::Config::new(2, false))
+}
+
 #[post("/topic/{topic_name}/records")]
 #[openapi(id = "topic.iterate")]
 async fn topic_iterate(
     topic_name: String,
-    query: Query<TopicIterationQuery>,
+    #[filter = "nonstrict_query"] query: TopicIterationQuery,
     #[filter = "accept"] content: Option<String>,
     #[json] position: Option<TopicIterator>,
     #[data] catalog: Catalog,
 ) -> Result<Box<dyn Reply>, Rejection> {
-    let query = query.into_inner();
     let topic = catalog.get_topic(&topic_name).await;
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
@@ -264,9 +272,11 @@ async fn topic_iterate(
         );
     }
 
-    negotiate(content, result.batch, move |records| TopicIterationReply {
-        records: serialize_records(records),
-        status,
+    negotiate(content, result.batch, query.data_focus, move |records| {
+        TopicIterationReply {
+            records: serialize_records(records),
+            status,
+        }
     })
 }
 
@@ -275,11 +285,10 @@ async fn topic_iterate(
 async fn partition_get_records(
     topic_name: String,
     partition_name: String,
-    query: Query<RecordQuery>,
+    #[filter = "nonstrict_query"] query: RecordQuery,
     #[filter = "accept"] content: Option<String>,
     #[data] catalog: Catalog,
 ) -> Result<Box<dyn Reply>, Rejection> {
-    let query = query.into_inner();
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
@@ -315,7 +324,7 @@ async fn partition_get_records(
         );
     }
 
-    negotiate(content, result, move |records| Records {
+    negotiate(content, result, query.data_focus, move |records| Records {
         span: range.map(Span::from_range),
         status,
         records: serialize_records(records),

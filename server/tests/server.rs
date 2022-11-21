@@ -12,7 +12,7 @@ use serde_json::json;
 use std::io::Cursor;
 use std::time::Duration;
 
-use plateau_transport::{SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
+use plateau_transport::{DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
 
 pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
@@ -133,11 +133,19 @@ async fn read_next_chunks(
     url: &str,
     iter: Option<serde_json::Value>,
     limit: impl Into<Option<usize>>,
+    focus: DataFocus,
 ) -> Result<(Schema, Vec<SegmentChunk>)> {
     let mut response = client.post(url).json(&json!({}));
 
     if let Some(limit) = limit.into() {
         response = response.query(&[("limit", limit)]);
+    }
+
+    if focus.is_some() {
+        for ds in focus.dataset {
+            response = response.query(&[("dataset[]", ds)]);
+        }
+        response = response.query(&[("dataset.separator", focus.dataset_separator)])
     }
 
     if let Some(it) = iter {
@@ -394,8 +402,14 @@ async fn topic_iterate_schema_change() -> Result<()> {
 
     // test record-limited request, should get 'RecordLimited' response and fewer results
     let topic_url = topic_records_url(&server, &topic_name);
-    let (schema, response): (Schema, Vec<SegmentChunk>) =
-        read_next_chunks(&client, topic_url.as_str(), Some(json!({})), 29).await?;
+    let (schema, response): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(json!({})),
+        29,
+        DataFocus::default(),
+    )
+    .await?;
     assert_eq!(
         response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
         vec![5, 5, 5, 5, 5, 4]
@@ -406,8 +420,14 @@ async fn topic_iterate_schema_change() -> Result<()> {
     );
 
     let next = next_from_schema(&schema)?;
-    let (schema, response): (Schema, Vec<SegmentChunk>) =
-        read_next_chunks(&client, topic_url.as_str(), Some(next), 29).await?;
+    let (schema, response): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(next),
+        29,
+        DataFocus::default(),
+    )
+    .await?;
     assert_eq!(
         response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
         vec![1, 5, 5, 5, 5]
@@ -418,8 +438,14 @@ async fn topic_iterate_schema_change() -> Result<()> {
     );
 
     let next = next_from_schema(&schema)?;
-    let (schema, response): (Schema, Vec<SegmentChunk>) =
-        read_next_chunks(&client, topic_url.as_str(), Some(next), 29).await?;
+    let (schema, response): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(next),
+        29,
+        DataFocus::default(),
+    )
+    .await?;
     assert_eq!(
         response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
         vec![5, 5, 5, 5, 5]
@@ -428,6 +454,49 @@ async fn topic_iterate_schema_change() -> Result<()> {
         schema_field_names(&schema),
         schema_field_names(&chunk_b.schema)
     );
+
+    // this is a horrible hack that resolves a race condition where the slog threads are still
+    // writing but the tempdir is deleted, resulting in intermittent test failures.
+    //TODO: graceful shutdown of test server
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn topic_iterate_data_focus() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    let chunk_a = inferences_schema_a();
+
+    for _ in 0..10 {
+        chunk_append(
+            &client,
+            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+            chunk_a.clone(),
+        )
+        .await?;
+    }
+
+    // test record-limited request, should get 'RecordLimited' response and fewer results
+    let topic_url = topic_records_url(&server, &topic_name);
+    let (schema, chunk): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(json!({})),
+        29,
+        DataFocus {
+            dataset: vec!["time".to_string()],
+            dataset_separator: Some(".".to_string()),
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        chunk.iter().map(|c| c.len()).collect::<Vec<_>>(),
+        vec![5, 5, 5, 5, 5, 4]
+    );
+    assert_eq!(schema_field_names(&schema), vec!["time"]);
 
     // this is a horrible hack that resolves a race condition where the slog threads are still
     // writing but the tempdir is deleted, resulting in intermittent test failures.

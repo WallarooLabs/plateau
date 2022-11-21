@@ -1,4 +1,3 @@
-use crate::arrow2::error::Error as ArrowError;
 use crate::arrow2::io::ipc::{read, write};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
@@ -15,7 +14,9 @@ use rweb::{query, Reply};
 use std::borrow::Cow;
 use std::io::Cursor;
 
-use plateau_transport::{Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
+use plateau_transport::{
+    DataFocus, Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW,
+};
 
 use crate::{
     chunk::{new_schema_chunk, LegacyRecords, Record, Schema},
@@ -108,23 +109,51 @@ impl Entity for SchemaChunkRequest {
     }
 }
 
-pub(crate) fn to_reply(batch: LimitedBatch) -> Result<Box<dyn Reply>, ArrowError> {
+pub(crate) fn to_reply(
+    batch: LimitedBatch,
+    focus: DataFocus,
+) -> Result<Box<dyn Reply>, ErrorReply> {
     let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
     let options = write::WriteOptions { compression: None };
-    let mut writer = write::FileWriter::new(bytes, batch.schema.unwrap(), None, options);
+    let mut iter = batch.chunks.into_iter();
+    if let Some(chunk) = iter.next() {
+        // sigh. this would probably be much easier to implement if/when we
+        // refactor SchemaChunk so it holds a Vec of Chunk like LimitedBatch
+        // as it is we regenerate the schema and throw it away for each chunk,
+        // which can't be efficient.
+        let mut schema = batch.schema.unwrap();
+        let mut chunk = SegmentChunk::from(chunk);
+        if focus.is_some() {
+            let full = SchemaChunk { schema, chunk };
+            let result = full.focus(&focus).map_err(ErrorReply::Path)?;
+            schema = result.schema;
+            chunk = result.chunk;
+        }
+        let mut writer = write::FileWriter::new(bytes, schema.clone(), None, options);
 
-    writer.start()?;
-    for chunk in batch.chunks {
-        writer.write(&SegmentChunk::from(chunk), None)?;
+        writer.start().map_err(ErrorReply::Arrow)?;
+        writer.write(&chunk, None).map_err(ErrorReply::Arrow)?;
+        for chunk in iter {
+            let mut chunk = SegmentChunk::from(chunk);
+            if focus.is_some() {
+                let full = SchemaChunk { schema, chunk };
+                let result = full.focus(&focus).map_err(ErrorReply::Path)?;
+                schema = result.schema;
+                chunk = result.chunk;
+            }
+            writer.write(&chunk, None).map_err(ErrorReply::Arrow)?;
+        }
+        writer.finish().map_err(ErrorReply::Arrow)?;
+
+        let bytes = writer.into_inner().into_inner();
+        Ok(Box::new(
+            hyper::Response::builder()
+                .header("Content-Type", CONTENT_TYPE_ARROW)
+                .status(StatusCode::OK)
+                .body::<Body>(bytes.into())
+                .unwrap(),
+        ))
+    } else {
+        Err(ErrorReply::EmptyBody)
     }
-    writer.finish()?;
-
-    let bytes = writer.into_inner().into_inner();
-    Ok(Box::new(
-        hyper::Response::builder()
-            .header("Content-Type", CONTENT_TYPE_ARROW)
-            .status(StatusCode::OK)
-            .body::<Body>(bytes.into())
-            .unwrap(),
-    ))
 }
