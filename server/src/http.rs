@@ -322,6 +322,10 @@ async fn partition_get_records(
             "status".to_string(),
             serde_json::to_string(&status).unwrap(),
         );
+        schema.metadata.insert(
+            "span".to_string(),
+            serde_json::to_string(&range.clone().map(Span::from_range)).unwrap(),
+        );
     }
 
     negotiate(content, result, query.data_focus, move |records| Records {

@@ -4,6 +4,7 @@ use std::{io::Cursor, pin::Pin, str::FromStr};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
+use plateau_transport::CONTENT_TYPE_JSON;
 pub use plateau_transport::{
     arrow2,
     arrow2::io::ipc,
@@ -21,8 +22,10 @@ use thiserror::Error;
 /// Plateau errors
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("URL parse error: {0}")]
-    UrlParse(#[from] url::ParseError),
+    #[error("URL parse error for {1}: {0}")]
+    UrlParse(url::ParseError, String),
+    #[error("URL join error for '{1}'.join('{2}'): {0}")]
+    UrlJoin(url::ParseError, Url, String),
     #[error("Query serialization error: {0}")]
     QuerySerialization(#[from] serde_qs::Error),
     #[error("Error sending request: {0}")]
@@ -124,26 +127,37 @@ fn add_trailing_slash(s: impl AsRef<str>) -> String {
     format!("{}/", s.as_ref())
 }
 
-fn add_arrow_accept_header(r: RequestBuilder) -> RequestBuilder {
-    r.header("accept", CONTENT_TYPE_ARROW)
+trait TryJoin {
+    fn try_join(&self, s: impl AsRef<str>) -> Result<Self, Error>
+    where
+        Self: Sized;
+}
+impl TryJoin for Url {
+    fn try_join(&self, s: impl AsRef<str>) -> Result<Url, Error> {
+        self.join(s.as_ref())
+            .map_err(|e| Error::UrlJoin(e, self.clone(), s.as_ref().to_owned()))
+    }
 }
 
 impl Client {
     /// Create a new [Client] targeting the provided URL.
     pub fn new(url: &str) -> Result<Self, Error> {
-        Ok(url.parse()?)
+        url.parse().map_err(|e| Error::UrlParse(e, url.to_owned()))
     }
 
     /// Retrieve a list of all topics.
     pub async fn get_topics(&self) -> Result<Topics, Error> {
-        process_deserialize_request(self.http_client.get(self.server_url.join("topics")?)).await
+        process_deserialize_request(self.http_client.get(self.server_url.try_join("topics")?)).await
     }
 
     /// Retrieve a list of partitions for a specified topic.
     pub async fn get_partitions(&self, topic_name: impl AsRef<str>) -> Result<Partitions, Error> {
         process_deserialize_request(
-            self.http_client
-                .get(self.server_url.join("topic/")?.join(topic_name.as_ref())?),
+            self.http_client.get(
+                self.server_url
+                    .try_join("topic/")?
+                    .try_join(topic_name.as_ref())?,
+            ),
         )
         .await
     }
@@ -156,11 +170,11 @@ impl Client {
     ) -> Result<RequestBuilder, Error> {
         let mut url = self
             .server_url
-            .join("topic/")?
-            .join(add_trailing_slash(topic_name).as_ref())?
-            .join("partition/")?
-            .join(add_trailing_slash(partition_name).as_ref())?
-            .join("records")?;
+            .try_join("topic/")?
+            .try_join(add_trailing_slash(topic_name))?
+            .try_join("partition/")?
+            .try_join(add_trailing_slash(partition_name))?
+            .try_join("records")?;
 
         url.set_query(Some(&serde_qs::to_string(params)?));
 
@@ -175,9 +189,9 @@ impl Client {
     ) -> Result<RequestBuilder, Error> {
         let mut url = self
             .server_url
-            .join("topic/")?
-            .join(add_trailing_slash(topic_name).as_ref())?
-            .join("records")?;
+            .try_join("topic/")?
+            .try_join(add_trailing_slash(topic_name))?
+            .try_join("records")?;
         url.set_query(Some(&serde_qs::to_string(params)?));
 
         let base_request = self.http_client.post(url);
@@ -199,10 +213,10 @@ impl Client {
     ) -> Result<Inserted, Error> {
         let mut url = self
             .server_url
-            .join("topic/")?
-            .join(add_trailing_slash(topic_name).as_ref())?
-            .join("partition/")?
-            .join(partition_name.as_ref())?;
+            .try_join("topic/")?
+            .try_join(add_trailing_slash(topic_name))?
+            .try_join("partition/")?
+            .try_join(partition_name.as_ref())?;
 
         url.set_query(Some(&serde_qs::to_string(query)?));
         let builder = self.http_client.post(url).query(query);
@@ -301,7 +315,11 @@ impl Iterate<TopicIterationReply> for Client {
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<TopicIterationReply, Error> {
-        process_deserialize_request(self.iteration_request(topic_name, params, position)?).await
+        process_deserialize_request(
+            self.iteration_request(topic_name, params, position)?
+                .header("accept", CONTENT_TYPE_JSON),
+        )
+        .await
     }
 }
 
@@ -315,9 +333,10 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<Pin<Box<dyn ArrowStream>>, Error> {
-        process_request_into_stream(add_arrow_accept_header(
-            self.iteration_request(topic_name, params, position)?,
-        ))
+        process_request_into_stream(
+            self.iteration_request(topic_name, params, position)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
         .await
     }
 }
@@ -331,9 +350,10 @@ impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
-        let bytes = process_request(add_arrow_accept_header(
-            self.iteration_request(topic_name, params, position)?,
-        ))
+        let bytes = process_request(
+            self.iteration_request(topic_name, params, position)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
         .await?
         .bytes()
         .await
@@ -367,8 +387,11 @@ impl Retrieve<Records> for Client {
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
     ) -> Result<Records, Error> {
-        process_deserialize_request(self.retrieve_request(topic_name, partition_name, params)?)
-            .await
+        process_deserialize_request(
+            self.retrieve_request(topic_name, partition_name, params)?
+                .header("accept", CONTENT_TYPE_JSON),
+        )
+        .await
     }
 }
 
@@ -382,11 +405,10 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
     ) -> Result<Pin<Box<dyn ArrowStream>>, Error> {
-        process_request_into_stream(add_arrow_accept_header(self.retrieve_request(
-            topic_name,
-            partition_name,
-            params,
-        )?))
+        process_request_into_stream(
+            self.retrieve_request(topic_name, partition_name, params)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
         .await
     }
 }
@@ -394,18 +416,17 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
 #[async_trait]
 impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
-    /// [Records] (plaintext) format.
+    /// [SchemaChunk<Schema>] format.
     async fn get_records(
         &self,
         topic_name: impl AsRef<str> + Send,
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
     ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
-        let bytes = process_request(add_arrow_accept_header(self.retrieve_request(
-            topic_name,
-            partition_name,
-            params,
-        )?))
+        let bytes = process_request(
+            self.retrieve_request(topic_name, partition_name, params)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
         .await?
         .bytes()
         .await

@@ -150,6 +150,7 @@ pub struct ErrorMessage {
 }
 
 pub const CONTENT_TYPE_ARROW: &str = "application/vnd.apache.arrow.file";
+pub const CONTENT_TYPE_JSON: &str = "application/json";
 
 pub type SegmentChunk = Chunk<Box<dyn Array>>;
 
