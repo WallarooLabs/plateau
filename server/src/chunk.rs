@@ -156,7 +156,9 @@ impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
         let mut messages = MutableUtf8Array::<i32>::new();
 
         for r in records.drain(..) {
-            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+            let dt = r
+                .time
+                .signed_duration_since(Utc.timestamp_opt(0, 0).unwrap());
             times.push(Some(dt.num_milliseconds()));
             messages.push(Some(
                 std::str::from_utf8(&r.message)

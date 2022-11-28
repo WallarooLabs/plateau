@@ -5,10 +5,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.60"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
-serde = "1.0"
+serde = "1"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }
 arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/main", features = [
@@ -24,7 +22,7 @@ arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/ma
     "io_flight",
 ] }
 chrono = "0.4"
-thiserror = "1.0"
+thiserror = "1"
 
 [features]
 structopt-cli = ["dep:structopt"]
