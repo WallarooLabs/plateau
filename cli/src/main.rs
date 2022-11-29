@@ -8,7 +8,9 @@ use structopt::StructOpt;
 use tokio::{fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
-use plateau_client::{localhost, ArrowStream, Client, Iterate, Retrieve, SizedArrowStream};
+use plateau_client::{
+    localhost, ArrowSchema, ArrowStream, Client, Iterate, Retrieve, SchemaChunk, SizedArrowStream,
+};
 
 mod display;
 pub use display::CliDisplay;
@@ -123,6 +125,7 @@ pub enum OutputFormat {
     Arrow { path: PathBuf },
     Plaintext { path: PathBuf },
     Stdout,
+    ArrowStdout,
 }
 
 impl Default for OutputFormat {
@@ -137,6 +140,7 @@ impl Display for OutputFormat {
             OutputFormat::Arrow { path } => write!(f, "arrow={}", path.display()),
             OutputFormat::Plaintext { path } => write!(f, "plaintext={}", path.display()),
             OutputFormat::Stdout => write!(f, "plaintext"),
+            OutputFormat::ArrowStdout => write!(f, "arrow"),
         }
     }
 }
@@ -155,12 +159,17 @@ impl FromStr for OutputFormat {
             (Some("arrow"), Some(filename)) => Ok(OutputFormat::Arrow {
                 path: filename.into(),
             }),
+            (Some("arrow"), None) => Ok(OutputFormat::ArrowStdout),
             _ => Err(anyhow!("invalid output format specificiation: {s}")),
         }
     }
 }
 
-async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
+async fn make_request<'a>(
+    client: &Client,
+    cmd: Command,
+    matches: &structopt::clap::ArgMatches<'a>,
+) -> Result<(), Error> {
     match cmd {
         Command::Topics => {
             print!("{}", client.get_topics().await?.into_string());
@@ -172,30 +181,53 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
             topic_name,
             partition_name,
             format,
-            params,
-        } => match format {
-            OutputFormat::Stdout => {
-                let response: Records = client
-                    .get_records(topic_name, partition_name, &params)
-                    .await?;
-                print!("{}", response.into_string());
+            mut params,
+        } => {
+            // fixup the DataFocus dataset defaulting
+            if matches
+                .subcommand_matches("records")
+                .map(|am| am.occurrences_of("dataset"))
+                .unwrap_or(0)
+                == 0
+            {
+                params.data_focus.dataset = vec!["in", "out", "time", "metadata"]
+                    .drain(..)
+                    .map(String::from)
+                    .collect();
             }
-            OutputFormat::Plaintext { path } => {
-                let response: Records = client
-                    .get_records(topic_name, partition_name, &params)
-                    .await?;
-                tokio::fs::write(path, response.into_string().as_bytes()).await?;
-            }
-            OutputFormat::Arrow { path } => {
-                let mut response: Pin<Box<dyn ArrowStream>> = client
-                    .get_records(topic_name, partition_name, &params)
-                    .await?;
-                let mut file = File::create(path).await?;
-                while let Some(chunk) = response.next().await {
-                    file.write_all(&chunk?).await?;
+            match format {
+                OutputFormat::Stdout => {
+                    let response: Records = client
+                        .get_records(topic_name, partition_name, &params)
+                        .await?;
+                    print!("{}", response.into_string());
+                }
+                OutputFormat::Plaintext { path } => {
+                    let response: Records = client
+                        .get_records(topic_name, partition_name, &params)
+                        .await?;
+                    tokio::fs::write(path, response.into_string().as_bytes()).await?;
+                }
+                OutputFormat::Arrow { path } => {
+                    let mut response: Pin<Box<dyn ArrowStream>> = client
+                        .get_records(topic_name, partition_name, &params)
+                        .await?;
+                    let mut file = File::create(path).await?;
+                    while let Some(chunk) = response.next().await {
+                        file.write_all(&chunk?).await?;
+                    }
+                }
+                OutputFormat::ArrowStdout => {
+                    params.data_focus.dataset_separator = Some(".".to_owned());
+                    let mut response: Vec<SchemaChunk<ArrowSchema>> = client
+                        .get_records(topic_name, partition_name, &params)
+                        .await?;
+                    for (i, sc) in response.drain(..).enumerate() {
+                        print!("-- Chunk {}\n{}", i, sc.into_string());
+                    }
                 }
             }
-        },
+        }
         Command::Iterate {
             topic_name,
             partition_name,
@@ -262,11 +294,12 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let Cli { host, cmd } = Cli::from_args();
+    let matches = Cli::clap().get_matches();
+    let Cli { host, cmd } = Cli::from_clap(&matches);
 
     let client: Client = host.0.into();
 
-    make_request(&client, cmd).await?;
+    make_request(&client, cmd, &matches).await?;
 
     Ok(())
 }

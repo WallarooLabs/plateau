@@ -56,10 +56,12 @@ pub struct Records {
 pub struct DataFocus {
     /// Data sets to return for this query.
     #[serde(default)]
+    #[cfg_attr(feature = "structopt-cli", structopt(default_value = "", long))]
     pub dataset: Vec<String>,
     /// When specified, flattens the output data sets into a single table. Uses
     /// the given separator to join nested keys.
     #[serde(default, rename = "dataset.separator")]
+    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
     pub dataset_separator: Option<String>,
 }
 

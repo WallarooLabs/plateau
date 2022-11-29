@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, fmt::Display};
 
+use plateau_client::{ArrowSchema, SchemaChunk};
 use plateau_transport::{Inserted, Partitions, RecordStatus, Records, TopicIterationReply, Topics};
 
 pub trait CliDisplay {
@@ -111,6 +112,20 @@ impl CliDisplay for TopicIterationReply {
 impl CliDisplay for Inserted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Inserted: ({} -> {})", self.span.start, self.span.end)?;
+        Ok(())
+    }
+}
+
+impl CliDisplay for SchemaChunk<ArrowSchema> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for field in &self.schema.fields {
+            write!(f, "\x1b[1m{}:\x1b[0m ", field.name)?;
+            match self.get_array([field.name.as_ref()]) {
+                Ok(arr) => writeln!(f, "{:?}", arr),
+                Err(_) => writeln!(f, "unknown type (not an array)"),
+            }?;
+        }
+
         Ok(())
     }
 }
