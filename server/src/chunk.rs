@@ -49,7 +49,7 @@ pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
 }
 
 pub fn parse_time(tv: i64) -> DateTime<Utc> {
-    Utc.timestamp(0, 0) + Duration::milliseconds(tv)
+    Utc.timestamp_opt(0, 0).unwrap() + Duration::milliseconds(tv)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
