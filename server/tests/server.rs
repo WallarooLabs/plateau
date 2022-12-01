@@ -507,6 +507,54 @@ async fn topic_iterate_data_focus() -> Result<()> {
 }
 
 #[tokio::test]
+async fn topic_iterate_pandas_records() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    let chunk_a = inferences_schema_a();
+
+    for _ in 0..10 {
+        chunk_append(
+            &client,
+            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+            chunk_a.clone(),
+        )
+        .await?;
+    }
+
+    let topic_url = topic_records_url(&server, &topic_name);
+    let request = client
+        .post(topic_url)
+        .json(&json!({}))
+        .query(&[("limit", 3)])
+        .query(&[("dataset[]", "inputs")])
+        .query(&[("dataset[]", "outputs")])
+        .query(&[("dataset.separator", ".")])
+        .header("Accept", "application/json; format=pandas-records");
+
+    let result = request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    assert_eq!(
+        result,
+        json!([
+            {"inputs": 1.0, "outputs": [2.0, 2.0]},
+            {"inputs": 2.0, "outputs": [4.0, 4.0]},
+            {"inputs": 3.0, "outputs": [6.0, 6.0]},
+        ])
+    );
+
+    // this is a horrible hack that resolves a race condition where the slog threads are still
+    // writing but the tempdir is deleted, resulting in intermittent test failures.
+    //TODO: graceful shutdown of test server
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn partition_status_all() {
     let (client, topic_name, server) = setup().await;
 

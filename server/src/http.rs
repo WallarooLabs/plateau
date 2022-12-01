@@ -20,7 +20,6 @@ use tracing::Instrument;
 use plateau_transport::{
     DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic,
     TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
-    CONTENT_TYPE_ARROW,
 };
 
 use crate::catalog::Catalog;
@@ -220,10 +219,7 @@ where
                 Err(warp::reject::custom(ErrorReply::InvalidSchema))
             }
         }
-        Some(CONTENT_TYPE_ARROW) => chunk::to_reply(batch, focus).map_err(warp::reject::custom),
-        Some(other) => Err(warp::reject::custom(ErrorReply::CannotEmit(
-            other.to_string(),
-        ))),
+        Some(accept) => chunk::to_reply(accept, batch, focus).map_err(warp::reject::custom),
     }
 }
 
