@@ -488,6 +488,7 @@ async fn topic_iterate_data_focus() -> Result<()> {
         DataFocus {
             dataset: vec!["time".to_string()],
             dataset_separator: Some(".".to_string()),
+            ..DataFocus::default()
         },
     )
     .await?;

@@ -1,4 +1,8 @@
-use std::{borrow::Borrow, collections::HashMap, io::Cursor};
+use std::{
+    borrow::Borrow,
+    collections::{HashMap, HashSet},
+    io::Cursor,
+};
 
 use arrow2::{
     array::{Array, StructArray},
@@ -58,6 +62,12 @@ pub struct DataFocus {
     #[serde(default)]
     #[cfg_attr(feature = "structopt-cli", structopt(default_value = "", long))]
     pub dataset: Vec<String>,
+
+    /// List of datasets to exclude.
+    #[serde(default, rename = "dataset.exclude")]
+    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    pub exclude: Vec<String>,
+
     /// When specified, flattens the output data sets into a single table. Uses
     /// the given separator to join nested keys.
     #[serde(default, rename = "dataset.separator")]
@@ -239,7 +249,18 @@ impl SchemaChunk<ArrowSchema> {
     pub fn focus(&self, focus: &DataFocus) -> Result<Self, PathError> {
         let mut fields = vec![];
         let mut arrays = vec![];
-        for path in focus.dataset.iter() {
+
+        let paths = focus.dataset.iter().flat_map(|path| {
+            if path == "*" {
+                self.schema.fields.iter().map(|f| &f.name).collect()
+            } else {
+                vec![path]
+            }
+        });
+
+        let exclude: HashSet<&String> = focus.exclude.iter().collect();
+
+        for path in paths {
             let split = focus
                 .dataset_separator
                 .as_ref()
@@ -247,12 +268,14 @@ impl SchemaChunk<ArrowSchema> {
                 .unwrap_or_else(|| vec![path.as_str()]);
             let arr = self.get_array(split)?;
 
-            if let Some(s) = focus.dataset_separator.as_ref() {
-                gather_flat_arrays(&mut fields, &mut arrays, path, arr, s);
-            } else {
-                // TODO: nullable
-                fields.push(Field::new(path, arr.data_type().clone(), false));
-                arrays.push(arr);
+            if !exclude.contains(path) {
+                if let Some(s) = focus.dataset_separator.as_ref() {
+                    gather_flat_arrays(&mut fields, &mut arrays, path, arr, s, &exclude);
+                } else {
+                    // TODO: nullable
+                    fields.push(Field::new(path, arr.data_type().clone(), false));
+                    arrays.push(arr);
+                }
             }
         }
 
@@ -352,6 +375,7 @@ fn gather_flat_arrays(
     key: &str,
     arr: Box<dyn Array>,
     separator: &str,
+    exclude: &HashSet<&String>,
 ) {
     let mut path = vec![key.to_string()];
     let mut stack = match arr.as_any().downcast_ref::<StructArray>() {
@@ -366,20 +390,27 @@ fn gather_flat_arrays(
         }
     };
 
+    let mut name: String = path.as_slice().join(separator);
     while let Some(top) = stack.last_mut() {
         match top.next() {
             Some((field, arr)) => match arr.as_any().downcast_ref::<StructArray>() {
                 Some(s) => {
                     path.push(field.name.clone());
-                    stack.push(s.fields().iter().zip(s.values().iter()));
+                    let next_name = path.as_slice().join(separator);
+                    if !exclude.contains(&next_name) {
+                        name = next_name;
+                        stack.push(s.fields().iter().zip(s.values().iter()));
+                    } else {
+                        path.pop();
+                    }
                 }
                 _ => {
-                    let mut name = path.as_slice().join(separator);
-                    name.push_str(separator);
-                    name.push_str(&field.name);
+                    let mut field_name = name.clone();
+                    field_name.push_str(separator);
+                    field_name.push_str(&field.name);
 
                     fields.push(Field::new(
-                        name,
+                        field_name,
                         field.data_type().clone(),
                         field.is_nullable,
                     ));
@@ -389,6 +420,7 @@ fn gather_flat_arrays(
             None => {
                 stack.pop();
                 path.pop();
+                name = path.as_slice().join(separator);
             }
         }
     }
@@ -474,12 +506,11 @@ mod tests {
         );
 
         let child_struct = StructArray::new(
-            DataType::Struct(vec![Field::new(
-                "grandchild",
-                grandchild_struct.data_type().clone(),
-                false,
-            )]),
-            vec![grandchild_struct.clone().boxed()],
+            DataType::Struct(vec![
+                Field::new("grandchild", grandchild_struct.data_type().clone(), false),
+                Field::new("index", index.data_type().clone(), false),
+            ]),
+            vec![grandchild_struct.clone().boxed(), index.clone().boxed()],
             None,
         );
 
@@ -555,7 +586,7 @@ mod tests {
         assert_eq!(
             test.focus(&DataFocus {
                 dataset: vec!["child".to_string()],
-                dataset_separator: None
+                ..DataFocus::default()
             })
             .unwrap(),
             SchemaChunk::from_struct(child_struct.as_any().downcast_ref().unwrap())
@@ -564,7 +595,7 @@ mod tests {
         assert_eq!(
             test.focus(&DataFocus {
                 dataset: vec!["time".to_string()],
-                dataset_separator: None
+                ..DataFocus::default()
             })
             .unwrap()
             .arrays(),
@@ -574,7 +605,7 @@ mod tests {
         assert_eq!(
             test.focus(&DataFocus {
                 dataset: vec!["time".to_string()],
-                dataset_separator: None
+                ..DataFocus::default()
             })
             .unwrap()
             .get_array(["time"])
@@ -585,21 +616,75 @@ mod tests {
         assert_eq!(
             test.focus(&DataFocus {
                 dataset: vec!["child".to_string()],
-                dataset_separator: Some(".".to_string())
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
             })
             .unwrap()
             .arrays(),
-            vec![vec!["child.grandchild.index"]]
+            vec![vec!["child.grandchild.index"], vec!["child.index"]]
         );
 
         assert_eq!(
             test.focus(&DataFocus {
                 dataset: vec!["time".to_string(), "child".to_string()],
-                dataset_separator: Some(".".to_string())
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
             })
             .unwrap()
             .arrays(),
-            vec![vec!["time"], vec!["child.grandchild.index"]]
+            vec![
+                vec!["time"],
+                vec!["child.grandchild.index"],
+                vec!["child.index"]
+            ]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
+            })
+            .unwrap()
+            .arrays(),
+            vec![
+                vec!["time"],
+                vec!["child.grandchild.index"],
+                vec!["child.index"]
+            ]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["time".to_string()]
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["child.grandchild.index"], vec!["child.index"]]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["child.grandchild".to_string()]
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["time"], vec!["child.index"]]
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["child".to_string()]
+            })
+            .unwrap()
+            .arrays(),
+            vec![vec!["time"]]
         );
     }
 
@@ -623,7 +708,8 @@ mod tests {
                     "child".to_string(),
                     "grandchild".to_string(),
                     "index".to_string()
-                ]
+                ],
+                vec!["child".to_string(), "index".to_string()]
             ]
         );
 
@@ -631,7 +717,10 @@ mod tests {
         assert_eq!(child.tables(), vec![vec!["grandchild".to_string()]]);
         assert_eq!(
             child.arrays(),
-            vec![vec!["grandchild".to_string(), "index".to_string()]]
+            vec![
+                vec!["grandchild".to_string(), "index".to_string()],
+                vec!["index".to_string()]
+            ]
         );
 
         let grandchild = child.get_table(["grandchild"]).unwrap();
