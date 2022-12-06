@@ -109,7 +109,7 @@ dependencies = [
 [[package]]
 name = "arrow2"
 version = "0.14.1"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/main#1764df84de69528a749ea6a9833940c92c19ca5d"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/cast-fixed-size-fixed-size#fe18b94053f239753cd140e89974cccc44197d63"
 dependencies = [
  "ahash",
  "arrow-format",
