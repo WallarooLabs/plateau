@@ -95,6 +95,7 @@ impl Segment {
         // TODO: ideally we'd use compression, but this currently causes nasty dependency issues
         // between parquet2 and parquet
         let options = WriteOptions {
+            data_pagesize_limit: None,
             write_statistics: true,
             compression: CompressionOptions::Uncompressed,
             version: Version::V2,

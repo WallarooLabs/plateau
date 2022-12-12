@@ -357,8 +357,10 @@ impl From<IndexedChunk> for SegmentChunk {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::arrow2::array::PrimitiveArray;
-    use crate::arrow2::datatypes::{Field, Metadata};
+    use crate::arrow2::{
+        array::{MutableListArray, PrimitiveArray, TryExtend},
+        datatypes::{Field, Metadata},
+    };
 
     pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
@@ -380,7 +382,7 @@ pub mod test {
             None,
         );
         */
-        let offsets = vec![0, 2, 4, 6, 8, 10];
+        let offsets = vec![0, 2, 2, 4, 6, 8];
         let outputs = ListArray::new(
             DataType::List(Box::new(Field::new(
                 "inner",
@@ -420,19 +422,36 @@ pub mod test {
             vec!["one", "two", "three", "four", "five"].into_iter(),
         );
         let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+        let values: Vec<Option<Vec<Option<String>>>> = vec![
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+            Some(vec![]),
+        ];
+        failures.try_extend(values).unwrap();
+        let failures = ListArray::from(failures);
 
         let schema = Schema {
             fields: vec![
                 Field::new("time", time.data_type().clone(), false),
                 Field::new("inputs", inputs.data_type().clone(), false),
                 Field::new("outputs", outputs.data_type().clone(), false),
+                Field::new("failures", failures.data_type().clone(), false),
             ],
             metadata: Metadata::default(),
         };
 
         SchemaChunk {
             schema,
-            chunk: Chunk::try_new(vec![time.boxed(), inputs.boxed(), outputs.boxed()]).unwrap(),
+            chunk: Chunk::try_new(vec![
+                time.boxed(),
+                inputs.boxed(),
+                outputs.boxed(),
+                failures.boxed(),
+            ])
+            .unwrap(),
         }
     }
 
