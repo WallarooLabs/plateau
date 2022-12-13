@@ -281,7 +281,9 @@ impl SchemaChunk<ArrowSchema> {
 
         if arrays.len() == 1 {
             if let Some(s) = arrays[0].as_any().downcast_ref::<StructArray>() {
-                return Ok(Self::from_struct(s));
+                let mut data = Self::from_struct(s);
+                data.schema.metadata = self.schema.metadata.clone();
+                return Ok(data);
             }
         }
 
@@ -289,7 +291,7 @@ impl SchemaChunk<ArrowSchema> {
             chunk: Chunk::new(arrays),
             schema: ArrowSchema {
                 fields,
-                metadata: Metadata::default(),
+                metadata: self.schema.metadata.clone(),
             },
         })
     }
@@ -685,6 +687,37 @@ mod tests {
             .unwrap()
             .arrays(),
             vec![vec!["time"]]
+        );
+    }
+
+    #[test]
+    fn test_focus_metadata() {
+        let (mut test, (_time, _child_struct, _grandchild_struct, _index)) = nested_chunk();
+
+        test.schema
+            .metadata
+            .insert("testing".to_string(), "123".to_string());
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap()
+            .schema
+            .metadata,
+            test.schema.metadata
+        );
+
+        assert_eq!(
+            test.focus(&DataFocus {
+                dataset: vec!["child".to_string(), "time".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap()
+            .schema
+            .metadata,
+            test.schema.metadata
         );
     }
 
