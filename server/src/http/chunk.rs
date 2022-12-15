@@ -17,7 +17,7 @@ use std::borrow::Cow;
 use std::io::{Cursor, Write};
 
 use plateau_transport::{
-    DataFocus, Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW,
+    ArrowSchema, DataFocus, Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW,
 };
 
 use crate::{
@@ -123,8 +123,8 @@ pub(crate) fn to_reply(
     // refactor SchemaChunk so it holds a Vec of Chunk like LimitedBatch
     // as it is we regenerate the schema and throw it away for each chunk,
     // which can't be efficient.
-    let mut schema = batch.schema.unwrap();
     let (first_chunk, mut schema) = if let Some(chunk) = iter.next() {
+        let mut schema = batch.schema.unwrap();
         let mut chunk = SegmentChunk::from(chunk);
         if focus.is_some() {
             let full = SchemaChunk { schema, chunk };
@@ -134,7 +134,39 @@ pub(crate) fn to_reply(
         }
         (chunk, schema)
     } else {
-        return Err(ErrorReply::EmptyBody);
+        return match accept {
+            CONTENT_TYPE_ARROW => {
+                let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+                let options = write::WriteOptions { compression: None };
+
+                let schema = ArrowSchema {
+                    fields: vec![],
+                    metadata: Metadata::default(),
+                };
+
+                let mut writer = write::FileWriter::new(bytes, schema, None, options);
+
+                writer.start().map_err(ErrorReply::Arrow)?;
+                writer.finish().map_err(ErrorReply::Arrow)?;
+
+                let bytes = writer.into_inner().into_inner();
+                Ok(Box::new(
+                    hyper::Response::builder()
+                        .header("Content-Type", CONTENT_TYPE_ARROW)
+                        .status(StatusCode::OK)
+                        .body::<Body>(bytes.into())
+                        .unwrap(),
+                ))
+            }
+            CONTENT_TYPE_PANDAS_RECORD => Ok(Box::new(
+                hyper::Response::builder()
+                    .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
+                    .status(StatusCode::OK)
+                    .body::<Body>("[]".into())
+                    .unwrap(),
+            )),
+            other => Err(ErrorReply::CannotEmit(other.to_string())),
+        };
     };
 
     let schema_copy = schema.clone();
@@ -210,6 +242,13 @@ pub(crate) fn to_reply(
             Ok(Box::new(
                 hyper::Response::builder()
                     .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
+                    .header(
+                        "X-Iteration-Status",
+                        schema_copy
+                            .metadata
+                            .get("status")
+                            .unwrap_or(&"{}".to_string()),
+                    )
                     .status(StatusCode::OK)
                     .body::<Body>(bytes.into())
                     .unwrap(),

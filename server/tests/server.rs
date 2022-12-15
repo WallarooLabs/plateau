@@ -455,6 +455,24 @@ async fn topic_iterate_schema_change() -> Result<()> {
         schema_field_names(&chunk_b.schema)
     );
 
+    let next = next_from_schema(&schema)?;
+    let (_, response): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(next),
+        29,
+        DataFocus::default(),
+    )
+    .await?;
+    assert_eq!(
+        response
+            .into_iter()
+            .map(|c| c.len())
+            .collect::<Vec<_>>()
+            .len(),
+        0
+    );
+
     // this is a horrible hack that resolves a race condition where the slog threads are still
     // writing but the tempdir is deleted, resulting in intermittent test failures.
     //TODO: graceful shutdown of test server
@@ -524,7 +542,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
 
     let topic_url = topic_records_url(&server, &topic_name);
     let request = client
-        .post(topic_url)
+        .post(&topic_url)
         .json(&json!({}))
         .query(&[("limit", 3)])
         .query(&[("dataset[]", "inputs")])
@@ -532,20 +550,58 @@ async fn topic_iterate_pandas_records() -> Result<()> {
         .query(&[("dataset.separator", ".")])
         .header("Accept", "application/json; format=pandas-records");
 
-    let result = request
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
+    let result = request.send().await?.error_for_status()?;
+
     assert_eq!(
-        result,
+        result
+            .headers()
+            .get("X-Iteration-Status")
+            .unwrap()
+            .to_str()?,
+        "{\"status\":\"RecordLimited\",\"next\":{\"partition-1\":3}}"
+    );
+
+    let json = result.json::<serde_json::Value>().await?;
+
+    assert_eq!(
+        json,
         json!([
             {"inputs": 1.0, "outputs": [2.0, 2.0]},
             {"inputs": 2.0, "outputs": [4.0, 4.0]},
             {"inputs": 3.0, "outputs": [6.0, 6.0]},
         ])
     );
+
+    let request = client
+        .post(&topic_url)
+        .json(&json!({}))
+        .query(&[("limit", 100)])
+        .query(&[("dataset[]", "inputs")])
+        .query(&[("dataset[]", "outputs")])
+        .query(&[("dataset.separator", ".")])
+        .header("Accept", "application/json; format=pandas-records");
+
+    let result = request.send().await?.error_for_status()?;
+    let status: serde_json::Value = serde_json::from_str(
+        result
+            .headers()
+            .get("X-Iteration-Status")
+            .unwrap()
+            .to_str()?,
+    )?;
+
+    let request = client
+        .post(&topic_url)
+        .json(status.get("next").unwrap())
+        .query(&[("limit", 100)])
+        .query(&[("dataset[]", "inputs")])
+        .query(&[("dataset[]", "outputs")])
+        .query(&[("dataset.separator", ".")])
+        .header("Accept", "application/json; format=pandas-records");
+
+    let result = request.send().await?.error_for_status()?;
+    let json = result.json::<serde_json::Value>().await?;
+    assert_eq!(json, json!([]));
 
     // this is a horrible hack that resolves a race condition where the slog threads are still
     // writing but the tempdir is deleted, resulting in intermittent test failures.
