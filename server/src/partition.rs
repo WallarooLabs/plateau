@@ -533,6 +533,7 @@ pub mod test {
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
+    use plateau_transport::SegmentChunk;
     use std::convert::TryInto;
     use tempfile::{tempdir, TempDir};
 
@@ -721,10 +722,32 @@ pub mod test {
     }
 
     #[tokio::test]
+    async fn test_arrow_durability() -> Result<()> {
+        let chunk_a = inferences_schema_a();
+
+        let (dir, part) = partition(segment_3s()).await?;
+        let spec = {
+            part.extend(chunk_a.clone()).await?;
+            part.commit().await?;
+            to_spec(part)
+        };
+
+        {
+            let part = reattach(&dir, spec).await;
+            let result = part.get_records(RecordIndex(0), RowLimit::default()).await;
+
+            assert_eq!(SegmentChunk::from(result.chunks[0].clone()), chunk_a.chunk);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_nested() -> Result<()> {
         let (dir, part) = partition(Config::default()).await?;
+        let nested = inferences_nested();
         let spec = {
-            part.extend(inferences_nested()).await?;
+            part.extend(nested.clone()).await?;
             part.commit().await?;
             to_spec(part)
         };
@@ -734,7 +757,10 @@ pub mod test {
 
             let start = RecordIndex(0);
             let result = part.get_records(start, RowLimit::default()).await;
-            assert_eq!(result.chunks.len(), 1);
+            assert_eq!(
+                format!("{:?}", SegmentChunk::from(result.chunks[0].clone())),
+                format!("{:?}", nested.chunk)
+            );
         }
 
         Ok(())

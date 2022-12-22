@@ -383,7 +383,7 @@ pub mod test {
         );
         */
         let offsets = vec![0, 2, 2, 4, 6, 8];
-        let outputs = ListArray::new(
+        let tensor = ListArray::new(
             DataType::List(Box::new(Field::new(
                 "inner",
                 inner.data_type().clone(),
@@ -394,11 +394,20 @@ pub mod test {
             None,
         );
 
+        let outputs = StructArray::new(
+            DataType::Struct(vec![
+                Field::new("mul", mul.data_type().clone(), false),
+                Field::new("tensor", tensor.data_type().clone(), false),
+            ]),
+            vec![mul.clone().boxed(), tensor.clone().boxed()],
+            None,
+        );
+
         let schema = Schema {
             fields: vec![
                 Field::new("time", time.data_type().clone(), false),
+                Field::new("tensor", tensor.data_type().clone(), false),
                 Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("mul", mul.data_type().clone(), false),
                 Field::new("outputs", outputs.data_type().clone(), false),
             ],
             metadata: Metadata::default(),
@@ -408,8 +417,8 @@ pub mod test {
             schema,
             chunk: Chunk::try_new(vec![
                 time.boxed(),
+                tensor.boxed(),
                 inputs.boxed(),
-                mul.boxed(),
                 outputs.boxed(),
             ])
             .unwrap(),
@@ -490,7 +499,7 @@ pub mod test {
     #[test]
     fn test_size_estimates() -> Result<(), ChunkError> {
         let time_size = 5 * 8;
-        let a_size = time_size + 5 * 4 + 5 * 4 + 10 * 8;
+        let a_size = time_size + 10 * 8 + 5 * 4 + 10 * 8 + 5 * 4;
         assert_eq!(estimate_size(&inferences_schema_a().chunk)?, a_size);
         let numbers = 3 + 3 + 5 + 4 + 4;
         let b_size = time_size + numbers + 5 * 4;
