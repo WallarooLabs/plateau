@@ -1,5 +1,8 @@
 use anyhow::Result;
-use arrow2::array::{Array, ListArray, PrimitiveArray, Utf8Array};
+use arrow2::array::{
+    Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray, TryExtend,
+    Utf8Array,
+};
 use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use arrow2::io::ipc::{read, write};
@@ -34,8 +37,8 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         None,
     );
     */
-    let offsets = vec![0, 2, 4, 6, 8, 10];
-    let outputs = ListArray::new(
+    let offsets = vec![0, 2, 2, 4, 6, 8];
+    let tensor = ListArray::new(
         DataType::List(Box::new(Field::new(
             "inner",
             inner.data_type().clone(),
@@ -46,11 +49,20 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         None,
     );
 
+    let outputs = StructArray::new(
+        DataType::Struct(vec![
+            Field::new("mul", mul.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+        ]),
+        vec![mul.clone().boxed(), tensor.clone().boxed()],
+        None,
+    );
+
     let schema = Schema {
         fields: vec![
             Field::new("time", time.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
             Field::new("inputs", inputs.data_type().clone(), false),
-            Field::new("mul", mul.data_type().clone(), false),
             Field::new("outputs", outputs.data_type().clone(), false),
         ],
         metadata: Metadata::default(),
@@ -60,8 +72,8 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         schema,
         chunk: Chunk::try_new(vec![
             time.boxed(),
+            tensor.boxed(),
             inputs.boxed(),
-            mul.boxed(),
             outputs.boxed(),
         ])
         .unwrap(),
@@ -74,19 +86,36 @@ pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
         vec!["one", "two", "three", "four", "five"].into_iter(),
     );
     let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+    let values: Vec<Option<Vec<Option<String>>>> = vec![
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+    ];
+    failures.try_extend(values).unwrap();
+    let failures = ListArray::from(failures);
 
     let schema = Schema {
         fields: vec![
             Field::new("time", time.data_type().clone(), false),
             Field::new("inputs", inputs.data_type().clone(), false),
             Field::new("outputs", outputs.data_type().clone(), false),
+            Field::new("failures", failures.data_type().clone(), false),
         ],
         metadata: Metadata::default(),
     };
 
     SchemaChunk {
         schema,
-        chunk: Chunk::try_new(vec![time.boxed(), inputs.boxed(), outputs.boxed()]).unwrap(),
+        chunk: Chunk::try_new(vec![
+            time.boxed(),
+            inputs.boxed(),
+            outputs.boxed(),
+            failures.boxed(),
+        ])
+        .unwrap(),
     }
 }
 
@@ -566,9 +595,9 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     assert_eq!(
         json,
         json!([
-            {"inputs": 1.0, "outputs": [2.0, 2.0]},
-            {"inputs": 2.0, "outputs": [4.0, 4.0]},
-            {"inputs": 3.0, "outputs": [6.0, 6.0]},
+            {"inputs": 1.0, "outputs.mul": 2.0, "outputs.tensor": [2.0, 2.0]},
+            {"inputs": 2.0, "outputs.mul": 2.0, "outputs.tensor": []},
+            {"inputs": 3.0, "outputs.mul": 2.0, "outputs.tensor": [4.0, 4.0]},
         ])
     );
 

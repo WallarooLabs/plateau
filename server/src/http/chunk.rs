@@ -123,16 +123,21 @@ pub(crate) fn to_reply(
     // refactor SchemaChunk so it holds a Vec of Chunk like LimitedBatch
     // as it is we regenerate the schema and throw it away for each chunk,
     // which can't be efficient.
-    let (first_chunk, mut schema) = if let Some(chunk) = iter.next() {
-        let mut schema = batch.schema.unwrap();
+    let (first_chunk, batch_schema, focused_schema) = if let Some(chunk) = iter.next() {
+        let batch_schema = batch.schema.unwrap();
         let mut chunk = SegmentChunk::from(chunk);
-        if focus.is_some() {
-            let full = SchemaChunk { schema, chunk };
+        let focused_schema = if focus.is_some() {
+            let full = SchemaChunk {
+                schema: batch_schema.clone(),
+                chunk,
+            };
             let result = full.focus(&focus).map_err(ErrorReply::Path)?;
-            schema = result.schema;
             chunk = result.chunk;
-        }
-        (chunk, schema)
+            result.schema
+        } else {
+            batch_schema.clone()
+        };
+        (chunk, batch_schema, focused_schema)
     } else {
         return match accept {
             CONTENT_TYPE_ARROW => {
@@ -169,28 +174,17 @@ pub(crate) fn to_reply(
         };
     };
 
-    let schema_copy = schema.clone();
     let iter = std::iter::once(Ok(first_chunk)).chain(iter.map(|chunk| {
         let chunk = SegmentChunk::from(chunk);
 
         if focus.is_some() {
             let full = SchemaChunk {
-                schema: std::mem::replace(
-                    &mut schema,
-                    Schema {
-                        fields: vec![],
-                        metadata: Metadata::default(),
-                    },
-                ),
+                schema: batch_schema.clone(),
                 chunk,
             };
-            match full.focus(&focus) {
-                Ok(result) => {
-                    schema = result.schema;
-                    Ok(result.chunk)
-                }
-                Err(e) => Err(ErrorReply::Path(e)),
-            }
+            full.focus(&focus)
+                .map(|result| result.chunk)
+                .map_err(ErrorReply::Path)
         } else {
             Ok(chunk)
         }
@@ -201,7 +195,7 @@ pub(crate) fn to_reply(
             let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
             let options = write::WriteOptions { compression: None };
 
-            let mut writer = write::FileWriter::new(bytes, schema_copy, None, options);
+            let mut writer = write::FileWriter::new(bytes, focused_schema, None, options);
 
             writer.start().map_err(ErrorReply::Arrow)?;
             for chunk in iter {
@@ -232,8 +226,11 @@ pub(crate) fn to_reply(
                 }
                 let mut buf = vec![];
                 let chunk = chunk?;
-                let mut serializer =
-                    arrow_json::write::RecordSerializer::new(schema_copy.clone(), &chunk, vec![]);
+                let mut serializer = arrow_json::write::RecordSerializer::new(
+                    focused_schema.clone(),
+                    &chunk,
+                    vec![],
+                );
                 arrow_json::write::write(&mut buf, &mut serializer).map_err(ErrorReply::Arrow)?;
                 bytes.extend(&buf[1..buf.len() - 1]);
             }
@@ -244,7 +241,7 @@ pub(crate) fn to_reply(
                     .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
                     .header(
                         "X-Iteration-Status",
-                        schema_copy
+                        focused_schema
                             .metadata
                             .get("status")
                             .unwrap_or(&"{}".to_string()),
