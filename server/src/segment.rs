@@ -1,12 +1,12 @@
 //! A segment contains a bundle of time and logically indexed records.
 //!
 //! Currently, the only supported segment format is local Parquet files.
-use crate::arrow2::datatypes::{DataType, Field, Schema};
+use crate::arrow2::datatypes::Schema;
 use crate::arrow2::io::parquet::read::FileReader as FileReader2;
 use crate::arrow2::io::parquet::read::{infer_schema, read_metadata};
 use crate::arrow2::io::parquet::write::FileWriter as FileWriter2;
 use crate::arrow2::io::parquet::write::{
-    CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
+    transverse, CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
 };
 use anyhow::Result;
 #[cfg(test)]
@@ -200,13 +200,6 @@ pub struct SegmentWriter2 {
     options: WriteOptions,
 }
 
-fn array_count(f: &Field) -> usize {
-    match f.data_type() {
-        DataType::Struct(fs) => fs.iter().map(array_count).sum(),
-        _ => 1,
-    }
-}
-
 impl SegmentWriter2 {
     pub fn check_schema(&self, schema: &Schema) -> bool {
         &self.schema == schema
@@ -225,11 +218,7 @@ impl SegmentWriter2 {
             .borrow()
             .fields
             .iter()
-            .map(|field| {
-                iter::repeat(Encoding::Plain)
-                    .take(array_count(field))
-                    .collect()
-            })
+            .map(|field| transverse(field.data_type(), |_| Encoding::Plain))
             .collect();
 
         let row_groups = RowGroupIterator::try_new(
