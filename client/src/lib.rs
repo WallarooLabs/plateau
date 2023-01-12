@@ -10,7 +10,7 @@ pub use plateau_transport::{
     arrow2::io::ipc,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
     ArrowError, ArrowSchema, DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery,
-    Records, SchemaChunk, TopicIterationQuery, TopicIterationReply, TopicIterator, Topics,
+    Records, SchemaChunk, Span, TopicIterationQuery, TopicIterationReply, TopicIterator, Topics,
     CONTENT_TYPE_ARROW,
 };
 use reqwest::{

@@ -60,7 +60,7 @@ pub struct Records {
 pub struct DataFocus {
     /// Data sets to return for this query.
     #[serde(default)]
-    #[cfg_attr(feature = "structopt-cli", structopt(default_value = "", long))]
+    #[cfg_attr(feature = "structopt-cli", structopt(default_value = "*", long))]
     pub dataset: Vec<String>,
 
     /// List of datasets to exclude.
