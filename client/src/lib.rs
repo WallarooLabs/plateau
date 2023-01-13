@@ -19,6 +19,9 @@ use reqwest::{
 };
 use thiserror::Error;
 
+#[cfg(feature = "batch")]
+pub mod batch;
+
 /// Plateau errors
 #[derive(Debug, Error)]
 pub enum Error {
