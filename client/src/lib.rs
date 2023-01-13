@@ -277,7 +277,7 @@ impl Insertion for SizedArrowStream {
     }
 }
 
-fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+pub fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
     let mut cursor = Cursor::new(bytes);
     let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
     let schema = metadata.schema.clone();
