@@ -1,10 +1,14 @@
-//! Backend agnostic batch transmission utility.
+//! Backend agnostic keyed batch [Transmission] utility. Supports batch collation
+//! and splitting alongside element count and byte size limits.
 //!
-//! Takes arbitrarily sized inputs and bundles or slices them as necessary.
+//! Requires downstream consumers to implement:
+//! - [Batch] for data to transmit.
+//! - [BatchSender] for the mechanism used to transmit a [Batch] of data.
 use async_trait::async_trait;
-use log::trace;
+use core::ops::Range;
+use log::{error, trace};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -29,7 +33,7 @@ const DEFAULT_BATCH_TIMEOUT: Duration = Duration::from_millis(1000);
 // DEFAULT_PENDING_WORK_CAPACITY how many events to queue up for busy batches
 const DEFAULT_PENDING_WORK_CAPACITY: usize = 10_000;
 
-/// Options includes various options to tweak the behavious of the sender.
+/// Options includes various options to tweak the behavior of the sender.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Options {
@@ -61,31 +65,124 @@ impl Default for Options {
 
 #[async_trait]
 pub trait BatchSender: Send + Sync + 'static {
-    type Event;
-    async fn send_batch(&self, key: &str, events: Vec<Self::Event>, clock: Instant) -> bool;
+    type Batch;
+
+    /// Send a batch of data. Returns false if the send failed and a retry
+    /// should be attempted.
+    async fn send_batch(&self, key: &str, batch: Self::Batch, clock: Instant) -> bool;
 }
 
-pub trait Keyed {
+pub trait Batch: Sized {
+    /// Keys are used to group batches into separate queues for transmission.
     fn key(&self) -> &str;
-    fn size(&self) -> usize;
+
+    /// The number of events in this batch.
+    fn len(&self) -> usize;
+
+    /// The byte size of this batch.
+    fn bytes(&self) -> usize;
+
+    /// The maximum size of a single element of this batch.
+    fn max_element_bytes(&self) -> usize;
+
+    /// Extend this batch by adding all elements of `other` to the end.
+    fn extend(&mut self, other: Self);
+
+    /// Create a subset of this batch with the given range indices.
+    fn slice(&self, ixs: Range<usize>) -> Self;
+
+    /// Attempt to extend this batch with another. Return the original batch
+    /// if that extension would result in a batch that violates the configured
+    /// size limits.
+    ///
+    /// By default, both event and byte limits are checked against a simple sum
+    /// of the respective sizes of the two smaller batches.
+    fn check_extend(&mut self, other: Self, config: &Options) -> Option<Self> {
+        let ok_len = self.len() + other.len() <= config.max_batch_size;
+        let ok_bytes = self.bytes() + other.bytes() <= config.max_batch_bytes;
+        if ok_len && ok_bytes {
+            self.extend(other);
+            None
+        } else {
+            trace!(
+                "extend rejected. {}",
+                if !ok_bytes {
+                    format!(
+                        "self bytes: {}, other bytes: {}",
+                        self.bytes(),
+                        other.bytes()
+                    )
+                } else {
+                    format!("self len: {}, other len: {}", self.len(), other.len())
+                }
+            );
+            Some(other)
+        }
+    }
+
+    /// Split this batch into smaller batches that respect the configured byte limits.
+    ///
+    /// By default, this uses [Batch::max_element_bytes] to calculate the
+    /// largest possible event size. This is used to derive to a byte-limited
+    /// event count by simple division with the max bytes per batch.
+    ///
+    /// It then splits this batch into equal-length smaller batches. The smaller
+    /// of the byte-limited event count and the configured max number of events
+    /// is used for the split batch size. The final batch may be smaller
+    /// depending on the alignment of the smaller batch size and the larger
+    /// batch.
+    fn split(self, config: &Options) -> Vec<Self> {
+        let byte_limited_event_count = config.max_batch_bytes / self.max_element_bytes();
+        let stride = std::cmp::min(byte_limited_event_count, config.max_batch_size);
+        if stride == 0 {
+            error!(
+                "dropping batch: max element bytes for batch is {}",
+                self.max_element_bytes(),
+            );
+            vec![]
+        } else {
+            let end = self.len();
+            if stride >= end {
+                vec![self]
+            } else {
+                let starts = (0..end).step_by(stride);
+                starts
+                    .map(|start| self.slice(start..std::cmp::min(end, start + stride)))
+                    .collect()
+            }
+        }
+    }
 }
 
-/// `Transmission` handles collecting individual events into batches for bulk upload.
+/// [Transmission] is a queue reshaper that enables differential input and
+/// output batch rates and sizes.
+///
+/// A [Batch] of events can be queued via [Transmission::send]. [Transmission]
+/// is then responsible for restructuring and queueing those batches as defined
+/// in its [Options]. It will finally send the reshaped batches out via a
+/// configured [BatchSender].
+///
+/// It handles several important concerns:
+/// - collation of many small batches into a larger batch for efficiency.
+/// - splitting of large batches into smaller batches as required by configured
+///   size limits.
+/// - retries of failed batches on errors.
+/// - queue flushing at regular and configurable intervals.
 #[derive(Debug, Clone)]
 pub struct Transmission<E: Clone> {
     work_sender: Sender<E>,
 }
 
-impl<E: Clone + Keyed + Send + 'static> Transmission<E> {
-    pub fn send(&self, event: E) -> Result<()> {
+impl<B: Clone + Batch + Send + 'static> Transmission<B> {
+    pub fn send(&self, event: B) -> Result<()> {
         self.work_sender
             .try_send(event)
             .map_err(|_| TransmissionError::QueueFull)
     }
 }
 
-impl<E: Clone + Keyed + Send + 'static> Transmission<E> {
-    pub fn start(runtime: Handle, sender: impl BatchSender<Event = E>, options: Options) -> Self {
+impl<B: Clone + Batch + Send + 'static> Transmission<B> {
+    pub fn start(runtime: Handle, sender: impl BatchSender<Batch = B>, options: Options) -> Self {
         let (work_sender, work_receiver) = channel(options.pending_work_capacity);
 
         runtime
@@ -95,25 +192,33 @@ impl<E: Clone + Keyed + Send + 'static> Transmission<E> {
     }
 
     async fn process_work(
-        mut work_receiver: Receiver<E>,
-        sender: impl BatchSender<Event = E>,
+        mut work_receiver: Receiver<B>,
+        sender: impl BatchSender<Batch = B>,
         options: Options,
     ) {
-        let mut batches: HashMap<String, (usize, Vec<E>)> = HashMap::new();
+        let mut batches: HashMap<String, VecDeque<B>> = HashMap::new();
         let mut send = true;
 
         while send {
             let mut expired = false;
             match timeout(options.batch_timeout, work_receiver.recv()).await {
-                Ok(Some(event)) => {
-                    let event_bytes = event.size();
-                    let key = String::from(event.key());
-                    let current = batches
-                        .entry(key)
-                        .or_insert((0, Vec::with_capacity(options.max_batch_size)));
+                Ok(Some(batch)) => {
+                    let key = String::from(batch.key());
+                    let queue = batches.entry(key).or_insert(VecDeque::new());
 
-                    current.0 += event_bytes;
-                    current.1.push(event);
+                    for part in batch.split(&options) {
+                        // try and add onto the last batch in the queue.
+                        // if the batches cannot be combined, push the new batch
+                        // onto the end of the queue instead.
+                        match queue.back_mut() {
+                            Some(end) => end
+                                .check_extend(part, &options)
+                                .map(|reject| queue.push_back(reject)),
+                            // if there is no last batch in queue, push onto the
+                            // queue to make one.
+                            None => Some(queue.push_back(part)),
+                        };
+                    }
                 }
                 Ok(None) => {
                     send = false;
@@ -123,40 +228,46 @@ impl<E: Clone + Keyed + Send + 'static> Transmission<E> {
                 }
             };
 
-            let mut batches_sent = Vec::new();
-            for (batch_name, (batch_bytes, batch)) in batches.iter_mut() {
-                if batch.is_empty() {
-                    break;
+            for (key, queue) in batches.iter_mut() {
+                if queue.len() > 1 {
+                    trace!("queue {} has at least one ready batch", key);
+                    Self::send_queue(&sender, key, queue, 1).await;
                 }
-                let options = options.clone();
-
-                let over_count = batch.len() >= options.max_batch_size;
-                let over_bytes = *batch_bytes >= options.max_batch_bytes;
-                if !batch.is_empty() && (over_count || over_bytes || expired) {
-                    if expired {
-                        trace!("{:?} batch timeout exceeded", options.batch_timeout);
-                    } else if over_bytes {
-                        trace!("sending over byte limit");
-                    } else if over_count {
-                        trace!("sending full batch");
-                    }
-                    let batch_copy = batch.clone();
-
-                    if sender
-                        .send_batch(batch_name, batch_copy, Instant::now())
-                        .await
-                    {
-                        trace!("sent {}", batch_name);
-                        batches_sent.push(batch_name.to_string());
-                    } else {
-                        trace!("failed to send batch");
-                    }
+                if expired && queue.len() > 0 {
+                    trace!(
+                        "queue {} timeout {:?} exceeded, sending all batches",
+                        key,
+                        options.batch_timeout
+                    );
+                    Self::send_queue(&sender, key, queue, 0).await;
                 }
             }
-            // clear all sent batches
-            batches_sent.iter_mut().for_each(|name| {
-                batches.remove(name);
-            });
+        }
+    }
+
+    async fn send_queue(
+        sender: &impl BatchSender<Batch = B>,
+        key: &str,
+        queue: &mut VecDeque<B>,
+        depth: usize,
+    ) {
+        while queue.len() > depth {
+            if let Some(batch) = queue.pop_front() {
+                let batch_clone = batch.clone();
+                if sender.send_batch(key, batch, Instant::now()).await {
+                    trace!("sent batch for {} - queue size {}", key, queue.len());
+                } else {
+                    queue.push_front(batch_clone);
+                    trace!(
+                        "failed to send batch for {} - queue size {}",
+                        key,
+                        queue.len()
+                    );
+                    break;
+                }
+            } else {
+                break;
+            }
         }
     }
 }
@@ -172,13 +283,29 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    impl Keyed for String {
+    impl Batch for Vec<String> {
         fn key(&self) -> &str {
             "single-batch"
         }
 
-        fn size(&self) -> usize {
+        fn len(&self) -> usize {
             self.len()
+        }
+
+        fn bytes(&self) -> usize {
+            self.iter().map(|s| s.len()).sum()
+        }
+
+        fn max_element_bytes(&self) -> usize {
+            self.iter().map(|s| s.len()).max().unwrap_or(1)
+        }
+
+        fn extend(&mut self, other: Self) {
+            Extend::extend(self, other);
+        }
+
+        fn slice(&self, ixs: Range<usize>) -> Self {
+            self[ixs].to_vec()
         }
     }
 
@@ -210,7 +337,7 @@ mod tests {
 
     #[async_trait]
     impl BatchSender for RecordWriter {
-        type Event = String;
+        type Batch = Vec<String>;
 
         async fn send_batch(&self, _key: &str, batch: Vec<String>, _time: Instant) -> bool {
             assert!(batch.len() > 0);
@@ -256,7 +383,7 @@ mod tests {
         );
 
         for i in 0..5 {
-            transmission.send(format!("event {}", i)).unwrap();
+            transmission.send(vec![format!("event {}", i)]).unwrap();
         }
 
         let batches = reader.await;
@@ -281,8 +408,31 @@ mod tests {
         );
 
         for i in 0..5 {
-            transmission.send(format!("event {}", i)).unwrap();
+            transmission.send(vec![format!("event {}", i)]).unwrap();
         }
+
+        let batches = reader.await;
+        assert_eq!(
+            batches,
+            stringify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
+        );
+    }
+
+    #[tokio::test]
+    async fn test_batch_split() {
+        let (writer, reader) = recorder(2);
+        let transmission = Transmission::start(
+            Handle::current(),
+            writer,
+            Options {
+                max_batch_size: 2,
+                ..Options::default()
+            },
+        );
+
+        transmission
+            .send((0..5).map(|i| format!("event {}", i)).collect())
+            .unwrap();
 
         let batches = reader.await;
         assert_eq!(
@@ -298,13 +448,13 @@ mod tests {
             Handle::current(),
             writer,
             Options {
-                max_batch_bytes: 10,
+                max_batch_bytes: 15,
                 ..Options::default()
             },
         );
 
         for i in 0..5 {
-            transmission.send(format!("event {}", i)).unwrap();
+            transmission.send(vec![format!("event {}", i)]).unwrap();
         }
 
         let batches = reader.await;
