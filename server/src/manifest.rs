@@ -177,6 +177,7 @@ impl Manifest {
         let prior = Path::new(&path).exists();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
+            .min_connections(1)
             .connect_with(
                 SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_str().unwrap()))
                     .unwrap()

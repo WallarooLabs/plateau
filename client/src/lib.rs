@@ -55,6 +55,7 @@ pub enum Error {
 /// // Client pointed at an alternate URL.
 /// let client = Client::new("plateau.my-wallaroo-cluster.dev:1234");
 /// ```
+#[derive(Clone)]
 pub struct Client {
     server_url: Url,
     http_client: reqwest::Client,
@@ -201,7 +202,7 @@ impl Client {
 
         Ok(match position.into() {
             Some(position) => base_request.json(&position),
-            None => base_request,
+            None => base_request.json(&{}),
         })
     }
 
@@ -609,6 +610,24 @@ mod tests {
             Expectation::matching(all_of![
                 request::method("POST"),
                 request::path("/topic/topic-1/records"),
+                request::query(url_decoded(contains(("limit", "4"))))
+            ])
+            .respond_with(json_encoded(TopicIterationReply {
+                records: vec!["message-1", "message-2", "message-3", "message-4"]
+                    .drain(..)
+                    .map(|s| s.to_owned())
+                    .collect(),
+                status: TopicIterationStatus {
+                    status: RecordStatus::RecordLimited,
+                    next: HashMap::from([("part-1".to_owned(), 4)]),
+                },
+            })),
+        );
+
+        server.expect(
+            Expectation::matching(all_of![
+                request::method("POST"),
+                request::path("/topic/topic-1/records"),
                 request::query(url_decoded(contains(("limit", "4")))),
                 request::body(json_decoded(eq(serde_json::json!({"part-1": 4}))))
             ])
@@ -620,25 +639,6 @@ mod tests {
                 status: TopicIterationStatus {
                     status: RecordStatus::All,
                     next: HashMap::from([("part-1".to_owned(), 7)]),
-                },
-            })),
-        );
-
-        server.expect(
-            Expectation::matching(all_of![
-                request::method("POST"),
-                request::path("/topic/topic-1/records"),
-                request::query(url_decoded(contains(("limit", "4")))),
-                request::body(len(eq(0)))
-            ])
-            .respond_with(json_encoded(TopicIterationReply {
-                records: vec!["message-1", "message-2", "message-3", "message-4"]
-                    .drain(..)
-                    .map(|s| s.to_owned())
-                    .collect(),
-                status: TopicIterationStatus {
-                    status: RecordStatus::RecordLimited,
-                    next: HashMap::from([("part-1".to_owned(), 4)]),
                 },
             })),
         );
