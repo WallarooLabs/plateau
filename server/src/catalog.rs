@@ -2,7 +2,7 @@
 //! It is used to route reads and writes to the correct topic / partition.
 use crate::manifest::Scope;
 use crate::retention::Retention;
-use ::log::{debug, info};
+use ::log::{debug, info, trace, warn};
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -49,20 +49,27 @@ impl Catalog {
     }
 
     pub async fn checkpoint(&self) {
-        info!("begin full catalog checkpoint");
+        trace!("begin full catalog checkpoint");
         let start = SystemTime::now();
         for (_, topic) in self.topics.read().await.iter() {
             topic.checkpoint().await
         }
         let end = SystemTime::now();
         if let Ok(duration) = end.duration_since(start) {
-            info!("finished full catalog checkpoint in {:?}", duration);
+            if duration.as_secs() > 1 {
+                warn!(
+                    "full catalog checkpoint took {:?} (longer than 1s!)",
+                    duration
+                );
+            } else {
+                trace!("finished full catalog checkpoint in {:?}", duration);
+            }
             gauge!(
                 "catalog_checkpoint_ms",
                 (duration.as_micros() as f64) / 1000.0
             );
         } else {
-            info!("finished full catalog checkpoint");
+            warn!("finished full catalog checkpoint; time skew");
         }
         *self.last_checkpoint.write().await = end;
     }

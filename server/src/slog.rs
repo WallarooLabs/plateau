@@ -26,7 +26,7 @@ use crate::segment::Record;
 use crate::segment::{CloseArrow, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use log::{debug, trace};
+use log::{trace, warn};
 use metrics::counter;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use std::cmp::{max, min};
@@ -235,7 +235,7 @@ impl Slog {
     }
 
     pub(crate) async fn append(&self, data: SchemaChunk<Schema>) -> Checkpoint {
-        self.state.write().await.append(data).await
+        self.state.write().await.append(self, data).await
     }
 
     pub(crate) fn destroy(&self, segment_ix: SegmentIndex) -> Result<()> {
@@ -285,10 +285,14 @@ impl Slog {
 }
 
 impl State {
-    pub(crate) async fn append(&mut self, d: SchemaChunk<Schema>) -> Checkpoint {
+    pub(crate) async fn append(&mut self, slog: &Slog, d: SchemaChunk<Schema>) -> Checkpoint {
         if let Some(segment) = self.active.as_ref() {
             if segment.schema != d.schema {
-                debug!("schema change after {:?}", segment.metadata.index);
+                counter!("slog_schema_change", 1, "name" => slog.name.clone());
+                warn!(
+                    "{}: schema change after {:?}",
+                    slog.name, segment.metadata.index
+                );
                 // TODO: bubble this failure up
                 self.roll().await.unwrap();
             }
