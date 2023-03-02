@@ -246,11 +246,19 @@ async fn topic_iterate(
     let topic = catalog.get_topic(&topic_name).await;
     let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
+    let reverse = query.reverse.unwrap_or(false);
 
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
+        if reverse {
+            Err(warp::reject::custom(ErrorReply::InvalidQuery))?
+        }
         topic
             .get_records_by_time(position, times, RowLimit::records(limit))
+            .await
+    } else if reverse {
+        topic
+            .get_records_reverse(position, RowLimit::records(limit))
             .await
     } else {
         topic.get_records(position, RowLimit::records(limit)).await

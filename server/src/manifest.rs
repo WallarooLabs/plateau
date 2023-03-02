@@ -174,6 +174,13 @@ impl RecordIndex {
 
 impl Manifest {
     pub async fn attach(path: PathBuf) -> Self {
+        // check for data directory and error if not exist
+        if let Some(parent) = path.parent() {
+            if !parent.is_dir() {
+                panic!("Data directory '{}' not found.", parent.display())
+            }
+        }
+
         let prior = Path::new(&path).exists();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)

@@ -119,6 +119,9 @@ pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
     pub limit: Option<usize>,
+    /// Use reverse iteration to work backwards through the topic
+    #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
+    pub reverse: Option<bool>,
     /// RFC3339 start time for records (defaults to earliest record)
     #[serde(rename = "time.start")]
     pub start_time: Option<String>,

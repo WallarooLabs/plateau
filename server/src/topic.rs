@@ -182,6 +182,21 @@ impl Topic {
         .await
     }
 
+    pub(crate) async fn get_records_reverse(
+        &self,
+        starts: TopicIterator,
+        limit: RowLimit,
+    ) -> TopicRecordResponse {
+        self.get_records_from_all_reverse(
+            starts,
+            limit,
+            |partition, start, partition_limit| async move {
+                partition.get_records(start, partition_limit).await
+            },
+        )
+        .await
+    }
+
     pub(crate) async fn get_records_by_time(
         &self,
         starts: TopicIterator,
@@ -201,46 +216,96 @@ impl Topic {
         .await
     }
 
-    pub(crate) async fn get_records_from_all<'a, F, Fut>(
+    /// Reads rows from one or more partitions in a topic. When starting a new
+    /// forward read (i.e., all partitions starting at position 0), partitions
+    /// are scanned in alphabetical order. Each partition is scanned in turn
+    /// until `limit` records have been retrieved. Positions of all scanned
+    /// partitions are updated in `iterator`. Forward iteration will include
+    /// partitions as they are created, reverse operation will only process
+    /// those partitions present at the first iteration.
+    async fn iter_topic<'a, F, Fut>(
         &'a self,
         mut iterator: TopicIterator,
         limit: RowLimit,
+        reverse: bool,
         fetch: F,
     ) -> TopicRecordResponse
     where
         F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, RowLimit) -> Fut,
         Fut: futures::Future<Output = LimitedBatch>,
     {
-        let mut read_starts: Vec<_> = self
-            .readable_ids()
-            .await
-            .into_iter()
-            .map(|(k, v)| {
-                (
-                    RecordIndex(*iterator.entry(k.clone()).or_insert(v.start.0)),
-                    k,
-                )
-            })
-            .collect();
+        let mut read_starts: Vec<_> = if reverse && !iterator.is_empty() {
+            // if reversing and the iterator already has a set of partitions established,
+            // just get offsets/indexes for those partitions
+            iterator
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>()
+                .into_iter()
+                .map(|k| (RecordIndex(*iterator.entry(k.clone()).or_insert(0)), k))
+                .collect()
+        } else {
+            // otherwise scan all partitions, including new partitions created since the
+            // iterator originally initialized
+            self.readable_ids()
+                .await
+                .into_iter()
+                .map(|(k, v)| {
+                    (
+                        RecordIndex(*iterator.entry(k.clone()).or_insert(if reverse {
+                            v.end.0
+                        } else {
+                            v.start.0
+                        })),
+                        k,
+                    )
+                })
+                .collect()
+        };
 
         read_starts.sort();
+        if reverse {
+            read_starts.reverse();
+        }
+
         let mut batch = LimitedBatch::open(limit);
         let mut any_schema_change = false;
-        for (start, name) in read_starts.into_iter() {
+        for (mut start, name) in read_starts.into_iter() {
             let partition = self.get_partition(&name).await;
-            if let BatchStatus::Open { remaining } = batch.status {
-                let batch_response = fetch(partition, start, remaining).await;
+            if let BatchStatus::Open { mut remaining } = batch.status {
+                // if working in reverse, we need to move the position pointer
+                // before reading, and ensure we won't read past the last position
+                if reverse {
+                    if remaining.max_records > start.0 {
+                        remaining.max_records = start.0;
+                    }
+                    start.0 -= remaining.max_records;
+                }
+
+                let mut batch_response = fetch(partition, start, remaining).await;
                 if matches!(batch_response.status, BatchStatus::SchemaChanged) {
                     any_schema_change = true;
                 }
-                if batch.compatible_with(&batch_response) {
-                    batch.extend(batch_response);
 
-                    if let Some(final_record) =
-                        batch.chunks.last().and_then(|indexed| indexed.end())
-                    {
-                        iterator.insert(name, (final_record + 1).0);
+                if batch.compatible_with(&batch_response) {
+                    if reverse {
+                        // if moving backwards, set the position in this
+                        // partition to that of the first record returned
+                        batch_response.chunks.reverse();
+                        iterator.insert(name, start.0);
+                    } else {
+                        // if moving forward, set the position in this
+                        // partition to just beyond the last record returned
+                        if let Some(final_record) = batch_response
+                            .chunks
+                            .last()
+                            .and_then(|indexed| indexed.end())
+                        {
+                            iterator.insert(name, (final_record + 1).0);
+                        }
                     }
+
+                    batch.extend(batch_response);
                 } else {
                     any_schema_change = true;
                 }
@@ -260,6 +325,32 @@ impl Topic {
             iter: iterator,
             batch,
         }
+    }
+
+    pub(crate) async fn get_records_from_all<'a, F, Fut>(
+        &'a self,
+        iterator: TopicIterator,
+        limit: RowLimit,
+        fetch: F,
+    ) -> TopicRecordResponse
+    where
+        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, RowLimit) -> Fut,
+        Fut: futures::Future<Output = LimitedBatch>,
+    {
+        self.iter_topic(iterator, limit, false, fetch).await
+    }
+
+    pub(crate) async fn get_records_from_all_reverse<'a, F, Fut>(
+        &'a self,
+        iterator: TopicIterator,
+        limit: RowLimit,
+        fetch: F,
+    ) -> TopicRecordResponse
+    where
+        F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, RowLimit) -> Fut,
+        Fut: futures::Future<Output = LimitedBatch>,
+    {
+        self.iter_topic(iterator, limit, true, fetch).await
     }
 
     #[cfg(test)]
@@ -300,7 +391,7 @@ mod test {
     {
         s.into_iter()
             .map(|(ts, is)| Record {
-                time: Utc.timestamp(ts, 0),
+                time: Utc.timestamp_opt(ts, 0).unwrap(),
                 message: is.into().into_bytes(),
             })
             .collect()
@@ -328,6 +419,16 @@ mod test {
         let name = old.name.clone();
         drop(old);
         Topic::attach(root, manifest, name, PartitionConfig::default()).await
+    }
+
+    /// quick and dirty transform to string vector
+    fn batch_to_vec(batch: LimitedBatch) -> Vec<String> {
+        batch
+            .into_legacy()
+            .unwrap()
+            .iter()
+            .map(|r| String::from_utf8(r.message.clone()).unwrap())
+            .collect::<Vec<_>>()
     }
 
     #[tokio::test]
@@ -398,7 +499,7 @@ mod test {
 
         topic.commit().await?;
 
-        let span = Utc.timestamp(5, 0)..=Utc.timestamp(18, 0);
+        let span = Utc.timestamp_opt(5, 0).unwrap()..=Utc.timestamp_opt(18, 0).unwrap();
 
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 0]).collect();
         // fetching two records will spill from partition-0, which has only one
@@ -568,6 +669,150 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_full_reverse_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+
+        let parts = 7;
+        assert!(records.len() % parts != 0);
+        let names: Vec<_> = (0..=parts)
+            .into_iter()
+            .map(|ix| format!("partition-{}", ix))
+            .collect();
+        for (ix, record) in records.iter().enumerate() {
+            topic
+                .extend_records(&names[ix % parts], &[record.clone()])
+                .await?;
+        }
+
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 11;
+        assert!(fetch_count % parts != 0);
+        assert!(records.len() % fetch_count != 0);
+        for _ in 0..records.len() {
+            let result = topic.get_records(it, RowLimit::records(fetch_count)).await;
+
+            if fetched.len() + fetch_count >= records.len() {
+                assert_limit_unreached(&result.batch.status);
+            } else {
+                assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
+            }
+            fetched.extend(result.batch.into_legacy().unwrap());
+            it = result.iter;
+        }
+        assert_eq!(
+            records.into_iter().collect::<HashSet<_>>(),
+            fetched.into_iter().collect::<HashSet<_>>()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_reverse_iteration_ordering() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let partitions = 4;
+        let records = 20;
+        // create small dataset with interleaved partition id's
+        let data: Vec<_> = (0..records)
+            .map(|i| (format!("r{}", i), format!("p{}", i % partitions)))
+            .collect();
+
+        for (record, part) in data {
+            topic
+                .extend_records(
+                    &part,
+                    &[Record {
+                        time: Utc::now(),
+                        message: record.into_bytes(),
+                    }],
+                )
+                .await?;
+        }
+
+        topic.commit().await?;
+
+        // verify first tranche
+        let result = topic
+            .get_records_reverse(HashMap::new(), RowLimit::records(5))
+            .await;
+        assert_eq!(
+            vec!["r19", "r15", "r11", "r7", "r3"],
+            batch_to_vec(result.batch)
+        );
+
+        //check iterator state
+        assert_eq!(partitions, result.iter.len());
+        assert_eq!(0, result.iter["p3"]);
+        assert_eq!(5, result.iter["p2"]);
+        assert_eq!(5, result.iter["p1"]);
+        assert_eq!(5, result.iter["p0"]);
+
+        // verify second tranche
+        let result = topic
+            .get_records_reverse(result.iter, RowLimit::records(5))
+            .await;
+        assert_eq!(
+            vec!["r18", "r14", "r10", "r6", "r2"],
+            batch_to_vec(result.batch)
+        );
+
+        // insert new data
+        topic
+            .extend_records(
+                "p4",
+                &[Record {
+                    time: Utc::now(),
+                    message: "r21".as_bytes().to_vec(),
+                }],
+            )
+            .await?;
+        topic
+            .extend_records(
+                "p2",
+                &[Record {
+                    time: Utc::now(),
+                    message: "r22".as_bytes().to_vec(),
+                }],
+            )
+            .await?;
+        topic.commit().await?;
+
+        // verify tranche spanning partitions
+        let result = topic
+            .get_records_reverse(result.iter, RowLimit::records(7))
+            .await;
+        assert_eq!(
+            vec!["r17", "r13", "r9", "r5", "r1", "r16", "r12"],
+            batch_to_vec(result.batch)
+        );
+
+        // check iterator state
+        assert_eq!(partitions, result.iter.len());
+        assert_eq!(0, result.iter["p3"]);
+        assert_eq!(0, result.iter["p2"]);
+        assert_eq!(0, result.iter["p1"]);
+        assert_eq!(3, result.iter["p0"]);
+
+        // verify final tranche
+        let result = topic
+            .get_records_reverse(result.iter, RowLimit::records(10))
+            .await;
+        assert_eq!(vec!["r8", "r4", "r0"], batch_to_vec(result.batch));
+
+        // verify new data is returned in new iterator
+        let result = topic
+            .get_records_reverse(HashMap::new(), RowLimit::records(1000))
+            .await;
+        assert_eq!(partitions + 1, result.iter.len());
+        assert_eq!(records + 2, result.batch.into_legacy().unwrap().len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_active_segments() -> Result<()> {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
@@ -583,7 +828,7 @@ mod test {
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
             .map(|message| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
@@ -661,7 +906,7 @@ mod test {
                     .clone()
                     .into_iter()
                     .map(|message| Record {
-                        time: Utc.timestamp(0, 0),
+                        time: Utc.timestamp_opt(0, 0).unwrap(),
                         message: format!("{{ \"data\": \"{}-{}\" }}", data, message).into_bytes(),
                     })
                     .collect();
@@ -670,7 +915,7 @@ mod test {
                 let mut prev = None;
                 use itermore::IterMore;
                 for rs in records.iter().cycle().take(total).chunks::<10000>() {
-                    let now = Utc.timestamp(0, 0);
+                    let now = Utc.timestamp_opt(0, 0).unwrap();
                     let rs: Vec<Record> = rs
                         .iter()
                         .cloned()

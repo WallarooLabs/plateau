@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use hdrhistogram::Histogram;
-use log::{info, debug, trace};
+use log::{debug, info, trace};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 use reqwest::Client;
 use serde_json::json;
@@ -326,7 +326,11 @@ async fn main() {
                 let p99 = Duration::from_millis(h.value_at_percentile(99.));
                 tx.send(format!(
                     "{:8} {:>8}/s | p50: {:>6?} p90: {:>6?} p99: {:>6?}",
-                    format!("({})", name), nps, p50, p90, p99
+                    format!("({})", name),
+                    nps,
+                    p50,
+                    p90,
+                    p99
                 ))
                 .unwrap();
             }
@@ -342,7 +346,10 @@ async fn main() {
             debug!("{}", up);
         }
 
-        let mut strings: Vec<_> = stat_updates.iter_mut().map(|up| up.borrow().clone()).collect();
+        let mut strings: Vec<_> = stat_updates
+            .iter_mut()
+            .map(|up| up.borrow().clone())
+            .collect();
         strings.sort();
         for up in strings {
             info!("{}", up);
