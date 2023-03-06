@@ -560,7 +560,7 @@ pub mod test {
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
             .map(|message| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
@@ -601,7 +601,7 @@ pub mod test {
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
             .map(|message| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
@@ -687,7 +687,7 @@ pub mod test {
         let records: Vec<_> = (0..(3 * 10))
             .into_iter()
             .map(|ix| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
@@ -771,7 +771,7 @@ pub mod test {
         let records: Vec<_> = (0..(3 * 10))
             .into_iter()
             .map(|ix| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
@@ -836,7 +836,7 @@ pub mod test {
         let mut records: Vec<_> = (0..(3 * 10))
             .into_iter()
             .map(|ix| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
             })
             .collect();
@@ -943,7 +943,7 @@ pub mod test {
             .into_iter()
             .enumerate()
             .map(|(ix, message)| Record {
-                time: Utc.timestamp(ix.try_into().unwrap(), 0),
+                time: Utc.timestamp_opt(ix.try_into().unwrap(), 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
@@ -1025,7 +1025,7 @@ pub mod test {
             .iter()
             .zip(times.iter())
             .map(|(message, ix)| Record {
-                time: Utc.timestamp(*ix, 0),
+                time: Utc.timestamp_opt(*ix, 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
@@ -1047,7 +1047,8 @@ pub mod test {
             let slice = Vec::from(&records[start..records.len()]);
             for query_start in time_range.clone() {
                 for query_end in query_start..=max_time {
-                    let query = Utc.timestamp(query_start, 0)..=Utc.timestamp(query_end, 0);
+                    let query = Utc.timestamp_opt(query_start, 0).unwrap()
+                        ..=Utc.timestamp_opt(query_end, 0).unwrap();
                     let values = slice
                         .iter()
                         .enumerate()

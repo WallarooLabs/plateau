@@ -149,7 +149,9 @@ impl SegmentWriter {
         let mut times = vec![];
         let mut messages = vec![];
         for r in record.drain(..) {
-            let dt = r.time.signed_duration_since(Utc.timestamp(0, 0));
+            let dt = r
+                .time
+                .signed_duration_since(Utc.timestamp_opt(0, 0).unwrap());
             times.push(dt.num_milliseconds());
             messages.push(ByteArray::from(r.message));
         }
@@ -338,7 +340,7 @@ impl SegmentReader {
                 .into_iter()
                 .zip(arrs.into_iter())
                 .map(|(tv, message)| {
-                    let time = Utc.timestamp(0, 0) + Duration::milliseconds(tv);
+                    let time = Utc.timestamp_opt(0, 0).unwrap() + Duration::milliseconds(tv);
                     Record {
                         time,
                         message: message.data().to_vec(),
@@ -384,7 +386,7 @@ pub mod test {
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
-            time: Utc.timestamp(ix, 0),
+            time: Utc.timestamp_opt(ix, 0).unwrap(),
             message: message.into_bytes(),
         })
         .collect()

@@ -526,7 +526,7 @@ mod test {
         let state = Manifest::attach(path).await;
         assert_eq!(state.get_max_segment(&id).await, None);
 
-        let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
+        let time = Utc.timestamp_opt(0, 0).unwrap()..=Utc.timestamp_opt(0, 0).unwrap();
         for ix in 0..10 {
             let time = time.clone();
             state
@@ -585,7 +585,7 @@ mod test {
         let a = PartitionId::new(topic, "a");
         let b = PartitionId::new(topic, "b");
 
-        let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
+        let time = Utc.timestamp_opt(0, 0).unwrap()..=Utc.timestamp_opt(0, 0).unwrap();
         for ix in 0..10 {
             let time = time.clone();
             state
@@ -655,7 +655,7 @@ mod test {
 
         let data = SegmentData {
             index: SegmentIndex(0),
-            time: Utc.timestamp(00, 0)..=Utc.timestamp(20, 0),
+            time: Utc.timestamp_opt(00, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),
             records: RecordIndex(0)..RecordIndex(15),
             size: 10,
         };
@@ -663,9 +663,18 @@ mod test {
         assert!(state.get_oldest_segment(None).await.is_none());
 
         for (p, time) in vec![
-            (&a, Utc.timestamp(10, 0)..=Utc.timestamp(20, 0)),
-            (&b, Utc.timestamp(5, 0)..=Utc.timestamp(20, 0)),
-            (&c, Utc.timestamp(7, 0)..=Utc.timestamp(20, 0)),
+            (
+                &a,
+                Utc.timestamp_opt(10, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),
+            ),
+            (
+                &b,
+                Utc.timestamp_opt(5, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),
+            ),
+            (
+                &c,
+                Utc.timestamp_opt(7, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),
+            ),
         ] {
             state
                 .update(
@@ -698,7 +707,7 @@ mod test {
         let state = Manifest::attach(path).await;
         assert_eq!(state.get_max_segment(&id).await, None);
 
-        let time = Utc.timestamp(0, 0)..=Utc.timestamp(0, 0);
+        let time = Utc.timestamp_opt(0, 0).unwrap()..=Utc.timestamp_opt(0, 0).unwrap();
         for ix in 0..10 {
             let time = time.clone();
             state
@@ -778,7 +787,8 @@ mod test {
             records: Range<usize>,
             times: RangeInclusive<i64>,
         ) {
-            let time = Utc.timestamp(*times.start(), 0)..=Utc.timestamp(*times.end(), 0);
+            let time = Utc.timestamp_opt(*times.start(), 0).unwrap()
+                ..=Utc.timestamp_opt(*times.end(), 0).unwrap();
             let records = RecordIndex(records.start)..RecordIndex(records.end);
             state
                 .update(
@@ -800,7 +810,8 @@ mod test {
             times: RangeInclusive<i64>,
             segments: Vec<usize>,
         ) {
-            let times = Utc.timestamp(*times.start(), 0)..=Utc.timestamp(*times.end(), 0);
+            let times = Utc.timestamp_opt(*times.start(), 0).unwrap()
+                ..=Utc.timestamp_opt(*times.end(), 0).unwrap();
             assert_eq!(
                 state
                     .stream_time_segments(id, RecordIndex(start), &times)

@@ -525,7 +525,7 @@ mod test {
         let records: Vec<_> = vec!["abc", "def", "ghi"]
             .into_iter()
             .map(|message| Record {
-                time: Utc.timestamp(0, 0),
+                time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: message.bytes().collect(),
             })
             .collect();
