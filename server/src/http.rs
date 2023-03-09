@@ -120,8 +120,12 @@ impl TestServer {
         })
     }
 
+    pub fn host(&self) -> String {
+        format!("{}:{}", self.addr.ip(), self.addr.port())
+    }
+
     pub fn base(&self) -> String {
-        format!("http://{}:{}", self.addr.ip(), self.addr.port())
+        format!("http://{}", self.host())
     }
 }
 
