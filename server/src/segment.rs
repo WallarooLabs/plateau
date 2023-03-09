@@ -492,6 +492,31 @@ pub mod test {
     }
 
     #[test]
+    fn schema_file_metadata() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(path);
+
+        let mut a = inferences_schema_a();
+        a.schema
+            .metadata
+            .insert("pipeline.name".to_string(), "pied-piper".to_string());
+        a.schema
+            .metadata
+            .insert("pipeline.version".to_string(), "3.1".to_string());
+        let mut w = s.create2(a.schema.clone())?;
+        w.log_arrow(a)?;
+        w.close()?;
+
+        let r = s.read2()?;
+        let (schema, _) = r.into_chunk_iter();
+        assert_eq!(schema.metadata.get("pipeline.name").unwrap(), "pied-piper");
+        assert_eq!(schema.metadata.get("pipeline.version").unwrap(), "3.1");
+
+        Ok(())
+    }
+
+    #[test]
     fn nested() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");

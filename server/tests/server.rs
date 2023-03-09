@@ -405,6 +405,47 @@ async fn topic_status_byte_limited() {
 }
 
 #[tokio::test]
+async fn stored_schema_metadata() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    let mut chunk_a = inferences_schema_a();
+
+    chunk_a
+        .schema
+        .metadata
+        .insert("pipeline.name".to_string(), "pied-piper".to_string());
+    chunk_a
+        .schema
+        .metadata
+        .insert("pipeline.version".to_string(), "3.1".to_string());
+
+    for _ in 0..10 {
+        chunk_append(
+            &client,
+            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+            chunk_a.clone(),
+        )
+        .await?;
+    }
+
+    // test record-limited request, should get 'RecordLimited' response and fewer results
+    let topic_url = topic_records_url(&server, &topic_name);
+    let (schema, _): (Schema, Vec<SegmentChunk>) = read_next_chunks(
+        &client,
+        topic_url.as_str(),
+        Some(json!({})),
+        29,
+        DataFocus::default(),
+    )
+    .await?;
+
+    assert_eq!(schema.metadata.get("pipeline.name").unwrap(), "pied-piper");
+    assert_eq!(schema.metadata.get("pipeline.version").unwrap(), "3.1");
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn topic_iterate_schema_change() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
