@@ -240,7 +240,7 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
                         partition_name,
                         &params,
                         Insert {
-                            records: vec![record.record],
+                            records: vec![record.record]
                         },
                     )
                     .await?

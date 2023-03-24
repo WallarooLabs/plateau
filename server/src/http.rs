@@ -25,6 +25,7 @@ use plateau_transport::{
 use crate::catalog::Catalog;
 use crate::http::chunk::SchemaChunkRequest;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
+use crate::manifest::Ordering;
 use crate::slog::{RecordIndex, SlogError};
 use crate::topic::Record;
 
@@ -262,10 +263,12 @@ async fn topic_iterate(
             .await
     } else if reverse {
         topic
-            .get_records_reverse(position, RowLimit::records(limit))
+            .get_records(position, RowLimit::records(limit), &Ordering::Reverse)
             .await
     } else {
-        topic.get_records(position, RowLimit::records(limit)).await
+        topic
+            .get_records(position, RowLimit::records(limit), &Ordering::Forward)
+            .await
     };
 
     let status = TopicIterationStatus {
@@ -312,7 +315,7 @@ async fn partition_get_records(
         topic
             .get_partition(&partition_name)
             .await
-            .get_records(start_record, limit)
+            .get_records(start_record, limit, &Ordering::Forward)
             .await
     };
 

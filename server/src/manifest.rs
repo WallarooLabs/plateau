@@ -24,6 +24,24 @@ use std::str::FromStr;
 
 use crate::slog::{RecordIndex, SegmentIndex};
 
+#[derive(PartialEq, Clone)]
+pub enum Ordering {
+    Forward,
+    Reverse,
+}
+impl Ordering {
+    fn to_sql_order(&self) -> &'static str {
+        match self {
+            Ordering::Forward => "ASC",
+            Ordering::Reverse => "DESC",
+        }
+    }
+
+    pub(crate) fn is_reverse(&self) -> bool {
+        self == &Ordering::Reverse
+    }
+}
+
 pub enum Scope<'a> {
     Global,
     Topic(&'a str),
@@ -209,16 +227,12 @@ impl Manifest {
             )
             .await
             .unwrap();
-            pool.execute("CREATE UNIQUE INDEX segments_segment_index ON segments(topic, partition, segment_index)")
-                .await
-                .unwrap();
+            pool.execute("CREATE UNIQUE INDEX segments_segment_index ON segments(topic, partition, segment_index)").await.unwrap();
             pool.execute("CREATE INDEX segments_start ON segments(topic, partition, record_start)")
                 .await
                 .unwrap();
 
-            pool.execute("CREATE INDEX segments_time_range ON segments(topic, partition, time_start, time_end)")
-                .await
-                .unwrap();
+            pool.execute("CREATE INDEX segments_time_range ON segments(topic, partition, time_start, time_end)").await.unwrap();
         }
         // TODO clear pending segments (size=NULL)
         Manifest { pool }
@@ -287,7 +301,11 @@ impl Manifest {
             .flatten()
     }
 
-    async fn get_ordered_segment(&self, id: &PartitionId, order: &str) -> Option<SegmentIndex> {
+    async fn get_ordered_segment(
+        &self,
+        id: &PartitionId,
+        order: &Ordering,
+    ) -> Option<SegmentIndex> {
         self.get_segment(
             sqlx::query(&format!(
                 "
@@ -295,7 +313,7 @@ impl Manifest {
                 WHERE topic = ?1 AND partition = ?2
                 ORDER BY segment_index {} LIMIT 1
             ",
-                order
+                order.to_sql_order()
             ))
             .bind(&id.topic)
             .bind(&id.partition),
@@ -331,32 +349,44 @@ impl Manifest {
 
     /// Find the segment with the highest index for a given partition.
     pub async fn get_max_segment(&self, id: &PartitionId) -> Option<SegmentIndex> {
-        self.get_ordered_segment(id, "DESC").await
+        self.get_ordered_segment(id, &Ordering::Reverse).await
     }
 
     /// Find the segment with the lowest index for a given partition.
     pub async fn get_min_segment(&self, id: &PartitionId) -> Option<SegmentIndex> {
-        self.get_ordered_segment(id, "ASC").await
+        self.get_ordered_segment(id, &Ordering::Forward).await
     }
 
     pub fn stream_segments<'a>(
         &'a self,
         id: &'a PartitionId,
         start: RecordIndex,
+        order: &Ordering,
     ) -> impl futures::Stream<Item = SegmentData> + 'a + Send {
-        sqlx::query(
-            "
+        let query = match order {
+            Ordering::Forward => {
+                "
                 SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
                 WHERE topic = ?1 AND partition = ?2 AND record_end > ?3
                 ORDER BY segment_index ASC
-            ",
-        )
-        .bind(&id.topic)
-        .bind(&id.partition)
-        .bind(start.to_row())
-        .map(row_to_segment_data)
-        .fetch_many(&self.pool)
-        .flat_map(|r| stream::iter(r.unwrap().right()))
+            "
+            }
+            Ordering::Reverse => {
+                "
+                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+                WHERE topic = ?1 AND partition = ?2 AND record_start < ?3
+                ORDER BY segment_index DESC
+            "
+            }
+        };
+
+        sqlx::query(query)
+            .bind(&id.topic)
+            .bind(&id.partition)
+            .bind(start.to_row())
+            .map(row_to_segment_data)
+            .fetch_many(&self.pool)
+            .flat_map(|r| stream::iter(r.unwrap().right()))
     }
 
     pub fn stream_time_segments<'a>(

@@ -15,6 +15,7 @@ arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/ma
     "compute_comparison",
     "compute_concatenate",
     "compute_filter",
+    "compute_sort",
     "io_parquet",
     "io_ipc",
     "io_ipc_read_async",

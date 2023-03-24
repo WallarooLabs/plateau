@@ -20,10 +20,10 @@
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
 use crate::chunk::{Schema, TimeRange};
-use crate::manifest::SegmentData;
+use crate::manifest::{Ordering, SegmentData};
 #[cfg(test)]
 use crate::segment::Record;
-use crate::segment::{CloseArrow, Segment, SegmentWriter2};
+use crate::segment::{CloseArrow, DoubleEndedChunkReader, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::{trace, warn};
@@ -190,7 +190,7 @@ impl Slog {
     ) -> Option<Record> {
         use crate::chunk::LegacyRecords;
 
-        self.iter_segment(segment)
+        self.iter_segment(segment, &Ordering::Forward)
             .await
             .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
             .nth(relative)
@@ -199,7 +199,8 @@ impl Slog {
     pub(crate) async fn iter_segment<'a>(
         &'a self,
         ix: SegmentIndex,
-    ) -> Box<dyn Iterator<Item = SchemaChunk<Schema>> + Send + 'a> {
+        order: &'a Ordering,
+    ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send + 'a> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
             return Box::new(std::iter::empty());
@@ -209,16 +210,15 @@ impl Slog {
             let schema = in_mem.schema.clone();
             // NOTE: the backing [Buffer] behind arrow2 arrays is actually
             // arc-ed, so this clone _should_ be relatively cheap.
-            return Box::new(
-                in_mem
-                    .chunks
-                    .clone()
-                    .into_iter()
-                    .map(move |chunk| SchemaChunk {
-                        schema: schema.clone(),
-                        chunk,
-                    }),
-            );
+            let mut chunks = in_mem.chunks.clone();
+            if order.is_reverse() {
+                chunks.reverse();
+            }
+
+            return Box::new(chunks.into_iter().map(move |chunk| SchemaChunk {
+                schema: schema.clone(),
+                chunk,
+            }));
         }
 
         let segment = self.get_segment(ix);
@@ -227,11 +227,18 @@ impl Slog {
             return Box::new(std::iter::empty());
         }
 
-        let (schema, iter) = segment.read2().unwrap().into_chunk_iter();
-        Box::new(iter.map(move |c| SchemaChunk {
-            schema: schema.clone(),
-            chunk: c.unwrap(),
-        }))
+        let reader = DoubleEndedChunkReader::open(segment.path()).unwrap();
+        if order.is_reverse() {
+            Box::new(reader.iter().rev().map(move |c| SchemaChunk {
+                schema: reader.schema.clone(),
+                chunk: c.unwrap(),
+            }))
+        } else {
+            Box::new(reader.iter().map(move |c| SchemaChunk {
+                schema: reader.schema.clone(),
+                chunk: c.unwrap(),
+            }))
+        }
     }
 
     pub(crate) async fn append(&self, data: SchemaChunk<Schema>) -> Checkpoint {
@@ -512,6 +519,34 @@ mod test {
     use chrono::{TimeZone, Utc};
     use std::path::PathBuf;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn reverse_chunks() {
+        // create a simple set of records
+        let foo = Record {
+            time: Default::default(),
+            message: "foo".as_bytes().to_vec(),
+        };
+        let bar = Record {
+            time: Default::default(),
+            message: "bar".as_bytes().to_vec(),
+        };
+        let baz = Record {
+            time: Default::default(),
+            message: "baz".as_bytes().to_vec(),
+        };
+        let set1 = LegacyRecords(vec![foo.clone(), bar.clone(), baz.clone()]);
+        let set2 = LegacyRecords(vec![foo, bar, baz]);
+
+        // extract the underlying chunk and reverse
+        let mut chunk: SchemaChunk<Schema> = set2.try_into().unwrap();
+        chunk.reverse_inner();
+        let set2 = LegacyRecords::try_from(chunk).unwrap();
+
+        assert_eq!(set1.0[0], set2.0[2]);
+        assert_eq!(set1.0[1], set2.0[1]);
+        assert_eq!(set1.0[2], set2.0[0]);
+    }
 
     #[tokio::test]
     async fn basic_sequencing() -> Result<()> {

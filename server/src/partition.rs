@@ -24,7 +24,7 @@ use crate::arrow2::compute::comparison::gt_eq_scalar;
 use crate::arrow2::scalar::PrimitiveScalar;
 use crate::chunk::{parse_time, IndexedChunk, Schema};
 use crate::limit::{LimitedBatch, RowLimit};
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, Ordering};
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
 use crate::retention::Retention;
 pub use crate::segment::Record;
@@ -32,11 +32,12 @@ pub use crate::slog::RecordIndex;
 use crate::slog::{SegmentIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::stream::{Stream, StreamExt};
+use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
 use log::{error, info, trace};
 use metrics::{counter, gauge};
+use plateau_transport::arrow2::compute::comparison::lt_scalar;
 use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -203,34 +204,59 @@ impl Partition {
         &'a self,
         stored: impl Stream<Item = SegmentData> + 'a + Send,
         state: &RwLockReadGuard<'a, State>,
-    ) -> impl Stream<Item = SegmentData> + 'a + Send {
-        let cached = state.messages.cached_segment_data().await;
+        order: &Ordering,
+    ) -> BoxStream<'a, SegmentData> {
+        let mut cached = state.messages.cached_segment_data().await;
+        if order.is_reverse() {
+            cached.reverse();
+        }
         let cached_segments: Vec<SegmentIndex> = cached.iter().map(|data| data.index).collect();
         // due to checkpoints, segment data for the active / pending segment may
         // already be stored in the manifest. we want to always only use
         // in-memory data as it is fresher.
-        stored
-            .take_while(move |data| future::ready(!cached_segments.contains(&data.index)))
-            .chain(stream::iter(cached.into_iter()))
+        match order {
+            Ordering::Forward => stored
+                .filter(move |data| future::ready(!cached_segments.contains(&data.index)))
+                .chain(stream::iter(cached.into_iter()))
+                .boxed(),
+            Ordering::Reverse => stream::iter(cached.into_iter())
+                .chain(
+                    stored
+                        .filter(move |data| future::ready(!cached_segments.contains(&data.index))),
+                )
+                .boxed(),
+        }
     }
 
-    pub(crate) async fn get_records(&self, start: RecordIndex, limit: RowLimit) -> LimitedBatch {
+    pub(crate) async fn get_records(
+        &self,
+        start: RecordIndex,
+        limit: RowLimit,
+        order: &Ordering,
+    ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
-            .stream_with_active(self.manifest.stream_segments(&self.id, start), &state)
+            .stream_with_active(
+                self.manifest.stream_segments(&self.id, start, order),
+                &state,
+                order,
+            )
             .await;
 
         let filter = |chunk: &IndexedChunk| {
             // TODO: ideally we'd be using slicing here instead; it's more
             // efficient. This is a straightforward port of the original code.
-            gt_eq_scalar(
-                chunk.indices(),
-                &PrimitiveScalar::from(Some(start.0 as i32)),
-            )
+            let i = chunk.indices();
+            let s = &PrimitiveScalar::from(Some(start.0 as i32));
+            if order.is_reverse() {
+                lt_scalar(i, s)
+            } else {
+                gt_eq_scalar(i, s)
+            }
         };
 
         state
-            .get_records_from_segments(limit, filter, segments)
+            .get_records_from_segments(limit, filter, segments, order)
             .await
     }
 
@@ -245,6 +271,7 @@ impl Partition {
             .stream_with_active(
                 self.manifest.stream_time_segments(&self.id, start, &times),
                 &state,
+                &Ordering::Forward,
             )
             .await;
 
@@ -262,13 +289,15 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments)
+            .get_records_from_segments(limit, filter, segments, &Ordering::Forward)
             .await
     }
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
-        let record_response = self.get_records(index, RowLimit::records(1)).await;
+        let record_response = self
+            .get_records(index, RowLimit::records(1), &Ordering::Forward)
+            .await;
 
         record_response
             .chunks
@@ -281,7 +310,7 @@ impl Partition {
                     ))
                     .unwrap()
             })
-            .flat_map(|indexed| indexed.into_legacy())
+            .flat_map(|indexed| indexed.into_legacy(&Ordering::Forward))
             .next()
     }
 
@@ -425,7 +454,8 @@ impl State {
         &'a self,
         limit: RowLimit,
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
-        indices: impl Stream<Item = SegmentData> + 'a + Send,
+        indices: impl Stream<Item = SegmentData> + 'a + Send + StreamExt,
+        order: &Ordering,
     ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
@@ -433,6 +463,7 @@ impl State {
         // `indices` of all segments that could possibly have said data. the
         // manifest tracks this information in a performant fashion.
         let mut batch = LimitedBatch::open(limit);
+
         // Feb 2022: this box / pin is necessary due to a bug in the rust
         // compiler. it has difficulty matching lifetimes across async fns and
         // closures. aggravated by using streams. issue with linked workaround:
@@ -449,15 +480,24 @@ impl State {
                     // pagination, so compute those while we have the relevant
                     // ranges easily accessible in `SegmentData`.
                     self.messages
-                        .iter_segment(segment.index)
+                        .iter_segment(segment.index, order)
                         .into_stream()
                         .flat_map(stream::iter)
                         .scan(
-                            segment.records.start.0,
-                            move |start: &mut usize, data: SchemaChunk<Schema>| {
+                            if order.is_reverse() {
+                                segment.records.end.0
+                            } else {
+                                segment.records.start.0
+                            },
+                            move |start: &mut usize, mut data: SchemaChunk<Schema>| {
                                 let index = RecordIndex(*start);
-                                *start += data.chunk.len();
-                                future::ready(Some(IndexedChunk::from_start(index, data)))
+                                if order.is_reverse() {
+                                    data.reverse_inner();
+                                    *start -= data.chunk.len();
+                                } else {
+                                    *start += data.chunk.len();
+                                }
+                                future::ready(Some(IndexedChunk::from_start(index, data, order)))
                             },
                         )
                 })
@@ -529,7 +569,7 @@ impl State {
 pub mod test {
     use super::*;
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
-    use crate::chunk::LegacyRecords;
+    use crate::chunk::{legacy_schema, LegacyRecords};
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
     use chrono::{TimeZone, Utc};
@@ -538,7 +578,9 @@ pub mod test {
     use tempfile::{tempdir, TempDir};
 
     pub(crate) fn deindex(is: Vec<IndexedChunk>) -> Vec<Record> {
-        is.into_iter().flat_map(|i| i.into_legacy()).collect()
+        is.into_iter()
+            .flat_map(|i| i.into_legacy(&Ordering::Forward))
+            .collect()
     }
 
     pub async fn partition(config: Config) -> Result<(TempDir, Partition)> {
@@ -547,6 +589,233 @@ pub mod test {
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
         Ok((dir, Partition::attach(root, manifest, id, config).await))
+    }
+
+    /// Insert N messages to the given partition
+    pub async fn init_records(partition: &Partition, n: usize) -> Result<()> {
+        let records: Vec<_> = (0..n)
+            .map(|i| Record {
+                time: Utc::now(),
+                message: format!("m{i}").into_bytes(),
+            })
+            .collect();
+
+        for record in records.iter() {
+            partition.extend_records(&[record.clone()]).await?;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_head_get() -> Result<()> {
+        let (_, partition) = partition(Config {
+            retain: Default::default(),
+            roll: Default::default(),
+        })
+        .await
+        .unwrap();
+        init_records(&partition, 10).await?;
+
+        let start = RecordIndex(0);
+        let result = partition
+            .get_records(
+                start,
+                RowLimit {
+                    max_records: 3,
+                    max_bytes: 100_000,
+                },
+                &Ordering::Forward,
+            )
+            .await
+            .chunks
+            .iter()
+            .map(|c| c.display_vec())
+            .flatten()
+            .collect::<Vec<String>>();
+
+        assert_eq!(["0: m0", "1: m1", "2: m2"], result.as_slice());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tail_get() -> Result<()> {
+        let (_, partition) = partition(Config {
+            retain: Default::default(),
+            roll: Default::default(),
+        })
+        .await
+        .unwrap();
+        init_records(&partition, 10).await?;
+
+        let result = partition
+            .get_records(
+                RecordIndex(7),
+                RowLimit {
+                    max_records: 3,
+                    max_bytes: 100_000,
+                },
+                &Ordering::Forward,
+            )
+            .await
+            .chunks
+            .iter()
+            .map(|c| c.display_vec())
+            .flatten()
+            .collect::<Vec<String>>();
+
+        assert_eq!(["7: m7", "8: m8", "9: m9"], result.as_slice());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_head_get_rev() -> Result<()> {
+        let (_, partition) = partition(Config {
+            retain: Default::default(),
+            roll: Default::default(),
+        })
+        .await
+        .unwrap();
+        init_records(&partition, 10).await?;
+
+        let result = partition
+            .get_records(
+                RecordIndex(3),
+                RowLimit {
+                    max_records: 3,
+                    max_bytes: 100_000,
+                },
+                &Ordering::Reverse,
+            )
+            .await
+            .chunks
+            .iter()
+            .map(|c| c.display_vec())
+            .flatten()
+            .collect::<Vec<String>>();
+
+        assert_eq!(["2: m2", "1: m1", "0: m0"], result.as_slice());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tail_get_rev() -> Result<()> {
+        let (_, partition) = partition(Config {
+            retain: Default::default(),
+            roll: Default::default(),
+        })
+        .await
+        .unwrap();
+        init_records(&partition, 10).await?;
+
+        let result = partition
+            .get_records(
+                RecordIndex(10),
+                RowLimit {
+                    max_records: 3,
+                    max_bytes: 100_000,
+                },
+                &Ordering::Reverse,
+            )
+            .await
+            .chunks
+            .iter()
+            .map(|c| c.display_vec())
+            .flatten()
+            .collect::<Vec<String>>();
+
+        assert_eq!(["9: m9", "8: m8", "7: m7"], result.as_slice());
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_can_trigger_double_panic() -> Result<()> {
+        let id = PartitionId::new("topic", "testing");
+        let dir = tempdir()?;
+        let root = PathBuf::from(dir.path());
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        let partition = Partition::attach(
+            root,
+            manifest,
+            id,
+            Config {
+                retain: Default::default(),
+                roll: Default::default(),
+            },
+        )
+        .await;
+
+        partition
+            .extend_records(&[Record {
+                time: Utc::now(),
+                message: "foo".to_string().into_bytes(),
+            }])
+            .await?;
+        partition.checkpoint().await;
+
+        drop(dir);
+
+        assert_eq!(1, 2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_get_multiple_segments_rev() -> Result<()> {
+        // create first segment and shut down
+        let (dir, partition) = partition(Config {
+            retain: Default::default(),
+            roll: Default::default(),
+        })
+        .await
+        .unwrap();
+        init_records(&partition, 5).await?;
+        partition.commit().await?;
+        drop(partition);
+        let id = PartitionId::new("topic", "testing");
+
+        // re-init and create second segment
+        let root = PathBuf::from(dir.path());
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        let partition = Partition::attach(
+            root,
+            manifest,
+            id,
+            Config {
+                retain: Default::default(),
+                roll: Default::default(),
+            },
+        )
+        .await;
+        init_records(&partition, 5).await?;
+
+        let result = partition
+            .get_records(
+                RecordIndex(10),
+                RowLimit {
+                    max_records: 1000,
+                    max_bytes: 100_000,
+                },
+                &Ordering::Reverse,
+            )
+            .await;
+        assert_eq!(10, result.chunks.len());
+
+        let r = result
+            .chunks
+            .iter()
+            .map(|c| c.display_vec())
+            .flatten()
+            .collect::<Vec<String>>();
+        assert_eq!(["9: m4", "8: m3", "7: m2", "6: m1", "5: m0"], r[0..5]);
+        assert_eq!(["4: m4", "3: m3", "2: m2", "1: m1", "0: m0"], r[5..10]);
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -630,9 +899,13 @@ pub mod test {
             let slice = Vec::from(&records[range.clone()]);
             assert_eq!(
                 deindex(
-                    t.get_records(RecordIndex(start), RowLimit::records(limit))
-                        .await
-                        .chunks
+                    t.get_records(
+                        RecordIndex(start),
+                        RowLimit::records(limit),
+                        &Ordering::Forward
+                    )
+                    .await
+                    .chunks
                 ),
                 slice
             );
@@ -665,7 +938,7 @@ pub mod test {
             )
             .await;
 
-        let mut chunk_slice = IndexedChunk::from_start(RecordIndex(0), chunk_a);
+        let mut chunk_slice = IndexedChunk::from_start(RecordIndex(0), chunk_a, &Ordering::Forward);
         chunk_slice.slice(2, 2);
         assert_eq!(result.chunks, vec![chunk_slice]);
 
@@ -734,7 +1007,9 @@ pub mod test {
 
         {
             let part = reattach(&dir, spec).await;
-            let result = part.get_records(RecordIndex(0), RowLimit::default()).await;
+            let result = part
+                .get_records(RecordIndex(0), RowLimit::default(), &Ordering::Forward)
+                .await;
 
             assert_eq!(SegmentChunk::from(result.chunks[0].clone()), chunk_a.chunk);
         }
@@ -756,7 +1031,9 @@ pub mod test {
             let part = reattach(&dir, spec).await;
 
             let start = RecordIndex(0);
-            let result = part.get_records(start, RowLimit::default()).await;
+            let result = part
+                .get_records(start, RowLimit::default(), &Ordering::Forward)
+                .await;
             assert_eq!(
                 format!("{:?}", SegmentChunk::from(result.chunks[0].clone())),
                 format!("{:?}", nested.chunk)
@@ -791,41 +1068,234 @@ pub mod test {
 
         {
             let part = reattach(&dir, spec).await;
+            let order = &Ordering::Forward;
 
             let start = RecordIndex(0);
-            let result = part.get_records(start, RowLimit::default()).await;
+            let result = part.get_records(start, RowLimit::default(), order).await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
                 vec![IndexedChunk::from_start(
                     start,
-                    SchemaChunk::try_from(LegacyRecords(records))?
+                    SchemaChunk::try_from(LegacyRecords(records))?,
+                    order
                 )]
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default()).await;
+            let result = part.get_records(start, RowLimit::default(), order).await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
                 vec![
-                    IndexedChunk::from_start(start, chunk_a.clone()),
-                    IndexedChunk::from_start(start + chunk_a.len(), chunk_a.clone())
+                    IndexedChunk::from_start(start, chunk_a.clone(), order),
+                    IndexedChunk::from_start(start + chunk_a.len(), chunk_a.clone(), order)
                 ]
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default()).await;
+            let result = part.get_records(start, RowLimit::default(), order).await;
             assert!(result.status.is_open());
             assert_eq!(
                 result.chunks,
-                vec![IndexedChunk::from_start(start, chunk_b.clone()),]
+                vec![IndexedChunk::from_start(start, chunk_b.clone(), order),]
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default()).await;
+            let result = part.get_records(start, RowLimit::default(), order).await;
             assert!(result.status.is_open());
             assert_eq!(result.chunks, vec![]);
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chunk_indexing() -> Result<()> {
+        let (_dir, part) = partition(Config::default()).await?;
+        let records = (0..6)
+            .into_iter()
+            .map(|i| Record {
+                time: Utc::now(),
+                message: format!("m{i}").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+
+        // create two small segments
+        part.extend_records(&records[0..3]).await.unwrap();
+        part.commit().await.unwrap();
+        part.extend_records(&records[3..6]).await.unwrap();
+        part.commit().await.unwrap();
+
+        let result = part
+            .get_records(RecordIndex(0), RowLimit::default(), &Ordering::Forward)
+            .await;
+        let msgs = result
+            .chunks
+            .iter()
+            .flat_map(|c| c.display_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ["0: m0", "1: m1", "2: m2", "3: m3", "4: m4", "5: m5"],
+            msgs.as_slice()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_chunk_indexing_rev() -> Result<()> {
+        let (_dir, part) = partition(Config::default()).await?;
+        let records = (0..6)
+            .into_iter()
+            .map(|i| Record {
+                time: Utc::now(),
+                message: format!("m{i}").into_bytes(),
+            })
+            .collect::<Vec<_>>();
+
+        // create two small segments
+        part.extend_records(&records[0..3]).await.unwrap();
+        part.commit().await.unwrap();
+        part.extend_records(&records[3..6]).await.unwrap();
+        part.commit().await.unwrap();
+
+        let result = part
+            .get_records(RecordIndex(6), RowLimit::default(), &Ordering::Reverse)
+            .await;
+        let msgs = result
+            .chunks
+            .iter()
+            .flat_map(|c| c.display_vec())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            ["5: m5", "4: m4", "3: m3", "2: m2", "1: m1", "0: m0"],
+            msgs.as_slice()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_schema_change_rev() -> Result<()> {
+        let records: Vec<_> = (0..30)
+            .into_iter()
+            .map(|ix| Record {
+                time: Utc.timestamp_opt(0, 0).unwrap(),
+                message: format!("record-{}", ix).into_bytes(),
+            })
+            .collect();
+
+        let chunk_a = inferences_schema_a();
+        let chunk_b = inferences_schema_b();
+
+        let (dir, part) = partition(Config::default()).await?;
+        let spec = {
+            part.extend_records(&records).await?;
+            part.extend(chunk_a.clone()).await?;
+            part.extend(chunk_a.clone()).await?;
+            part.extend(chunk_b.clone()).await?;
+            part.commit().await?;
+            to_spec(part)
+        };
+
+        {
+            let part = reattach(&dir, spec).await;
+
+            let part_len = part.readable_ids().await.unwrap().end.0;
+            assert_eq!(45, part_len);
+
+            // iterate schema A
+            let start = RecordIndex(part_len);
+            let result = part
+                .get_records(start, RowLimit::default(), &Ordering::Reverse)
+                .await;
+            assert_eq!(result.status, BatchStatus::SchemaChanged);
+            assert_eq!(result.schema.unwrap(), chunk_b.schema);
+            assert_eq!(
+                result.chunks.iter().map(|c| c.chunk.len()).sum::<usize>(),
+                5
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .first()
+                    .and_then(|indexed| indexed.start())
+                    .unwrap(),
+                RecordIndex(44)
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .last()
+                    .and_then(|indexed| indexed.end())
+                    .unwrap(),
+                RecordIndex(40)
+            );
+
+            // iterate schema B
+            let result = part
+                .get_records(
+                    result.chunks.last().unwrap().end().unwrap(),
+                    RowLimit::default(),
+                    &Ordering::Reverse,
+                )
+                .await;
+            assert_eq!(result.status, BatchStatus::SchemaChanged);
+            assert_eq!(result.schema.unwrap(), chunk_a.schema);
+            assert_eq!(
+                result.chunks.iter().map(|c| c.chunk.len()).sum::<usize>(),
+                10
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .first()
+                    .and_then(|indexed| indexed.start())
+                    .unwrap(),
+                RecordIndex(39)
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .last()
+                    .and_then(|indexed| indexed.end())
+                    .unwrap(),
+                RecordIndex(30)
+            );
+
+            // iterate legacy records
+            let result = part
+                .get_records(
+                    result.chunks.last().unwrap().end().unwrap(),
+                    RowLimit::default(),
+                    &Ordering::Reverse,
+                )
+                .await;
+            assert!(result.status.is_open());
+            assert_eq!(result.schema.unwrap(), legacy_schema());
+            assert_eq!(
+                result.chunks.iter().map(|c| c.chunk.len()).sum::<usize>(),
+                30
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .first()
+                    .and_then(|indexed| indexed.start())
+                    .unwrap(),
+                RecordIndex(29)
+            );
+            assert_eq!(
+                result
+                    .chunks
+                    .last()
+                    .and_then(|indexed| indexed.end())
+                    .unwrap(),
+                RecordIndex(0)
+            );
         }
 
         Ok(())
@@ -962,7 +1432,9 @@ pub mod test {
         }
 
         // fetch from start fast-forwards to first valid index
-        let result = t.get_records(RecordIndex(0), RowLimit::records(2)).await;
+        let result = t
+            .get_records(RecordIndex(0), RowLimit::records(2), &Ordering::Forward)
+            .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let start_index = result.chunks.first().unwrap().start().unwrap();
         assert_eq!(
@@ -971,7 +1443,9 @@ pub mod test {
         );
 
         // iterate through from start
-        let result = t.get_records(start_index, RowLimit::records(2)).await;
+        let result = t
+            .get_records(start_index, RowLimit::records(2), &Ordering::Forward)
+            .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(
@@ -979,7 +1453,9 @@ pub mod test {
             vec![records[3].clone(), records[4].clone()]
         );
 
-        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        let result = t
+            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(
@@ -987,12 +1463,16 @@ pub mod test {
             vec![records[5].clone(), records[6].clone()]
         );
 
-        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        let result = t
+            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .await;
         assert_limit_unreached(&result.status);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(deindex(result.chunks), vec![records[7].clone()]);
 
-        let result = t.get_records(next_index, RowLimit::records(2)).await;
+        let result = t
+            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .await;
         assert_limit_unreached(&result.status);
         assert_eq!(deindex(result.chunks), vec![]);
 
@@ -1093,6 +1573,7 @@ pub mod test {
                     max_records: 10,
                     max_bytes: 250,
                 },
+                &Ordering::Forward,
             )
             .await;
 
@@ -1113,6 +1594,7 @@ pub mod test {
                     max_records: 10,
                     max_bytes: 1,
                 },
+                &Ordering::Forward,
             )
             .await;
         assert_eq!(result.status, BatchStatus::BytesExceeded);

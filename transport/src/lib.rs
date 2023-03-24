@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
 
+use arrow2::array::PrimitiveArray;
+use arrow2::compute::take::take;
 use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
 use thiserror::Error;
@@ -175,8 +177,21 @@ pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone + PartialEq> {
     pub schema: S,
     pub chunk: SegmentChunk,
 }
-
 impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
+    pub fn reverse_inner(&mut self) {
+        let arrays = self.chunk.arrays().to_vec();
+        if !arrays.is_empty() {
+            // build a simple descending index
+            let l = arrays[0].len() as u64;
+            let idx = PrimitiveArray::from_vec((0..l).rev().collect());
+
+            // apply it to the arrays and replace the underlying chunk
+            let reversed: Vec<_> = arrays.iter().map(|a| take(&**a, &idx).unwrap()).collect();
+            let rev_segment = SegmentChunk::try_new(reversed).unwrap();
+            self.chunk = rev_segment;
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.chunk.len()
     }

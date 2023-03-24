@@ -34,7 +34,8 @@ use parquet::{
 };
 
 pub use crate::chunk::Record;
-use plateau_transport::{SchemaChunk, SegmentChunk};
+use plateau_transport::arrow2::io::parquet::read::RowGroupMetaData;
+use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
@@ -124,12 +125,11 @@ impl Segment {
     }
 
     pub(crate) fn validate(&self) -> bool {
-        self.read2().is_ok()
+        self.read_double_ended().is_ok()
     }
 
-    pub(crate) fn read2(&self) -> Result<SegmentReader2> {
-        let file = fs::File::open(&self.path)?;
-        SegmentReader2::new(file)
+    pub(crate) fn read_double_ended(&self) -> Result<DoubleEndedChunkReader> {
+        DoubleEndedChunkReader::open(self.path.as_path())
     }
 }
 
@@ -353,27 +353,96 @@ impl SegmentReader {
     }
 }
 
-pub(crate) struct SegmentReader2 {
-    reader: FileReader2<fs::File>,
-    schema: Schema,
+pub(crate) struct DoubleEndedChunkReader {
+    pub path: PathBuf,
+    pub schema: Schema,
+    metadata: arrow2::io::parquet::read::FileMetaData,
 }
-
-impl SegmentReader2 {
-    fn new(mut f: fs::File) -> Result<Self> {
+impl DoubleEndedChunkReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mut f = fs::File::open(path)?;
         let metadata = read_metadata(&mut f)?;
         let schema = infer_schema(&metadata)?;
 
-        Ok(SegmentReader2 {
-            reader: FileReader2::new(f, metadata.row_groups, schema.clone(), None, None, None),
+        Ok(Self {
+            path: path.to_path_buf(),
             schema,
+            metadata,
         })
     }
 
-    pub(crate) fn into_chunk_iter(self) -> (Schema, impl Iterator<Item = Result<SegmentChunk>>) {
-        (
-            self.schema,
-            self.reader.into_iter().map(|r| r.map_err(Into::into)),
-        )
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = Result<SegmentChunk>> {
+        let file = fs::File::open(self.path.clone()).unwrap();
+
+        let rev_idx = self.metadata.row_groups.len();
+        let fwd_rdr = FileReader2::new(
+            file,
+            self.metadata.row_groups.clone(),
+            self.schema.clone(),
+            None,
+            None,
+            None,
+        );
+
+        DoubleEndedChunkIterator {
+            path: self.path.clone(),
+            schema: self.schema.clone(),
+            row_groups: self.metadata.row_groups.clone(),
+            fwd_reader: fwd_rdr,
+            fwd_position: 0,
+            rev_position: rev_idx,
+        }
+    }
+}
+
+// must store path, as FileReader consumes file handles and is not rewindable, so every reverse
+// iteration must reopen the file handle (gross)
+pub(crate) struct DoubleEndedChunkIterator {
+    path: PathBuf,
+    schema: Schema,
+    row_groups: Vec<RowGroupMetaData>,
+    fwd_reader: FileReader2<fs::File>,
+    fwd_position: usize,
+    rev_position: usize,
+}
+// Forward iteration just wraps the standard FileReader implementation, with the addition of an internal
+// forward-read position and a check for overlap with a reverse read op
+impl Iterator for DoubleEndedChunkIterator {
+    type Item = Result<SegmentChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.fwd_position >= self.rev_position {
+            None
+        } else {
+            self.fwd_position += 1;
+            self.fwd_reader.next().map(|r| r.map_err(Into::into))
+        }
+    }
+}
+// Reverse iteration must track it's position as well, but since the underlying FileReader
+// cannot reverse/seek/rewind, we have to reinitialize and scan past all previous entries
+// on each step backward
+impl DoubleEndedIterator for DoubleEndedChunkIterator {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.rev_position <= self.fwd_position {
+            None
+        } else {
+            self.rev_position -= 1;
+            match fs::File::open(self.path.clone()) {
+                Ok(f) => {
+                    let mut rdr = FileReader2::new(
+                        f,
+                        self.row_groups.clone(),
+                        self.schema.clone(),
+                        None,
+                        None,
+                        None,
+                    );
+                    rdr.nth(self.rev_position).map(|r| r.map_err(Into::into))
+                }
+                Err(_) => None,
+            }
+        }
     }
 }
 
@@ -426,6 +495,53 @@ pub mod test {
     }
 
     #[test]
+    fn can_iter_forward_double_ended() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(path.clone());
+        let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+
+        let mut w = s.create()?;
+        for record in records.clone() {
+            w.log([record].to_vec())?;
+        }
+        let _ = w.close()?;
+
+        let reader = DoubleEndedChunkReader::open(path.as_path())?;
+
+        assert_eq!(
+            collect_records(reader.schema.clone(), reader.iter()),
+            records
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn can_iter_reverse_double_ended() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(path.clone());
+        let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+
+        let mut w = s.create()?;
+        for record in records.clone() {
+            w.log([record].to_vec())?;
+        }
+        let _ = w.close()?;
+
+        records.reverse();
+
+        let reader = DoubleEndedChunkReader::open(path.as_path())?;
+        //let result: Vec<_> = r.map(|i| i.unwrap()).collect();
+        //let (schema, iter) = r.into_chunk_iter();
+        assert_eq!(
+            collect_records(reader.schema.clone(), reader.iter().rev()),
+            records
+        );
+        Ok(())
+    }
+
+    #[test]
     fn round_trip1_2() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
@@ -442,9 +558,8 @@ pub mod test {
         let size = w.close()?;
         assert!(size > 0);
 
-        let r = s.read2()?;
-        let (schema, iter) = r.into_chunk_iter();
-        assert_eq!(collect_records(schema, iter), records);
+        let r = s.read_double_ended()?;
+        assert_eq!(collect_records(r.schema.clone(), r.iter()), records);
         Ok(())
     }
 
@@ -470,9 +585,8 @@ pub mod test {
         let size = w.close()?;
         assert!(size > 0);
 
-        let r = s.read2()?;
-        let (schema, iter) = r.into_chunk_iter();
-        assert_eq!(collect_records(schema, iter), records);
+        let r = s.read_double_ended()?;
+        assert_eq!(collect_records(r.schema.clone(), r.iter()), records);
         Ok(())
     }
 
@@ -508,10 +622,12 @@ pub mod test {
         w.log_arrow(a)?;
         w.close()?;
 
-        let r = s.read2()?;
-        let (schema, _) = r.into_chunk_iter();
-        assert_eq!(schema.metadata.get("pipeline.name").unwrap(), "pied-piper");
-        assert_eq!(schema.metadata.get("pipeline.version").unwrap(), "3.1");
+        let r = s.read_double_ended()?;
+        assert_eq!(
+            r.schema.metadata.get("pipeline.name").unwrap(),
+            "pied-piper"
+        );
+        assert_eq!(r.schema.metadata.get("pipeline.version").unwrap(), "3.1");
 
         Ok(())
     }

@@ -7,6 +7,7 @@ use crate::arrow2::chunk::Chunk;
 use crate::arrow2::compute::filter::filter_chunk;
 pub use crate::arrow2::datatypes::Schema;
 use crate::arrow2::datatypes::{DataType, Field, Metadata};
+use crate::manifest::Ordering;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
@@ -39,13 +40,18 @@ pub enum ChunkError {
 
 pub(crate) struct LegacyRecords(pub(crate) Vec<Record>);
 
-pub fn chunk_into_legacy(chunk: SegmentChunk) -> Vec<Record> {
-    LegacyRecords::try_from(SchemaChunk {
+pub fn chunk_into_legacy(chunk: SegmentChunk, order: &Ordering) -> Vec<Record> {
+    let mut records = LegacyRecords::try_from(SchemaChunk {
         schema: legacy_schema(),
         chunk,
     })
     .unwrap()
-    .0
+    .0;
+    if order.is_reverse() {
+        records.reverse();
+    }
+
+    records
 }
 
 pub fn parse_time(tv: i64) -> DateTime<Utc> {
@@ -273,14 +279,20 @@ pub(crate) struct IndexedChunk {
     pub(crate) inner_schema: Schema,
     pub(crate) chunk: SegmentChunk,
 }
-
 impl IndexedChunk {
-    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>) -> IndexedChunk {
+    pub(crate) fn from_start(
+        ix: RecordIndex,
+        data: SchemaChunk<Schema>,
+        order: &Ordering,
+    ) -> IndexedChunk {
         assert!(!data.chunk.arrays().is_empty());
         let start = ix.0 as i32;
         let size = data.chunk.len() as i32;
         let mut arrays = data.chunk.into_arrays();
-        let indices = PrimitiveArray::<i32>::from_values(start..(start + size));
+        let indices = match order {
+            Ordering::Forward => PrimitiveArray::from_values(start..(start + size)),
+            Ordering::Reverse => PrimitiveArray::from_values(((start - size)..start).rev()),
+        };
         arrays.push(indices.boxed());
         IndexedChunk {
             inner_schema: data.schema,
@@ -288,6 +300,33 @@ impl IndexedChunk {
         }
     }
 
+    #[cfg(test)]
+    /// Formats each message within an [IndexedChunk] as a series of Strings,
+    /// prefixed with the chunk index. If the record is not a [LegacyRecord]
+    /// or col 1 is not Utf8, returns an empty Vec.
+    pub fn display_vec(&self) -> Vec<String> {
+        let l = self.inner_schema.fields.len() as usize; // index is stored in an "unlisted" extra column
+        if self.inner_schema.fields[1].data_type == DataType::Utf8 {
+            let idx = (*self.chunk.arrays()[l])
+                .as_any()
+                .downcast_ref::<PrimitiveArray<i32>>()
+                .unwrap()
+                .values_iter();
+            return (*self.chunk.arrays()[1])
+                .as_any()
+                .downcast_ref::<Utf8Array<i32>>()
+                .unwrap()
+                .iter()
+                .map(|s| String::from_utf8(s.unwrap().bytes().collect()).unwrap())
+                .zip(idx)
+                .map(|(s, i)| format!("{i}: {s}"))
+                .collect::<Vec<String>>(); //.clone();
+        }
+        Default::default()
+    }
+
+    /// The absolute index of the first record in the chunk. For a chunk fetched/iterated
+    /// using [Ordering::Reverse], this will be the high index, otherwise it will be the low index.
     pub(crate) fn start(&self) -> Option<RecordIndex> {
         self.indices()
             .values()
@@ -296,6 +335,8 @@ impl IndexedChunk {
             .map(|i| RecordIndex(*i as usize))
     }
 
+    /// The absolute index of the last record in the chunk. For a chunk fetched/iterated
+    /// using [Ordering::Reverse], this will be the low index, otherwise it will be the high index.
     pub(crate) fn end(&self) -> Option<RecordIndex> {
         self.indices()
             .values()
@@ -341,8 +382,8 @@ impl IndexedChunk {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_legacy(self) -> Vec<Record> {
-        chunk_into_legacy(self.chunk)
+    pub(crate) fn into_legacy(self, order: &Ordering) -> Vec<Record> {
+        chunk_into_legacy(self.chunk, order)
     }
 }
 

@@ -138,6 +138,7 @@ dependencies = [
  "futures",
  "getrandom",
  "hash_hasher",
+ "hashbrown 0.12.3",
  "indexmap",
  "json-deserializer",
  "lexical-core",
