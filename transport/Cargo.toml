@@ -9,7 +9,7 @@ rust-version = "1.60"
 serde = "1"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/main-2022-q4", features = [
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/2023.2", features = [
     "compute_aggregate",
     "compute_cast",
     "compute_comparison",

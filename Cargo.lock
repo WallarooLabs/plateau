@@ -122,7 +122,7 @@ dependencies = [
 [[package]]
 name = "arrow2"
 version = "0.14.2"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/main-2022-q4#d2ec4663df6f592c1dfd3ddd9d8d367ec1b20006"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/2023.2#1626bd793a00aeece6029d0e84f35e460bae7b74"
 dependencies = [
  "ahash 0.8.3",
  "arrow-format",
