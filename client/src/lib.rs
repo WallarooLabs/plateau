@@ -457,8 +457,8 @@ mod tests {
             datatypes::{Field, Metadata},
         },
         ArrowSchema, DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery,
-        RecordStatus, Records, SchemaChunk, Span, Topic, TopicIterationQuery, TopicIterationReply,
-        TopicIterationStatus, Topics, CONTENT_TYPE_ARROW,
+        RecordStatus, Records, SchemaChunk, Span, Topic, TopicIterationOrder, TopicIterationQuery,
+        TopicIterationReply, TopicIterationStatus, Topics, CONTENT_TYPE_ARROW,
     };
     use tokio_util::io::ReaderStream;
 
@@ -610,7 +610,7 @@ mod tests {
             Expectation::matching(all_of![
                 request::method("POST"),
                 request::path("/topic/topic-1/records"),
-                request::query(url_decoded(contains(("limit", "4"))))
+                request::query(url_decoded(contains(("page_size", "4"))))
             ])
             .respond_with(json_encoded(TopicIterationReply {
                 records: vec!["message-1", "message-2", "message-3", "message-4"]
@@ -628,7 +628,7 @@ mod tests {
             Expectation::matching(all_of![
                 request::method("POST"),
                 request::path("/topic/topic-1/records"),
-                request::query(url_decoded(contains(("limit", "4")))),
+                request::query(url_decoded(contains(("page_size", "4")))),
                 request::body(json_decoded(eq(serde_json::json!({"part-1": 4}))))
             ])
             .respond_with(json_encoded(TopicIterationReply {
@@ -649,10 +649,10 @@ mod tests {
             .iterate_topic(
                 "topic-1",
                 &TopicIterationQuery {
-                    limit: Some(4),
+                    page_size: Some(4),
                     start_time: None,
                     end_time: None,
-                    reverse: Some(false),
+                    order: Some(TopicIterationOrder::Asc),
                     data_focus: DataFocus::default(),
                 },
                 &None,
@@ -678,10 +678,10 @@ mod tests {
             .iterate_topic(
                 "topic-1",
                 &TopicIterationQuery {
-                    limit: Some(4),
+                    page_size: Some(4),
                     start_time: None,
                     end_time: None,
-                    reverse: Some(false),
+                    order: Some(TopicIterationOrder::Asc),
                     data_focus: DataFocus::default(),
                 },
                 &Some(HashMap::from([("part-1".to_owned(), 4)])),

@@ -12,6 +12,7 @@
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
+use plateau_transport::TopicIterationOrder;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
@@ -39,6 +40,14 @@ impl Ordering {
 
     pub(crate) fn is_reverse(&self) -> bool {
         self == &Ordering::Reverse
+    }
+}
+impl From<TopicIterationOrder> for Ordering {
+    fn from(value: TopicIterationOrder) -> Self {
+        match value {
+            TopicIterationOrder::Asc => Ordering::Forward,
+            TopicIterationOrder::Desc => Ordering::Reverse,
+        }
     }
 }
 

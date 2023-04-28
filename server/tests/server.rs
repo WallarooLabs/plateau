@@ -167,7 +167,7 @@ async fn read_next_chunks(
     let mut response = client.post(url).json(&json!({}));
 
     if let Some(limit) = limit.into() {
-        response = response.query(&[("limit", limit)]);
+        response = response.query(&[("page_size", limit)]);
     }
 
     if focus.is_some() {
@@ -209,7 +209,7 @@ async fn fetch_topic_records(
 ) -> serde_json::Value {
     let mut response = client.post(url).json(&json!({}));
     if let Some(limit) = limit.into() {
-        response = response.query(&[("limit", limit)]);
+        response = response.query(&[("page_size", limit)]);
     }
     let result: serde_json::Value = response
         .send()
@@ -230,11 +230,10 @@ async fn fetch_partition_records(
 ) -> serde_json::Value {
     let mut response = client.get(url).json(&json!({})).query(&[("start", 0)]);
     if let Some(limit) = limit.into() {
-        response = response.query(&[("limit", limit)]);
+        response = response.query(&[("page_size", limit)]);
     }
-    let result: serde_json::Value = response
-        .send()
-        .await
+    let result = response.send().await;
+    let result: serde_json::Value = result
         .unwrap()
         .error_for_status()
         .unwrap()
@@ -614,7 +613,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let request = client
         .post(&topic_url)
         .json(&json!({}))
-        .query(&[("limit", 3)])
+        .query(&[("page_size", 3)])
         .query(&[("dataset[]", "inputs")])
         .query(&[("dataset[]", "outputs")])
         .query(&[("dataset.separator", ".")])
@@ -645,7 +644,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let request = client
         .post(&topic_url)
         .json(&json!({}))
-        .query(&[("limit", 100)])
+        .query(&[("page_size", 100)])
         .query(&[("dataset[]", "inputs")])
         .query(&[("dataset[]", "outputs")])
         .query(&[("dataset.separator", ".")])
@@ -663,7 +662,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let request = client
         .post(&topic_url)
         .json(status.get("next").unwrap())
-        .query(&[("limit", 100)])
+        .query(&[("page_size", 100)])
         .query(&[("dataset[]", "inputs")])
         .query(&[("dataset[]", "outputs")])
         .query(&[("dataset.separator", ".")])

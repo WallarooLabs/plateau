@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
@@ -11,7 +12,7 @@ use arrow2::{
     io::ipc::{read, write},
 };
 use rweb::Schema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
 
@@ -90,7 +91,7 @@ pub struct RecordQuery {
     pub start: usize,
     /// Number of records to return (defaults to 1000, maximum of 10000)
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
-    pub limit: Option<usize>,
+    pub page_size: Option<usize>,
     /// RFC3339 start time for records (defaults to earliest record)
     #[serde(rename = "time.start")]
     pub start_time: Option<String>,
@@ -115,15 +116,42 @@ pub enum RecordStatus {
     ByteLimited,
 }
 
+#[derive(Schema, Debug, Serialize, PartialEq)]
+pub enum TopicIterationOrder {
+    Asc,
+    Desc,
+}
+impl<'de> Deserialize<'de> for TopicIterationOrder {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        TopicIterationOrder::from_str(String::deserialize(deserializer)?.as_str())
+            .map_err(serde::de::Error::custom)
+    }
+}
+impl FromStr for TopicIterationOrder {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let r = match s.trim().to_ascii_lowercase().as_str() {
+            "asc" => Ok(TopicIterationOrder::Asc),
+            "desc" => Ok(TopicIterationOrder::Desc),
+            _ => Err("Order must be one of 'asc' or 'desc'"),
+        };
+        r
+    }
+}
+
 #[derive(Schema, Debug, Deserialize, Serialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
 pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
-    pub limit: Option<usize>,
+    pub page_size: Option<usize>,
     /// Use reverse iteration to work backwards through the topic
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
-    pub reverse: Option<bool>,
+    pub order: Option<TopicIterationOrder>,
     /// RFC3339 start time for records (defaults to earliest record)
     #[serde(rename = "time.start")]
     pub start_time: Option<String>,

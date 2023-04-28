@@ -19,7 +19,8 @@ use tracing::Instrument;
 
 use plateau_transport::{
     DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic,
-    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+    TopicIterationOrder, TopicIterationQuery, TopicIterationReply, TopicIterationStatus,
+    TopicIterator, Topics,
 };
 
 use crate::catalog::Catalog;
@@ -249,25 +250,21 @@ async fn topic_iterate(
     #[data] catalog: Catalog,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
-    let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
+    let page_size = std::cmp::min(query.page_size.unwrap_or(1000), 10000);
     let position = position.unwrap_or_default();
-    let reverse = query.reverse.unwrap_or(false);
+    let order: Ordering = query.order.unwrap_or(TopicIterationOrder::Asc).into();
 
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
-        if reverse {
+        if order == Ordering::Reverse {
             Err(warp::reject::custom(ErrorReply::InvalidQuery))?
         }
         topic
-            .get_records_by_time(position, times, RowLimit::records(limit))
-            .await
-    } else if reverse {
-        topic
-            .get_records(position, RowLimit::records(limit), &Ordering::Reverse)
+            .get_records_by_time(position, times, RowLimit::records(page_size))
             .await
     } else {
         topic
-            .get_records(position, RowLimit::records(limit), &Ordering::Forward)
+            .get_records(position, RowLimit::records(page_size), &order)
             .await
     };
 
@@ -302,20 +299,20 @@ async fn partition_get_records(
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
-    let limit = std::cmp::min(query.limit.unwrap_or(1000), 10000);
-    let limit = RowLimit::records(limit);
+    let page_size = std::cmp::min(query.page_size.unwrap_or(1000), 10000);
+    let page_size = RowLimit::records(page_size);
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_partition(&partition_name)
             .await
-            .get_records_by_time(start_record, times, limit)
+            .get_records_by_time(start_record, times, page_size)
             .await
     } else {
         topic
             .get_partition(&partition_name)
             .await
-            .get_records(start_record, limit, &Ordering::Forward)
+            .get_records(start_record, page_size, &Ordering::Forward)
             .await
     };
 
@@ -367,5 +364,30 @@ fn parse_time_range(
         Ok(start.with_timezone(&Utc)..=end.with_timezone(&Utc))
     } else {
         Err(warp::reject::custom(ErrorReply::InvalidQuery))
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use plateau_transport::{TopicIterationOrder, TopicIterationQuery};
+
+    #[test]
+    fn can_parse_order_query() {
+        use serde_qs as qs;
+
+        let q = qs::from_str::<TopicIterationQuery>("order=desc").unwrap();
+        assert_eq!(TopicIterationOrder::Desc, q.order.unwrap());
+
+        let q = qs::from_str::<TopicIterationQuery>("order=DESC").unwrap();
+        assert_eq!(TopicIterationOrder::Desc, q.order.unwrap());
+
+        let q = qs::from_str::<TopicIterationQuery>("order=Asc").unwrap();
+        assert_eq!(TopicIterationOrder::Asc, q.order.unwrap());
+
+        let q = qs::from_str::<TopicIterationQuery>("order=AsC").unwrap();
+        assert_eq!(TopicIterationOrder::Asc, q.order.unwrap());
+
+        let q = qs::from_str::<TopicIterationQuery>("").unwrap();
+        assert!(q.order.is_none());
     }
 }
