@@ -330,7 +330,7 @@ impl Iterate<TopicIterationReply> for Client {
 #[async_trait]
 impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
     /// Iterate over a topic, returning records in streaming format. The data stream should be
-    /// deserializeable into a [SchemaChunk<Schema>] format.
+    /// deserializeable into a [`SchemaChunk<Schema>`] format.
     async fn iterate_topic<'a>(
         &self,
         topic_name: impl AsRef<str> + Send,
@@ -347,7 +347,7 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
 
 #[async_trait]
 impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
-    /// Iterate over a topic, returning records in [SchemaChunk<Schema>] format.
+    /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
     async fn iterate_topic<'a>(
         &self,
         topic_name: impl AsRef<str> + Send,
@@ -402,7 +402,7 @@ impl Retrieve<Records> for Client {
 #[async_trait]
 impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
-    /// streaming format. This stream should be deserializable into a [SchemaChunk<Schema>].
+    /// streaming format. This stream should be deserializable into a [`SchemaChunk<Schema>`].
     async fn get_records(
         &self,
         topic_name: impl AsRef<str> + Send,
@@ -420,7 +420,7 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
 #[async_trait]
 impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
-    /// [SchemaChunk<Schema>] format.
+    /// [`SchemaChunk<Schema>`] format.
     async fn get_records(
         &self,
         topic_name: impl AsRef<str> + Send,
