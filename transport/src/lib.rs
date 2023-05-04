@@ -1,3 +1,4 @@
+use std::fmt::Formatter;
 use std::str::FromStr;
 use std::{
     borrow::Borrow,
@@ -116,8 +117,9 @@ pub enum RecordStatus {
     ByteLimited,
 }
 
-#[derive(Schema, Debug, Serialize, PartialEq)]
+#[derive(Schema, Default, Debug, Serialize, PartialEq)]
 pub enum TopicIterationOrder {
+    #[default]
     Asc,
     Desc,
 }
@@ -140,6 +142,14 @@ impl FromStr for TopicIterationOrder {
             _ => Err("Order must be one of 'asc' or 'desc'"),
         };
         r
+    }
+}
+impl std::fmt::Display for TopicIterationOrder {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TopicIterationOrder::Asc => f.write_str("asc"),
+            TopicIterationOrder::Desc => f.write_str("desc"),
+        }
     }
 }
 
