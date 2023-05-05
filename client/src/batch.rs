@@ -86,7 +86,9 @@ pub trait Batch: Sized {
     fn max_element_bytes(&self) -> usize;
 
     /// Extend this batch by adding all elements of `other` to the end.
-    fn extend(&mut self, other: Self);
+    /// Return the original batch if the batches cannot be combined
+    /// for any reason.
+    fn extend(&mut self, other: Self) -> Option<Self>;
 
     /// Create a subset of this batch with the given range indices.
     fn slice(&self, ixs: Range<usize>) -> Self;
@@ -101,8 +103,7 @@ pub trait Batch: Sized {
         let ok_len = self.len() + other.len() <= config.max_batch_size;
         let ok_bytes = self.bytes() + other.bytes() <= config.max_batch_bytes;
         if ok_len && ok_bytes {
-            self.extend(other);
-            None
+            self.extend(other)
         } else {
             trace!(
                 "extend rejected. {}",
@@ -283,41 +284,78 @@ mod tests {
 
     use parking_lot::Mutex;
 
-    impl Batch for Vec<String> {
+    // test when bibs and bobs cannot be combined
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum WidgetType {
+        Bib,
+        Bob,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct WidgetBatch {
+        widget_type: WidgetType,
+        widgets: Vec<String>,
+    }
+
+    impl Batch for WidgetBatch {
         fn key(&self) -> &str {
             "single-batch"
         }
 
         fn len(&self) -> usize {
-            self.len()
+            self.widgets.len()
         }
 
         fn bytes(&self) -> usize {
-            self.iter().map(|s| s.len()).sum()
+            self.widgets.iter().map(|s| s.len()).sum()
         }
 
         fn max_element_bytes(&self) -> usize {
-            self.iter().map(|s| s.len()).max().unwrap_or(1)
+            self.widgets.iter().map(|s| s.len()).max().unwrap_or(1)
         }
 
-        fn extend(&mut self, other: Self) {
-            Extend::extend(self, other);
+        fn extend(&mut self, other: Self) -> Option<Self> {
+            if self.widget_type == other.widget_type {
+                Extend::extend(&mut self.widgets, other.widgets);
+                None
+            } else {
+                Some(other)
+            }
         }
 
         fn slice(&self, ixs: Range<usize>) -> Self {
-            self[ixs].to_vec()
+            WidgetBatch {
+                widget_type: self.widget_type,
+                widgets: self.widgets[ixs].to_vec(),
+            }
+        }
+    }
+
+    impl WidgetBatch {
+        fn from_iter<S, I>(widget_type: WidgetType, into_iter: I) -> Self
+        where
+            I: IntoIterator<Item = S>,
+            S: AsRef<str>,
+        {
+            WidgetBatch {
+                widget_type,
+                widgets: into_iter
+                    .into_iter()
+                    .map(|s| String::from(s.as_ref()))
+                    .collect(),
+            }
         }
     }
 
     #[derive(Clone, Debug)]
     struct RecordReader {
-        sent: Arc<Mutex<Vec<Vec<String>>>>,
+        sent: Arc<Mutex<Vec<WidgetBatch>>>,
         expected: usize,
         waker: Arc<Mutex<Option<Waker>>>,
     }
 
     impl Future for RecordReader {
-        type Output = Vec<Vec<String>>;
+        type Output = Vec<WidgetBatch>;
 
         fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             if self.sent.lock().len() >= self.expected {
@@ -331,15 +369,15 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct RecordWriter {
-        sent: Arc<Mutex<Vec<Vec<String>>>>,
+        sent: Arc<Mutex<Vec<WidgetBatch>>>,
         waker: Arc<Mutex<Option<Waker>>>,
     }
 
     #[async_trait]
     impl BatchSender for RecordWriter {
-        type Batch = Vec<String>;
+        type Batch = WidgetBatch;
 
-        async fn send_batch(&self, _key: &str, batch: Vec<String>, _time: Instant) -> bool {
+        async fn send_batch(&self, _key: &str, batch: WidgetBatch, _time: Instant) -> bool {
             assert!(batch.len() > 0);
             let mut writer = self.sent.lock();
             writer.push(batch);
@@ -364,9 +402,9 @@ mod tests {
         (writer, reader)
     }
 
-    fn stringify(v: Vec<Vec<&str>>) -> Vec<Vec<String>> {
+    fn widgetify<S: AsRef<str>>(v: Vec<Vec<S>>) -> Vec<WidgetBatch> {
         v.into_iter()
-            .map(|i| i.into_iter().map(|s| String::from(s)).collect())
+            .map(|vs| WidgetBatch::from_iter(WidgetType::Bib, vs))
             .collect()
     }
 
@@ -383,13 +421,18 @@ mod tests {
         );
 
         for i in 0..5 {
-            transmission.send(vec![format!("event {}", i)]).unwrap();
+            transmission
+                .send(WidgetBatch::from_iter(
+                    WidgetType::Bib,
+                    vec![format!("event {}", i)],
+                ))
+                .unwrap();
         }
 
         let batches = reader.await;
         assert_eq!(
             batches,
-            stringify(vec![vec![
+            widgetify(vec![vec![
                 "event 0", "event 1", "event 2", "event 3", "event 4"
             ]])
         );
@@ -408,13 +451,18 @@ mod tests {
         );
 
         for i in 0..5 {
-            transmission.send(vec![format!("event {}", i)]).unwrap();
+            transmission
+                .send(WidgetBatch::from_iter(
+                    WidgetType::Bib,
+                    vec![format!("event {}", i)],
+                ))
+                .unwrap();
         }
 
         let batches = reader.await;
         assert_eq!(
             batches,
-            stringify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
+            widgetify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
         );
     }
 
@@ -431,13 +479,16 @@ mod tests {
         );
 
         transmission
-            .send((0..5).map(|i| format!("event {}", i)).collect())
+            .send(WidgetBatch::from_iter(
+                WidgetType::Bib,
+                (0..5).map(|i| format!("event {}", i)),
+            ))
             .unwrap();
 
         let batches = reader.await;
         assert_eq!(
             batches,
-            stringify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
+            widgetify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
         );
     }
 
@@ -454,13 +505,50 @@ mod tests {
         );
 
         for i in 0..5 {
-            transmission.send(vec![format!("event {}", i)]).unwrap();
+            transmission
+                .send(WidgetBatch::from_iter(
+                    WidgetType::Bib,
+                    vec![format!("event {}", i)],
+                ))
+                .unwrap();
         }
 
         let batches = reader.await;
         assert_eq!(
             batches,
-            stringify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
+            widgetify(vec![vec!["event 0", "event 1"], vec!["event 2", "event 3"]])
         );
+    }
+
+    #[tokio::test]
+    async fn test_widget_splits() {
+        let (writer, reader) = recorder(5);
+        let transmission = Transmission::start(
+            Handle::current(),
+            writer,
+            Options {
+                max_batch_bytes: 15,
+                ..Options::default()
+            },
+        );
+
+        let widgets: Vec<_> = (0..5)
+            .map(|i| {
+                let widget_type = if i % 2 == 0 {
+                    WidgetType::Bib
+                } else {
+                    WidgetType::Bob
+                };
+
+                WidgetBatch::from_iter(widget_type, vec![format!("event {}", i)])
+            })
+            .collect();
+
+        for batch in &widgets {
+            transmission.send(batch.clone()).unwrap();
+        }
+
+        let rx = reader.await;
+        assert_eq!(rx, widgets);
     }
 }
