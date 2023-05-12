@@ -120,18 +120,17 @@ pub struct InsertArrow {
     pub records_path: PathBuf,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Default)]
 pub enum OutputFormat {
-    Arrow { path: PathBuf },
-    Plaintext { path: PathBuf },
+    Arrow {
+        path: PathBuf,
+    },
+    Plaintext {
+        path: PathBuf,
+    },
+    #[default]
     Stdout,
     ArrowStdout,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Stdout
-    }
 }
 
 impl Display for OutputFormat {

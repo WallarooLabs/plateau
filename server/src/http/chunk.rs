@@ -195,7 +195,7 @@ pub(crate) fn to_reply(
             let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
             let options = write::WriteOptions { compression: None };
 
-            let mut writer = write::FileWriter::new(bytes, focused_schema, None, options);
+            let mut writer = write::FileWriter::new(bytes, focused_schema.clone(), None, options);
 
             writer.start().map_err(ErrorReply::Arrow)?;
             for chunk in iter {
@@ -208,6 +208,13 @@ pub(crate) fn to_reply(
                 hyper::Response::builder()
                     .header("Content-Type", CONTENT_TYPE_ARROW)
                     .status(StatusCode::OK)
+                    .header(
+                        "X-Iteration-Status",
+                        focused_schema
+                            .metadata
+                            .get("status")
+                            .unwrap_or(&"{}".to_string()),
+                    )
                     .body::<Body>(bytes.into())
                     .unwrap(),
             ))

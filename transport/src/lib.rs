@@ -21,6 +21,7 @@ use arrow2::array::PrimitiveArray;
 use arrow2::compute::take::take;
 use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
+use strum::{Display, EnumIter};
 use thiserror::Error;
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
@@ -105,7 +106,7 @@ pub struct RecordQuery {
 }
 
 /// Status of the record request query.
-#[derive(Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Display, Schema, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
 pub enum RecordStatus {
     /// All current records returned.
     All,
