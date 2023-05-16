@@ -23,10 +23,9 @@ use crate::arrow2::compute::comparison::eq_scalar;
 use crate::arrow2::compute::comparison::gt_eq_scalar;
 use crate::arrow2::scalar::PrimitiveScalar;
 use crate::chunk::{parse_time, IndexedChunk, Schema};
-use crate::limit::{LimitedBatch, RowLimit};
+use crate::limit::{LimitedBatch, Retention, Rolling, RowLimit};
 use crate::manifest::{Manifest, Ordering};
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
-use crate::retention::Retention;
 pub use crate::segment::Record;
 pub use crate::slog::RecordIndex;
 use crate::slog::{SegmentIndex, Slog};
@@ -43,27 +42,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{watch, RwLock, RwLockReadGuard};
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Rolling {
-    pub max_segment_size: usize,
-    pub max_segment_index: usize,
-    pub max_segment_duration: Option<Duration>,
-}
-
-impl Default for Rolling {
-    fn default() -> Self {
-        Rolling {
-            max_segment_size: 100 * 1024 * 1024,
-            max_segment_index: 100000,
-            max_segment_duration: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     pub retain: Retention,
     pub roll: Rolling,
@@ -341,7 +324,7 @@ impl Partition {
             "topic" => String::from(self.id.topic()),
             "partition" => String::from(self.id.partition())
         );
-        if size > retain.max_bytes {
+        if size > (retain.max_bytes.as_u64() as usize) {
             info!("over limit {}: current size is {}", self.id, size);
             return true;
         }
@@ -441,7 +424,7 @@ impl State {
                 return self.roll(partition).await;
             }
 
-            if data.size > roll.max_segment_size {
+            if data.size > (roll.max_segment_size.as_u64() as usize) {
                 info!("rolling {}: current size is {}", partition.id, data.size);
                 return self.roll(partition).await;
             }

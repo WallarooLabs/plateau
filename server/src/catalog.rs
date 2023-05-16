@@ -1,8 +1,9 @@
 //! The catalog indexes all currently attached topics.
 //! It is used to route reads and writes to the correct topic / partition.
+use crate::limit::Retention;
 use crate::manifest::Scope;
-use crate::retention::Retention;
 use ::log::{debug, info, trace, warn};
+use bytesize::ByteSize;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -12,11 +13,14 @@ use std::time::SystemTime;
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::manifest::Manifest;
-use crate::topic::{PartitionConfig, Topic};
+use crate::partition;
+use crate::topic::Topic;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Config {
     retain: Retention,
+    partition: partition::Config,
 }
 
 #[derive(Clone)]
@@ -29,14 +33,9 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    pub async fn attach(root: PathBuf) -> Self {
+    pub async fn attach(root: PathBuf, config: Config) -> Self {
         Catalog {
-            config: Config {
-                retain: Retention {
-                    max_bytes: 95 * 1024 * 1024 * 1024,
-                    ..Retention::default()
-                },
-            },
+            config,
             manifest: Manifest::attach(root.join("manifest.json")).await,
             root: Arc::new(root),
             topics: Arc::new(RwLock::new(HashMap::new())),
@@ -92,8 +91,8 @@ impl Catalog {
         trace!("end global retention check");
     }
 
-    async fn byte_size(&self) -> usize {
-        self.manifest.get_size(Scope::Global).await
+    async fn byte_size(&self) -> ByteSize {
+        ByteSize::b(self.manifest.get_size(Scope::Global).await as u64)
     }
 
     async fn over_retention_limit(&self) -> bool {
@@ -101,7 +100,7 @@ impl Catalog {
 
         let size = self.byte_size().await;
         debug!("catalog size: {}", size);
-        gauge!("stored_size_bytes", size as f64);
+        gauge!("stored_size_bytes", size.as_u64() as f64,);
         let over = size > retain.max_bytes;
 
         if over {
@@ -128,7 +127,7 @@ impl Catalog {
                     (*self.root).clone(),
                     self.manifest.clone(),
                     String::from(name),
-                    PartitionConfig::default(),
+                    self.config.partition.clone(),
                 )
                 .await;
                 write.insert(String::from(name), topic);
@@ -152,7 +151,7 @@ mod test {
     async fn catalog() -> (TempDir, Catalog) {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
-        (dir, Catalog::attach(root).await)
+        (dir, Catalog::attach(root, Default::default()).await)
     }
 
     #[tokio::test]
@@ -194,7 +193,7 @@ mod test {
     async fn test_retain() -> Result<()> {
         pretty_env_logger::init();
         let (_root, mut catalog) = catalog().await;
-        catalog.config.retain.max_bytes = 8000;
+        catalog.config.retain.max_bytes = ByteSize::b(8000);
 
         let data = "x".to_string().repeat(500);
 

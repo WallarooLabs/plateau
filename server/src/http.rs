@@ -5,7 +5,7 @@ use futures::future;
 
 use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Rejection, Reply};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use serde_qs;
 use std::net::SocketAddr;
@@ -35,6 +35,24 @@ mod error;
 
 use self::error::{emit_error, ErrorReply};
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    bind: SocketAddr,
+    max_append_bytes: u64,
+    max_page: RowLimit,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            bind: SocketAddr::from(([0, 0, 0, 0], 3030)),
+            max_append_bytes: 10240000,
+            max_page: RowLimit::default(),
+        }
+    }
+}
+
 trait FromRange {
     fn from_range(r: Range<RecordIndex>) -> Self;
 }
@@ -59,29 +77,27 @@ impl From<BatchStatus> for RecordStatus {
     }
 }
 
-pub async fn serve<I>(
-    addr: I,
+pub async fn serve(
+    config: Config,
     catalog: Catalog,
-) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>)
-where
-    I: Into<SocketAddr> + Send + 'static,
-{
+) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>) {
     let log = warp::log("plateau::http");
 
     let (spec, filter) = openapi::spec().build(move || {
         healthcheck(catalog.clone())
             .or(get_topics(catalog.clone()))
-            .or(topic_append(catalog.clone()))
-            .or(topic_iterate(catalog.clone()))
+            .or(warp::body::content_length_limit(config.max_append_bytes)
+                .and(topic_append(catalog.clone())))
+            .or(topic_iterate(catalog.clone(), config.max_page))
             .or(topic_get_partitions(catalog.clone()))
-            .or(partition_get_records(catalog))
+            .or(partition_get_records(catalog, config.max_page))
     });
 
     let server = rweb::serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error));
 
     // Ideally warp would have something like a `run_ephemeral`, but here we
     // are. it's only three lines to copy from Server::run
-    let (addr, fut) = server.bind_ephemeral(addr);
+    let (addr, fut) = server.bind_ephemeral(config.bind);
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, "listening on http://{}", addr);
 
@@ -106,10 +122,14 @@ impl TestServer {
         let (end_tx, mut end_rx) = mpsc::channel(1);
         let temp = tempdir()?;
         let root = PathBuf::from(temp.path());
-        let catalog = Catalog::attach(root).await;
+        let catalog = Catalog::attach(root, Default::default()).await;
 
         let serve_catalog = catalog.clone();
-        let (addr, server) = serve(([127, 0, 0, 1], 0), serve_catalog).await;
+        let config = Config {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            ..Config::default()
+        };
+        let (addr, server) = serve(config, serve_catalog).await;
         tokio::spawn(async move {
             future::select(Box::pin(end_rx.recv()), server).await;
         });
@@ -162,7 +182,6 @@ async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection>
 
 #[post("/topic/{topic_name}/partition/{partition_name}")]
 #[openapi(id = "topic.append")]
-#[body_size(max = "10240000")]
 async fn topic_append(
     topic_name: String,
     partition_name: String,
@@ -248,9 +267,10 @@ async fn topic_iterate(
     #[filter = "accept"] content: Option<String>,
     #[json] position: Option<TopicIterator>,
     #[data] catalog: Catalog,
+    #[data] max_page: RowLimit,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
-    let page_size = std::cmp::min(query.page_size.unwrap_or(1000), 10000);
+    let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let position = position.unwrap_or_default();
     let order: Ordering = query.order.unwrap_or(TopicIterationOrder::Asc).into();
 
@@ -259,13 +279,9 @@ async fn topic_iterate(
         if order == Ordering::Reverse {
             Err(warp::reject::custom(ErrorReply::InvalidQuery))?
         }
-        topic
-            .get_records_by_time(position, times, RowLimit::records(page_size))
-            .await
+        topic.get_records_by_time(position, times, page_size).await
     } else {
-        topic
-            .get_records(position, RowLimit::records(page_size), &order)
-            .await
+        topic.get_records(position, page_size, &order).await
     };
 
     let status = TopicIterationStatus {
@@ -296,11 +312,11 @@ async fn partition_get_records(
     #[filter = "nonstrict_query"] query: RecordQuery,
     #[filter = "accept"] content: Option<String>,
     #[data] catalog: Catalog,
+    #[data] max_page: RowLimit,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
-    let page_size = std::cmp::min(query.page_size.unwrap_or(1000), 10000);
-    let page_size = RowLimit::records(page_size);
+    let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic

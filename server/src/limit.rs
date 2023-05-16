@@ -1,9 +1,47 @@
 use crate::chunk::{estimate_size, iter_legacy, IndexedChunk, Record, Schema};
+use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
+
+use std::time::Duration;
 
 use plateau_transport::SegmentChunk;
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Retention {
+    pub max_segment_count: Option<usize>,
+    pub max_bytes: ByteSize,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Retention {
+            max_segment_count: Some(10000),
+            max_bytes: ByteSize::gib(1),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Rolling {
+    pub max_segment_size: ByteSize,
+    pub max_segment_index: usize,
+    pub max_segment_duration: Option<Duration>,
+}
+
+impl Default for Rolling {
+    fn default() -> Self {
+        Rolling {
+            max_segment_size: ByteSize::mib(100),
+            max_segment_index: 100000,
+            max_segment_duration: None,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(default)]
 pub struct RowLimit {
     pub max_records: usize,
     pub max_bytes: usize,
@@ -43,6 +81,13 @@ impl RowLimit {
                     max_bytes: self.max_bytes - bytes,
                 },
             }
+        }
+    }
+
+    pub fn min(self, other: RowLimit) -> Self {
+        RowLimit {
+            max_records: std::cmp::min(self.max_records, other.max_records),
+            max_bytes: std::cmp::min(self.max_bytes, other.max_bytes),
         }
     }
 }

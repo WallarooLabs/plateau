@@ -1,10 +1,10 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
 use crate::chunk::{LegacyRecords, Schema};
+pub use crate::limit::Rolling;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::{Manifest, Ordering};
 pub use crate::partition::Config as PartitionConfig;
-pub use crate::partition::Rolling;
 use crate::partition::{Partition, PartitionId};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
@@ -328,8 +328,9 @@ impl Topic {
 mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
+    use crate::limit::Retention;
     use crate::partition::test::{assert_limit_unreached, deindex};
-    use crate::retention::Retention;
+    use bytesize::ByteSize;
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::convert::TryFrom;
@@ -1000,7 +1001,7 @@ mod test {
                     String::from("testing"),
                     PartitionConfig {
                         retain: Retention {
-                            max_bytes: 50 * 1024 * 1024,
+                            max_bytes: ByteSize::mib(50),
                             ..Retention::default()
                         },
                         ..PartitionConfig::default()
