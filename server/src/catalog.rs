@@ -75,7 +75,7 @@ impl Catalog {
     }
 
     pub async fn retain(&self) {
-        info!("begin global retention check");
+        trace!("begin global retention check");
         while self.over_retention_limit().await {
             // errors in here are effectively unrecoverable as the loop would otherwise spin.
             // additionally, the disk will eventually fill leading to system failure
@@ -89,7 +89,7 @@ impl Catalog {
             let partition = topic.get_partition(oldest.partition()).await;
             partition.remove_oldest().await;
         }
-        info!("end global retention check");
+        trace!("end global retention check");
     }
 
     async fn byte_size(&self) -> usize {
@@ -101,8 +101,14 @@ impl Catalog {
 
         let size = self.byte_size().await;
         debug!("catalog size: {}", size);
-        gauge!("stored_size_bytes", size as f64,);
-        size > retain.max_bytes
+        gauge!("stored_size_bytes", size as f64);
+        let over = size > retain.max_bytes;
+
+        if over {
+            info!("over retention limit {} > {}", size, retain.max_bytes);
+        }
+
+        over
     }
 
     pub async fn list_topics(&self) -> Vec<String> {
