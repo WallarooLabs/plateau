@@ -1,5 +1,6 @@
 use crate::arrow2::error::Error as ArrowError;
 use plateau_transport::{ErrorMessage, PathError};
+use rweb::reject::PayloadTooLarge;
 use rweb::*;
 use std::convert::Infallible;
 use warp::http::StatusCode;
@@ -49,10 +50,23 @@ pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible>
             StatusCode::INTERNAL_SERVER_ERROR,
             "no heartbeat".to_string(),
         ),
-        Some(ErrorReply::Unknown) | None => (
+        Some(ErrorReply::Unknown) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "unknown error".to_string(),
         ),
+        None => {
+            if err.find::<PayloadTooLarge>().is_some() {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "payload too large".to_string(),
+                )
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "unknown error".to_string(),
+                )
+            }
+        }
     };
 
     let json = warp::reply::json(&ErrorMessage {

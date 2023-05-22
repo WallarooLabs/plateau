@@ -34,8 +34,6 @@ impl FromRequest for SchemaChunkRequest {
     type Filter = BoxedFilter<(SchemaChunkRequest,)>;
 
     fn new() -> Self::Filter {
-        let limit = body::content_length_limit(1024 * 1024);
-
         let time = query().and_then(|query: InsertQuery| async move {
             if let Some(s) = query.time {
                 if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
@@ -48,24 +46,22 @@ impl FromRequest for SchemaChunkRequest {
             }
         });
 
-        let json =
-            limit
-                .and(body::json())
-                .and(time)
-                .and_then(|insert: Insert, time: _| async move {
-                    let records: Vec<_> = insert
-                        .records
-                        .into_iter()
-                        .map(|m| Record {
-                            time,
-                            message: m.into_bytes(),
-                        })
-                        .collect();
+        let json = body::json()
+            .and(time)
+            .and_then(|insert: Insert, time: _| async move {
+                let records: Vec<_> = insert
+                    .records
+                    .into_iter()
+                    .map(|m| Record {
+                        time,
+                        message: m.into_bytes(),
+                    })
+                    .collect();
 
-                    SchemaChunk::try_from(LegacyRecords(records))
-                        .map_err(|_| reject::custom(ErrorReply::BadEncoding))
-                        .map(SchemaChunkRequest)
-                });
+                SchemaChunk::try_from(LegacyRecords(records))
+                    .map_err(|_| reject::custom(ErrorReply::BadEncoding))
+                    .map(SchemaChunkRequest)
+            });
 
         let content_type = header::<String>("content-type").and_then(|content_type| async move {
             if content_type == CONTENT_TYPE_ARROW {
@@ -75,26 +71,24 @@ impl FromRequest for SchemaChunkRequest {
             }
         });
 
-        let chunk =
-            limit
-                .and(content_type)
-                .and(body::bytes())
-                .and_then(|_, bytes: Bytes| async move {
-                    let mut cursor = Cursor::new(bytes);
-                    let metadata = read::read_file_metadata(&mut cursor)
-                        .map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
-                    let schema = metadata.schema.clone();
-                    let mut reader = read::FileReader::new(cursor, metadata, None, None);
-                    if let Some(chunk) = reader.next() {
-                        let chunk = chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
-                        Ok(SchemaChunkRequest(
-                            new_schema_chunk(schema, chunk)
-                                .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
-                        ))
-                    } else {
-                        Err(reject::custom(ErrorReply::EmptyBody))
-                    }
-                });
+        let chunk = content_type
+            .and(body::bytes())
+            .and_then(|_, bytes: Bytes| async move {
+                let mut cursor = Cursor::new(bytes);
+                let metadata = read::read_file_metadata(&mut cursor)
+                    .map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
+                let schema = metadata.schema.clone();
+                let mut reader = read::FileReader::new(cursor, metadata, None, None);
+                if let Some(chunk) = reader.next() {
+                    let chunk = chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
+                    Ok(SchemaChunkRequest(
+                        new_schema_chunk(schema, chunk)
+                            .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
+                    ))
+                } else {
+                    Err(reject::custom(ErrorReply::EmptyBody))
+                }
+            });
 
         json.or(chunk).unify().boxed()
     }

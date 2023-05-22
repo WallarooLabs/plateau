@@ -38,9 +38,9 @@ use self::error::{emit_error, ErrorReply};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    bind: SocketAddr,
-    max_append_bytes: u64,
-    max_page: RowLimit,
+    pub bind: SocketAddr,
+    pub max_append_bytes: u64,
+    pub max_page: RowLimit,
 }
 
 impl Default for Config {
@@ -119,16 +119,21 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn new() -> Result<Self> {
+        let config = Config {
+            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+            ..Config::default()
+        };
+
+        Self::new_with_config(config).await
+    }
+
+    pub async fn new_with_config(config: Config) -> Result<Self> {
         let (end_tx, mut end_rx) = mpsc::channel(1);
         let temp = tempdir()?;
         let root = PathBuf::from(temp.path());
         let catalog = Catalog::attach(root, Default::default()).await;
 
         let serve_catalog = catalog.clone();
-        let config = Config {
-            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-            ..Config::default()
-        };
         let (addr, server) = serve(config, serve_catalog).await;
         tokio::spawn(async move {
             future::select(Box::pin(end_rx.recv()), server).await;
