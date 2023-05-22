@@ -34,7 +34,6 @@ use parquet::{
 };
 
 pub use crate::chunk::Record;
-use plateau_transport::arrow2::io::parquet::read::RowGroupMetaData;
 use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};
 
 // these are incomplete; they are currently only used in testing
@@ -385,28 +384,23 @@ impl DoubleEndedChunkReader {
         );
 
         DoubleEndedChunkIterator {
-            path: self.path.clone(),
-            schema: self.schema.clone(),
-            row_groups: self.metadata.row_groups.clone(),
             fwd_reader: fwd_rdr,
             fwd_position: 0,
             rev_position: rev_idx,
+            chunks: vec![],
+            full_read: false,
         }
     }
 }
 
-// must store path, as FileReader consumes file handles and is not rewindable, so every reverse
-// iteration must reopen the file handle (gross)
+/// Reads chunks in forward or reverse order, with lazy caching of chunk data
 pub(crate) struct DoubleEndedChunkIterator {
-    path: PathBuf,
-    schema: Schema,
-    row_groups: Vec<RowGroupMetaData>,
     fwd_reader: FileReader2<fs::File>,
     fwd_position: usize,
     rev_position: usize,
+    chunks: Vec<Option<SegmentChunk>>,
+    full_read: bool,
 }
-// Forward iteration just wraps the standard FileReader implementation, with the addition of an internal
-// forward-read position and a check for overlap with a reverse read op
 impl Iterator for DoubleEndedChunkIterator {
     type Item = Result<SegmentChunk>;
 
@@ -415,33 +409,45 @@ impl Iterator for DoubleEndedChunkIterator {
             None
         } else {
             self.fwd_position += 1;
-            self.fwd_reader.next().map(|r| r.map_err(Into::into))
+            if self.chunks.len() < self.fwd_position {
+                match self.fwd_reader.next() {
+                    Some(r) => self.chunks.push(r.ok()),
+                    None => {
+                        // we reached the end of the segment
+                        self.full_read = true;
+                        return None;
+                    }
+                }
+            }
+
+            Some(self.chunks[self.fwd_position - 1].clone().ok_or_else(|| {
+                arrow2::error::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "chunk read failure",
+                ))
+                .into()
+            }))
         }
     }
 }
-// Reverse iteration must track it's position as well, but since the underlying FileReader
-// cannot reverse/seek/rewind, we have to reinitialize and scan past all previous entries
-// on each step backward
 impl DoubleEndedIterator for DoubleEndedChunkIterator {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.rev_position <= self.fwd_position {
             None
         } else {
-            self.rev_position -= 1;
-            match fs::File::open(self.path.clone()) {
-                Ok(f) => {
-                    let mut rdr = FileReader2::new(
-                        f,
-                        self.row_groups.clone(),
-                        self.schema.clone(),
-                        None,
-                        None,
-                        None,
-                    );
-                    rdr.nth(self.rev_position).map(|r| r.map_err(Into::into))
-                }
-                Err(_) => None,
+            if !self.full_read {
+                let fwd = self.fwd_position;
+                let _ = self.into_iter().collect::<Vec<_>>();
+                self.fwd_position = fwd;
             }
+            self.rev_position -= 1;
+            Some(self.chunks[self.rev_position].clone().ok_or_else(|| {
+                arrow2::error::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "chunk read failure",
+                ))
+                .into()
+            }))
         }
     }
 }
