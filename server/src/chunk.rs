@@ -395,7 +395,7 @@ impl From<IndexedChunk> for SegmentChunk {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, bench))]
 pub mod test {
     use super::*;
     use crate::arrow2::{

@@ -218,7 +218,14 @@ impl Manifest {
                     .create_if_missing(true),
             )
             .await
-            .unwrap();
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Could not open manifest: {e} {:?}",
+                    // attempt to write a new file to get a more detailed error,
+                    // e.g. out of file handles, permissions, etc
+                    std::fs::File::create(path.join(".test")).err()
+                );
+            });
         if !prior {
             pool.execute(
                 "CREATE TABLE segments (

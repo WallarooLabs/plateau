@@ -17,6 +17,7 @@ use tempfile::{tempdir, TempDir};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
+use crate::config::PlateauConfig;
 use plateau_transport::{
     DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic,
     TopicIterationOrder, TopicIterationQuery, TopicIterationReply, TopicIterationStatus,
@@ -78,26 +79,29 @@ impl From<BatchStatus> for RecordStatus {
 }
 
 pub async fn serve(
-    config: Config,
+    config: PlateauConfig,
     catalog: Catalog,
 ) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>) {
     let log = warp::log("plateau::http");
+    let http = config.http.clone();
 
     let (spec, filter) = openapi::spec().build(move || {
-        healthcheck(catalog.clone())
+        healthcheck(catalog.clone(), config.clone())
             .or(get_topics(catalog.clone()))
-            .or(warp::body::content_length_limit(config.max_append_bytes)
-                .and(topic_append(catalog.clone())))
-            .or(topic_iterate(catalog.clone(), config.max_page))
+            .or(
+                warp::body::content_length_limit(config.http.max_append_bytes)
+                    .and(topic_append(catalog.clone())),
+            )
+            .or(topic_iterate(catalog.clone(), config.http.max_page))
             .or(topic_get_partitions(catalog.clone()))
-            .or(partition_get_records(catalog, config.max_page))
+            .or(partition_get_records(catalog, config.http.max_page))
     });
 
     let server = rweb::serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error));
 
     // Ideally warp would have something like a `run_ephemeral`, but here we
     // are. it's only three lines to copy from Server::run
-    let (addr, fut) = server.bind_ephemeral(config.bind);
+    let (addr, fut) = server.bind_ephemeral(http.bind);
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, "listening on http://{}", addr);
 
@@ -119,15 +123,18 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn new() -> Result<Self> {
-        let config = Config {
-            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-            ..Config::default()
+        let config = PlateauConfig {
+            http: Config {
+                bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+                ..Config::default()
+            },
+            ..PlateauConfig::default()
         };
 
         Self::new_with_config(config).await
     }
 
-    pub async fn new_with_config(config: Config) -> Result<Self> {
+    pub async fn new_with_config(config: PlateauConfig) -> Result<Self> {
         let (end_tx, mut end_rx) = mpsc::channel(1);
         let temp = tempdir()?;
         let root = PathBuf::from(temp.path());
@@ -164,10 +171,13 @@ impl Drop for TestServer {
 
 #[get("/ok")]
 #[openapi(id = "healthcheck")]
-async fn healthcheck(#[data] catalog: Catalog) -> Result<Json<serde_json::Value>, Rejection> {
+async fn healthcheck(
+    #[data] catalog: Catalog,
+    #[data] config: PlateauConfig,
+) -> Result<Json<serde_json::Value>, Rejection> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
     let healthy = duration
-        .map(|d| d < Duration::from_secs(30))
+        .map(|d| d < Duration::from_millis(config.checkpoint_ms * 10))
         .unwrap_or(true);
     if healthy {
         Ok(Json::from(json!({"ok": "true"})))

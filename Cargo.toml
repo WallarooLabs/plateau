@@ -4,5 +4,6 @@ members = [
     "client",
     "server",
     "transport",
-    "cli"
+    "cli",
+    "server/bench"
 ]

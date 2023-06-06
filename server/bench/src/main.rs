@@ -42,7 +42,7 @@ impl Worker {
             let dt = SystemTime::now().duration_since(start).unwrap();
             trace!("{}", status);
             self.status.send(status).unwrap();
-            self.stats.send((dn, dt.clone())).await.unwrap();
+            self.stats.send((dn, dt)).await.unwrap();
             if self.delay > dt {
                 tokio::time::sleep(self.delay - dt).await;
             }
@@ -219,8 +219,8 @@ impl Task for HealthCheck {
         let last = self
             .last
             .as_ref()
-            .map(|v| format!("last: {}", v.to_string()))
-            .unwrap_or(String::from(""));
+            .map(|v| format!("last: {}", v))
+            .unwrap_or_default();
 
         if self.errors == 0 {
             (1, format!("[ok]    ✓ {}", last))

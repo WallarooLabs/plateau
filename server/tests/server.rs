@@ -7,6 +7,7 @@ use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use arrow2::io::ipc::{read, write};
 use plateau::chunk::Schema;
+use plateau::config::PlateauConfig;
 use plateau::http;
 use plateau::http::TestServer;
 use plateau_transport::arrow2;
@@ -358,9 +359,12 @@ async fn setup_with_config(config: http::Config) -> (Client, String, http::TestS
     (
         Client::new(),
         format!("topic-{}", uuid::Uuid::new_v4()),
-        http::TestServer::new_with_config(http::Config {
-            bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-            ..config
+        http::TestServer::new_with_config(PlateauConfig {
+            http: http::Config {
+                bind: SocketAddr::from(([127, 0, 0, 1], 0)),
+                ..config
+            },
+            ..PlateauConfig::default()
         })
         .await
         .unwrap(),

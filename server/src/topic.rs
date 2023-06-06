@@ -315,7 +315,7 @@ impl Topic {
         self.iter_topic(iterator, limit, order, fetch).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, bench))]
     pub async fn commit(&self) -> Result<()> {
         for (_, part) in self.partitions.read().await.iter() {
             part.commit().await?
@@ -1070,5 +1070,86 @@ mod test {
         for handle in handles {
             handle.await.unwrap();
         }
+    }
+}
+
+#[cfg(nightly)]
+mod benches {
+    extern crate test;
+    use super::*;
+    use crate::topic::Topic;
+    use tempfile::{tempdir, TempDir};
+    use test::Bencher;
+
+    use crate::chunk::test::inferences_schema_a;
+    use rand::RngCore;
+
+    use tokio::runtime::Runtime;
+
+    const N_TOTAL_RECORDS: usize = 100;
+    const N_PAGE_SIZE: usize = 1;
+    const PARTITION_NAME: &'static str = "test";
+
+    fn run_async<F: core::future::Future>(func: F) -> F::Output {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(func)
+    }
+
+    async fn prep_dataset() -> TempDir {
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+
+        let chunk = inferences_schema_a();
+        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
+        let topic = Topic::attach(
+            root.clone(),
+            manifest,
+            String::from("testing"),
+            PartitionConfig::default(),
+        )
+        .await;
+
+        for _ in 1..N_TOTAL_RECORDS {
+            let _ = topic.extend(PARTITION_NAME, chunk.clone()).await.unwrap();
+        }
+        topic.commit().await.unwrap();
+        dir
+    }
+
+    fn attach_and_iterate(b: &mut Bencher, rt: &Runtime, dir: &TempDir, order: &Ordering) {
+        let root = PathBuf::from(dir.path());
+
+        let manifest = rt.block_on(Manifest::attach(root.join("manifest.sqlite")));
+        let topic = rt.block_on(Topic::attach(
+            root.clone(),
+            manifest,
+            String::from("testing"),
+            PartitionConfig::default(),
+        ));
+        let mut rng = rand::rngs::OsRng::default();
+
+        b.iter(|| {
+            let offset = rng.next_u32() as usize % N_TOTAL_RECORDS;
+            let mut i = HashMap::from([(PARTITION_NAME.to_string(), offset)]);
+            let r = rt.block_on(topic.get_records(i, RowLimit::records(N_PAGE_SIZE), order));
+        });
+    }
+
+    #[bench]
+    fn forward_iteration_bench(b: &mut Bencher) -> () {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = rt.block_on(prep_dataset());
+
+        let mut i = 0;
+        attach_and_iterate(b, &rt, &dir, &Ordering::Forward);
+    }
+
+    #[bench]
+    fn reverse_iteration_bench(b: &mut Bencher) -> () {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let dir = rt.block_on(prep_dataset());
+
+        let mut i = 0;
+        attach_and_iterate(b, &rt, &dir, &Ordering::Reverse);
     }
 }

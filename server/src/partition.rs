@@ -174,7 +174,7 @@ impl Partition {
         Ok(start..(start + size))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, bench))]
     pub(crate) async fn commit(&self) -> Result<()> {
         self.state.write().await.commit(self).await
     }
@@ -539,7 +539,7 @@ impl State {
         trace!("notified of commit including {:?}", target);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, bench))]
     pub(crate) async fn commit(&mut self, partition: &Partition) -> Result<()> {
         let target = self.messages.next_record_ix().await;
         self.roll(partition).await?;
