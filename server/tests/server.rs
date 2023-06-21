@@ -46,7 +46,7 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
             inner.data_type().clone(),
             false,
         ))),
-        offsets.into(),
+        offsets.try_into().unwrap(),
         inner.boxed(),
         None,
     );

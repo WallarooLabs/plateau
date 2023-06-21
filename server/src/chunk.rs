@@ -362,11 +362,11 @@ impl IndexedChunk {
     }
 
     pub(crate) fn slice(&mut self, offset: usize, len: usize) {
-        let arrays = std::mem::replace(&mut self.chunk, Chunk::new(vec![]))
-            .into_arrays()
-            .into_iter()
-            .map(|arr| arr.slice(offset, len))
-            .collect();
+        let mut arrays = std::mem::replace(&mut self.chunk, Chunk::new(vec![])).into_arrays();
+
+        for arr in arrays.iter_mut() {
+            arr.slice(offset, len);
+        }
 
         self.chunk = Chunk::new(arrays);
     }
@@ -430,7 +430,7 @@ pub mod test {
                 inner.data_type().clone(),
                 false,
             ))),
-            offsets.into(),
+            offsets.try_into().unwrap(),
             inner.boxed(),
             None,
         );
