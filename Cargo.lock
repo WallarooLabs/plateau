@@ -130,7 +130,7 @@ dependencies = [
 [[package]]
 name = "arrow2"
 version = "0.17.0"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/2023.3-cherry-picks#22ed7a0cb405716301088f6000eae0ed905b7653"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/2023.3-0.17.0#7b1dd1102b42cd27765cf1d744d5b38acb16276b"
 dependencies = [
  "ahash 0.8.3",
  "arrow-format",
@@ -156,26 +156,6 @@ dependencies = [
  "rustc_version 0.4.0",
  "simdutf8",
  "streaming-iterator",
-]
-
-[[package]]
-name = "arrow2"
-version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15ae0428d69ab31d7b2adad22a752d6f11fef2e901d2262d0cad4f5cb08b7093"
-dependencies = [
- "ahash 0.8.3",
- "bytemuck",
- "chrono",
- "dyn-clone",
- "either",
- "ethnum",
- "foreign_vec",
- "getrandom",
- "hash_hasher",
- "num-traits",
- "rustc_version 0.4.0",
- "simdutf8",
 ]
 
 [[package]]
@@ -2192,20 +2172,18 @@ dependencies = [
  "futures",
  "itermore",
  "itertools",
- "lazy_static",
  "log",
  "metrics",
  "metrics-exporter-prometheus",
  "parquet",
  "plateau-transport",
  "pretty_env_logger",
- "quickcheck",
  "rand",
  "reqwest",
  "rweb",
  "sample-arrow2",
+ "sample-std",
  "sample-test",
- "sample-test-macros",
  "serde",
  "serde_json",
  "serde_qs",
@@ -2259,7 +2237,7 @@ dependencies = [
 name = "plateau-transport"
 version = "0.1.0"
 dependencies = [
- "arrow2 0.17.0",
+ "arrow2",
  "chrono",
  "rweb",
  "serde",
@@ -2720,18 +2698,21 @@ checksum = "f91339c0467de62360649f8d3e185ca8de4224ff281f66000de5eb2a77a79041"
 
 [[package]]
 name = "sample-arrow2"
-version = "0.1.0"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "722050f91586506195398fd22d834eb8768716084f6ebf9f32b917ed422b6afb"
 dependencies = [
- "arrow2 0.17.2",
+ "arrow2",
  "sample-std",
 ]
 
 [[package]]
 name = "sample-std"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "567a153dc3302ce838920fb095c025a6d0529fff0290d25deeec2136e41a57c8"
 dependencies = [
  "casey",
- "paste",
  "quickcheck",
  "rand",
  "rand_regex",
@@ -2740,9 +2721,10 @@ dependencies = [
 
 [[package]]
 name = "sample-test"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "713e500947ff19fc1ae2805afa33ef45f3bb2ec656c77d92252d24cf9e3091b2"
 dependencies = [
- "lazy_static",
  "quickcheck",
  "sample-std",
  "sample-test-macros",
@@ -2750,9 +2732,10 @@ dependencies = [
 
 [[package]]
 name = "sample-test-macros"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df1a2c832a259aae95b6ed1da3aa377111ffde38d4282fa734faa3fff356534e"
 dependencies = [
- "lazy_static",
  "proc-macro2",
  "quote",
  "sample-std",

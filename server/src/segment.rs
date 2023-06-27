@@ -455,8 +455,16 @@ impl DoubleEndedIterator for DoubleEndedChunkIterator {
 #[cfg(test)]
 pub mod test {
     use super::*;
+    use crate::arrow2::datatypes::{Field, Metadata};
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{iter_legacy, legacy_schema, LegacyRecords};
+    use sample_arrow2::{
+        array::ArbitraryArray,
+        chunk::{ArbitraryChunk, ChainedChunk, ChainedMultiChunk},
+        datatypes::{sample_flat, ArbitraryDataType},
+    };
+    use sample_std::{Chance, Random, Regex, Sample};
+    use sample_test::sample_test;
     use tempfile::tempdir;
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
@@ -677,5 +685,115 @@ pub mod test {
         );
 
         Ok(())
+    }
+
+    fn deep_chunk(depth: usize, len: usize) -> ArbitraryChunk<Regex, Chance> {
+        let names = Regex::new("[a-z]{4,8}");
+        let data_type = ArbitraryDataType {
+            struct_branch: 1..3,
+            names: names.clone(),
+            // this appears to break arrow2's parquet support
+            // nullable: Chance(0.5),
+            nullable: Chance(0.0),
+            flat: sample_flat,
+        }
+        .sample_depth(depth);
+
+        let array = ArbitraryArray {
+            names,
+            branch: 0..10,
+            len: len..(len + 1),
+            null: Chance(0.1),
+            // this appears to break arrow2's parquet support
+            // is_nullable: true,
+            is_nullable: false,
+        };
+
+        ArbitraryChunk {
+            chunk_len: 10..1000,
+            array_count: 1..2,
+            data_type,
+            array,
+        }
+    }
+
+    #[sample_test]
+    fn arbitrary_chunk(#[sample(deep_chunk(3, 100).sample_one())] chunk: ChainedChunk) {
+        let chunk = chunk.value;
+        let root = tempdir().unwrap();
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(path);
+
+        use sample_std::Sample;
+        let name = sample_std::Regex::new("[a-z]{4, 8}");
+        let mut g = sample_std::Random::new();
+
+        let schema = Schema {
+            fields: chunk
+                .iter()
+                .map(|arr| {
+                    Field::new(
+                        name.generate(&mut g),
+                        arr.data_type().clone(),
+                        arr.validity().is_some(),
+                    )
+                })
+                .collect(),
+            metadata: Metadata::default(),
+        };
+        let mut w = s.create2(schema.clone()).unwrap();
+        let expected = SchemaChunk {
+            schema,
+            chunk: chunk.clone(),
+        };
+        w.log_arrow(expected).unwrap();
+        w.close().unwrap();
+
+        let r = s.read_double_ended().unwrap();
+        let chunks = r.iter().collect::<anyhow::Result<Vec<_>>>().unwrap();
+        assert_eq!(chunks, vec![chunk]);
+    }
+
+    #[sample_test]
+    fn arbitrary_many_chunk(
+        #[sample(deep_chunk(5, 100).sample_many(2..10))] chunk: ChainedMultiChunk,
+    ) {
+        let chunks = chunk.value;
+        let root = tempdir().unwrap();
+        let path = root.path().join("testing.parquet");
+        let s = Segment::at(path);
+
+        let name = Regex::new("[a-z]{4, 8}");
+        let mut g = Random::new();
+
+        let schema = Schema {
+            fields: chunks
+                .first()
+                .unwrap()
+                .iter()
+                .map(|arr| {
+                    Field::new(
+                        name.generate(&mut g),
+                        arr.data_type().clone(),
+                        arr.validity().is_some(),
+                    )
+                })
+                .collect(),
+            metadata: Metadata::default(),
+        };
+        let mut w = s.create2(schema.clone()).unwrap();
+
+        for chunk in &chunks {
+            let expected = SchemaChunk {
+                schema: schema.clone(),
+                chunk: chunk.clone(),
+            };
+            w.log_arrow(expected).unwrap();
+        }
+        w.close().unwrap();
+
+        let r = s.read_double_ended().unwrap();
+        let actual_chunks = r.iter().collect::<anyhow::Result<Vec<_>>>().unwrap();
+        assert_eq!(actual_chunks, chunks);
     }
 }
