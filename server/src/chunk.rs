@@ -1,7 +1,7 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
 use crate::arrow2::array::{
-    Array, BooleanArray, FixedSizeListArray, ListArray, MutableArray, MutablePrimitiveArray,
-    MutableUtf8Array, PrimitiveArray, StructArray, Utf8Array,
+    Array, BooleanArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray,
+    Utf8Array,
 };
 use crate::arrow2::chunk::Chunk;
 use crate::arrow2::compute::filter::filter_chunk;
@@ -9,33 +9,15 @@ pub use crate::arrow2::datatypes::Schema;
 use crate::arrow2::datatypes::{DataType, Field, Metadata};
 use crate::manifest::Ordering;
 use chrono::{DateTime, Duration, TimeZone, Utc};
-use plateau_transport::{SchemaChunk, SegmentChunk};
+use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
-use thiserror::Error;
 
 use crate::slog::RecordIndex;
 
 // currently unstable; don't need a const fn
 pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
     std::any::type_name::<T>()
-}
-
-#[derive(Error, Debug)]
-pub enum ChunkError {
-    #[error("unsupported type: {0}")]
-    Unsupported(String),
-    #[error("column {0} must be '{1}'")]
-    BadColumn(usize, &'static str),
-    #[error("column {0} type {1} != {2}")]
-    InvalidColumnType(&'static str, &'static str, &'static str),
-    #[error("could not encode 'message' to utf8")]
-    FailedEncoding,
-    #[error("array lengths do not match")]
-    LengthMismatch,
-    // this should really never happen...
-    #[error("datatype does not match actual type")]
-    TypeMismatch,
 }
 
 pub(crate) struct LegacyRecords(pub(crate) Vec<Record>);
@@ -197,71 +179,6 @@ pub fn iter_legacy(
     })
 }
 
-fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
-    match arr.data_type() {
-        DataType::UInt8 => Ok(arr.len()),
-        DataType::UInt16 => Ok(arr.len() * 2),
-        DataType::UInt32 => Ok(arr.len() * 4),
-        DataType::UInt64 => Ok(arr.len() * 8),
-        DataType::Int8 => Ok(arr.len()),
-        DataType::Int16 => Ok(arr.len() * 2),
-        DataType::Int32 => Ok(arr.len() * 4),
-        DataType::Int64 => Ok(arr.len() * 8),
-        // XXX - in future versions of arrow2
-        // DataType::Int128 => Ok(arr.len() * 16),
-        // DataType::Int256 => Ok(arr.len() * 32),
-        DataType::Float16 => Ok(arr.len() * 2),
-        DataType::Float32 => Ok(arr.len() * 4),
-        DataType::Float64 => Ok(arr.len() * 8),
-        DataType::Timestamp(_, _) => Ok(arr.len() * 8),
-        DataType::Utf8 => arr
-            .as_any()
-            .downcast_ref::<Utf8Array<i32>>()
-            .ok_or(ChunkError::TypeMismatch)
-            .map(|arr| arr.values().len()),
-        DataType::LargeUtf8 => arr
-            .as_any()
-            .downcast_ref::<Utf8Array<i64>>()
-            .ok_or(ChunkError::TypeMismatch)
-            .map(|arr| arr.values().len()),
-        DataType::List(_) => arr
-            .as_any()
-            .downcast_ref::<ListArray<i32>>()
-            .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
-        DataType::FixedSizeList(_, _) => arr
-            .as_any()
-            .downcast_ref::<FixedSizeListArray>()
-            .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
-        DataType::LargeList(_) => arr
-            .as_any()
-            .downcast_ref::<ListArray<i64>>()
-            .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
-        DataType::Struct(_) => arr
-            .as_any()
-            .downcast_ref::<StructArray>()
-            .ok_or(ChunkError::TypeMismatch)
-            .and_then(|arr| {
-                arr.values()
-                    .iter()
-                    .map(|inner| estimate_array_size(inner.as_ref()))
-                    .sum()
-            }),
-        t => Err(ChunkError::Unsupported(format!("{:?}", t))),
-    }
-}
-
-/// Estimate the size of a [Chunk]. The estimate does not include null bitmaps or extent buffers.
-pub fn estimate_size(chunk: &SegmentChunk) -> Result<usize, ChunkError> {
-    chunk
-        .arrays()
-        .iter()
-        .map(|a| estimate_array_size(a.as_ref()))
-        .sum()
-}
-
 pub fn legacy_schema() -> Schema {
     // TODO: better schema for timestamps.
     // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
@@ -395,15 +312,16 @@ impl From<IndexedChunk> for SegmentChunk {
     }
 }
 
-#[cfg(any(test, bench))]
+#[cfg(any(test, bench, feature = "test"))]
 pub mod test {
     use super::*;
     use crate::arrow2::{
-        array::{MutableListArray, PrimitiveArray, TryExtend},
+        array::{ListArray, MutableListArray, PrimitiveArray, StructArray, TryExtend},
         datatypes::{Field, Metadata},
     };
+    use plateau_transport::estimate_size;
 
-    pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
+    pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
@@ -466,7 +384,7 @@ pub mod test {
         }
     }
 
-    pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
+    pub fn inferences_schema_b() -> SchemaChunk<Schema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
             vec!["one", "two", "three", "four", "five"].into_iter(),
@@ -536,6 +454,19 @@ pub mod test {
             chunk: Chunk::try_new(vec![time.boxed(), a_struct.boxed(), b_struct.boxed()]).unwrap(),
         }
     }
+
+    /*
+    #[test]
+    fn get_exact_chunk_size() {
+        let a: SchemaChunk<Schema> = inferences_schema_a();
+        let b = inferences_schema_b();
+
+        let a_bytes = a.to_bytes().unwrap();
+        let b_bytes = b.to_bytes().unwrap();
+
+        assert_eq!(2159, a_bytes.len());
+        assert_eq!(1611, b_bytes.len())
+    }*/
 
     #[test]
     fn test_size_estimates() -> Result<(), ChunkError> {

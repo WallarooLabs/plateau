@@ -17,7 +17,8 @@ use std::borrow::Cow;
 use std::io::{Cursor, Write};
 
 use plateau_transport::{
-    ArrowSchema, DataFocus, Insert, InsertQuery, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW,
+    headers::ITERATION_STATUS_HEADER, ArrowSchema, DataFocus, Insert, InsertQuery, SchemaChunk,
+    SegmentChunk, CONTENT_TYPE_ARROW,
 };
 
 use crate::{
@@ -203,7 +204,7 @@ pub(crate) fn to_reply(
                     .header("Content-Type", CONTENT_TYPE_ARROW)
                     .status(StatusCode::OK)
                     .header(
-                        "X-Iteration-Status",
+                        ITERATION_STATUS_HEADER,
                         focused_schema
                             .metadata
                             .get("status")
@@ -241,7 +242,7 @@ pub(crate) fn to_reply(
                 hyper::Response::builder()
                     .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
                     .header(
-                        "X-Iteration-Status",
+                        ITERATION_STATUS_HEADER,
                         focused_schema
                             .metadata
                             .get("status")

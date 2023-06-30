@@ -1,10 +1,10 @@
-use crate::chunk::{estimate_size, iter_legacy, IndexedChunk, Record, Schema};
+use crate::chunk::{iter_legacy, IndexedChunk, Record, Schema};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
-use plateau_transport::SegmentChunk;
+use plateau_transport::{estimate_size, SegmentChunk};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

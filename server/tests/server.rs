@@ -10,7 +10,10 @@ use plateau::chunk::Schema;
 use plateau::config::PlateauConfig;
 use plateau::http;
 use plateau::http::TestServer;
-use plateau_transport::arrow2;
+use plateau_transport::{
+    arrow2,
+    headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
+};
 use reqwest::Client;
 use serde_json::json;
 use std::io::Cursor;
@@ -498,6 +501,30 @@ async fn stored_schema_metadata() -> Result<()> {
 }
 
 #[tokio::test]
+async fn max_request_header() -> Result<()> {
+    let max = 1234;
+
+    let (client, topic_name, server) = setup_with_config(http::Config {
+        max_append_bytes: max,
+        ..Default::default()
+    })
+    .await;
+
+    let req = client
+        .post(append_url(&server, &topic_name, PARTITION_NAME))
+        .header("content-length", max * 10);
+    let resp = req.send().await?;
+
+    assert_eq!(413, resp.status());
+    assert_eq!(
+        &max.to_string(),
+        resp.headers().get(MAX_REQUEST_SIZE_HEADER).unwrap()
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn large_append() -> Result<()> {
     let large = inferences_large();
 
@@ -729,7 +756,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     assert_eq!(
         result
             .headers()
-            .get("X-Iteration-Status")
+            .get(ITERATION_STATUS_HEADER)
             .unwrap()
             .to_str()?,
         "{\"status\":\"RecordLimited\",\"next\":{\"partition-1\":3}}"
@@ -759,7 +786,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let status: serde_json::Value = serde_json::from_str(
         result
             .headers()
-            .get("X-Iteration-Status")
+            .get(ITERATION_STATUS_HEADER)
             .unwrap()
             .to_str()?,
     )?;

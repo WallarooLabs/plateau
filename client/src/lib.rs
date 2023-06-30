@@ -1,4 +1,5 @@
 //! General-use client library for accessing plateau.
+use std::fmt::Formatter;
 use std::{io::Cursor, pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
@@ -9,10 +10,12 @@ pub use plateau_transport::{
     arrow2,
     arrow2::io::ipc,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
-    ArrowError, ArrowSchema, DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery,
-    RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder, TopicIterationQuery,
-    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics, CONTENT_TYPE_ARROW,
+    estimate_array_size, estimate_size, is_variable_len, ArrowError, ArrowSchema, ChunkError,
+    DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery, RecordStatus, Records,
+    SchemaChunk, Span, TopicIterationOrder, TopicIterationQuery, TopicIterationReply,
+    TopicIterationStatus, TopicIterator, Topics, CONTENT_TYPE_ARROW,
 };
+pub use reqwest;
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     Body, RequestBuilder, Response, Url,
@@ -21,6 +24,17 @@ use thiserror::Error;
 
 #[cfg(feature = "batch")]
 pub mod batch;
+
+#[derive(Debug)]
+pub struct MaxRequestSize(pub Option<usize>);
+impl std::fmt::Display for MaxRequestSize {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(s) => f.write_str(s.to_string().as_str()),
+            None => f.write_str("Unknown"),
+        }
+    }
+}
 
 /// Plateau errors
 #[derive(Debug, Error)]
@@ -33,6 +47,8 @@ pub enum Error {
     QuerySerialization(#[from] serde_qs::Error),
     #[error("Error sending request: {0}")]
     SendingRequest(reqwest::Error),
+    #[error("The request body is too long. Max request size: {0}")]
+    RequestTooLong(MaxRequestSize),
     #[error("Error from server: {0}")]
     Server(reqwest::Error),
     #[error("Error deserializing server response: {0}")]
@@ -100,11 +116,18 @@ impl FromStr for Client {
 
 // send request to server and perform basic erorr handling
 async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
-    r.send()
-        .await
-        .map_err(Error::SendingRequest)?
-        .error_for_status()
-        .map_err(Error::Server)
+    let response = r.send().await.map_err(Error::SendingRequest)?;
+
+    if response.status() == 413 {
+        let max = response
+            .headers()
+            .get(plateau_transport::headers::MAX_REQUEST_SIZE_HEADER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| usize::from_str(s).ok());
+        return Err(Error::RequestTooLong(MaxRequestSize(max)));
+    }
+
+    response.error_for_status().map_err(Error::Server)
 }
 
 // process request and deserialize JSON response
@@ -206,7 +229,7 @@ impl Client {
         })
     }
 
-    /// Append one or more record(s) to a given topic and parition. See [InsertQuery] for more
+    /// Append one or more record(s) to a given topic and partition. See [InsertQuery] for more
     /// parameters, and [Insertion] for the ways in which data can be provided.
     pub async fn append_records(
         &self,
@@ -742,6 +765,35 @@ mod tests {
 
         assert_eq!(response.span.start, 0);
         assert_eq!(response.span.end, 3);
+    }
+
+    #[tokio::test]
+    async fn oversize_chunk_reports_max() {
+        let chunk = example_chunk();
+
+        let server = plateau::http::TestServer::new_with_config(plateau::config::PlateauConfig {
+            http: plateau::http::Config {
+                max_append_bytes: 5,
+                ..plateau::http::Config::default()
+            },
+            ..plateau::config::PlateauConfig::default()
+        })
+        .await
+        .unwrap();
+
+        let client = Client {
+            server_url: crate::Url::parse(&server.base()).unwrap(),
+            http_client: Default::default(),
+        };
+
+        let response = client
+            .append_records("topic-1", "partition-1", &InsertQuery { time: None }, chunk)
+            .await;
+
+        assert_eq!(
+            "RequestTooLong(MaxRequestSize(Some(5)))",
+            format!("{:?}", response.err().unwrap())
+        );
     }
 
     #[tokio::test]

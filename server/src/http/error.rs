@@ -1,12 +1,13 @@
 use crate::arrow2::error::Error as ArrowError;
-use plateau_transport::{ErrorMessage, PathError};
+use plateau_transport::{headers::MAX_REQUEST_SIZE_HEADER, ChunkError, ErrorMessage, PathError};
 use rweb::reject::PayloadTooLarge;
 use rweb::*;
 use std::convert::Infallible;
+use std::sync::Arc;
 use warp::http::StatusCode;
 use warp::reject::Reject;
 
-use crate::chunk::ChunkError;
+use crate::config::PlateauConfig;
 
 #[derive(Debug)]
 pub(crate) enum ErrorReply {
@@ -25,7 +26,10 @@ pub(crate) enum ErrorReply {
 }
 impl Reject for ErrorReply {}
 
-pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible> {
+pub(crate) async fn emit_error(
+    err: Rejection,
+    config: Arc<PlateauConfig>,
+) -> Result<impl Reply, Infallible> {
     let (code, message) = match err.find::<ErrorReply>() {
         Some(ErrorReply::EmptyBody) => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
         Some(ErrorReply::Arrow(e)) => (StatusCode::BAD_REQUEST, format!("arrow error: {}", e)),
@@ -69,10 +73,17 @@ pub(crate) async fn emit_error(err: Rejection) -> Result<impl Reply, Infallible>
         }
     };
 
-    let json = warp::reply::json(&ErrorMessage {
+    let mut response = warp::reply::json(&ErrorMessage {
         code: code.as_u16(),
         message,
-    });
+    })
+    .into_response();
 
-    Ok(warp::reply::with_status(json, code))
+    if code == 413 {
+        response
+            .headers_mut()
+            .insert(MAX_REQUEST_SIZE_HEADER, config.http.max_append_bytes.into());
+    }
+
+    Ok(warp::reply::with_status(response, code))
 }

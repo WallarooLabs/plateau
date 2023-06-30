@@ -9,6 +9,7 @@ use std::{
 use arrow2::{
     array::{Array, StructArray},
     chunk::Chunk,
+    compute::concatenate::concatenate,
     datatypes::Field,
     io::ipc::{read, write},
 };
@@ -17,12 +18,118 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
 
-use arrow2::array::PrimitiveArray;
+use arrow2::array::{FixedSizeListArray, ListArray, PrimitiveArray, Utf8Array};
 use arrow2::compute::take::take;
 use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
 use strum::{Display, EnumIter};
 use thiserror::Error;
+
+pub mod headers {
+    pub static ITERATION_STATUS_HEADER: &str = "x-iteration-status";
+    pub static MAX_REQUEST_SIZE_HEADER: &str = "x-max-request-size";
+}
+
+#[derive(Error, Debug)]
+pub enum ChunkError {
+    #[error("unsupported type: {0}")]
+    Unsupported(String),
+    #[error("column {0} must be '{1}'")]
+    BadColumn(usize, &'static str),
+    #[error("column {0} type {1} != {2}")]
+    InvalidColumnType(&'static str, &'static str, &'static str),
+    #[error("could not encode 'message' to utf8")]
+    FailedEncoding,
+    #[error("array lengths do not match")]
+    LengthMismatch,
+    // this should really never happen...
+    #[error("datatype does not match actual type")]
+    TypeMismatch,
+}
+
+/// Estimate the size of a [Chunk]. The estimate does not include null bitmaps or extent buffers.
+pub fn estimate_size(chunk: &SegmentChunk) -> Result<usize, ChunkError> {
+    chunk
+        .arrays()
+        .iter()
+        .map(|a| estimate_array_size(a.as_ref()))
+        .sum()
+}
+pub fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
+    match arr.data_type() {
+        DataType::UInt8 => Ok(arr.len()),
+        DataType::UInt16 => Ok(arr.len() * 2),
+        DataType::UInt32 => Ok(arr.len() * 4),
+        DataType::UInt64 => Ok(arr.len() * 8),
+        DataType::Int8 => Ok(arr.len()),
+        DataType::Int16 => Ok(arr.len() * 2),
+        DataType::Int32 => Ok(arr.len() * 4),
+        DataType::Int64 => Ok(arr.len() * 8),
+        // XXX - in future versions of arrow2
+        // DataType::Int128 => Ok(arr.len() * 16),
+        // DataType::Int256 => Ok(arr.len() * 32),
+        DataType::Float16 => Ok(arr.len() * 2),
+        DataType::Float32 => Ok(arr.len() * 4),
+        DataType::Float64 => Ok(arr.len() * 8),
+        DataType::Timestamp(_, _) => Ok(arr.len() * 8),
+        DataType::Utf8 => arr
+            .as_any()
+            .downcast_ref::<Utf8Array<i32>>()
+            .ok_or(ChunkError::TypeMismatch)
+            .map(|arr| arr.values().len()),
+        DataType::LargeUtf8 => arr
+            .as_any()
+            .downcast_ref::<Utf8Array<i64>>()
+            .ok_or(ChunkError::TypeMismatch)
+            .map(|arr| arr.values().len()),
+        DataType::List(_) => arr
+            .as_any()
+            .downcast_ref::<ListArray<i32>>()
+            .ok_or(ChunkError::TypeMismatch)
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
+        DataType::FixedSizeList(_, _) => arr
+            .as_any()
+            .downcast_ref::<FixedSizeListArray>()
+            .ok_or(ChunkError::TypeMismatch)
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
+        DataType::LargeList(_) => arr
+            .as_any()
+            .downcast_ref::<ListArray<i64>>()
+            .ok_or(ChunkError::TypeMismatch)
+            .and_then(|arr| estimate_array_size(arr.values().as_ref())),
+        DataType::Struct(_) => arr
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .ok_or(ChunkError::TypeMismatch)
+            .and_then(|arr| {
+                arr.values()
+                    .iter()
+                    .map(|inner| estimate_array_size(inner.as_ref()))
+                    .sum()
+            }),
+        t => Err(ChunkError::Unsupported(format!("{:?}", t))),
+    }
+}
+
+pub fn is_variable_len(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::Float16
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Timestamp(_, _) => false,
+        // some types like Struct or FixedSizeList could theoretically encapsulate all fixed-size types,
+        // but we're just going to call them variable for now to simplify
+        _ => true,
+    }
+}
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
@@ -228,6 +335,22 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
             let reversed: Vec<_> = arrays.iter().map(|a| take(&**a, &idx).unwrap()).collect();
             let rev_segment = SegmentChunk::try_new(reversed).unwrap();
             self.chunk = rev_segment;
+        }
+    }
+
+    pub fn extend(&mut self, other: Self) -> anyhow::Result<()> {
+        if self.schema != other.schema {
+            Err(anyhow::anyhow!("schemas do not match"))
+        } else {
+            let arrays = self
+                .chunk
+                .arrays()
+                .iter()
+                .zip(other.chunk.arrays().iter())
+                .map(|(a, b)| concatenate(&[a.as_ref(), b.as_ref()]))
+                .collect::<arrow2::error::Result<Vec<_>>>()?;
+            self.chunk = Chunk::new(arrays);
+            Ok(())
         }
     }
 

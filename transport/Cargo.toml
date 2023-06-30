@@ -6,6 +6,7 @@ edition = "2021"
 rust-version = "1.60"
 
 [dependencies]
+anyhow = "1"
 serde = "1"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }

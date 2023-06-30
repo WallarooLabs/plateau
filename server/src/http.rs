@@ -2,6 +2,7 @@ use ::log::info;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future;
+use std::sync::Arc;
 
 use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Rejection, Reply};
 use serde::de::DeserializeOwned;
@@ -83,25 +84,32 @@ pub async fn serve(
     catalog: Catalog,
 ) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>) {
     let log = warp::log("plateau::http");
-    let http = config.http.clone();
+    let config = Arc::new(config);
 
+    let inner_config = config.clone();
     let (spec, filter) = openapi::spec().build(move || {
-        healthcheck(catalog.clone(), config.clone())
+        healthcheck(catalog.clone(), inner_config.clone())
             .or(get_topics(catalog.clone()))
             .or(
-                warp::body::content_length_limit(config.http.max_append_bytes)
+                warp::body::content_length_limit(inner_config.http.max_append_bytes)
                     .and(topic_append(catalog.clone())),
             )
-            .or(topic_iterate(catalog.clone(), config.http.max_page))
+            .or(topic_iterate(catalog.clone(), inner_config.http.max_page))
             .or(topic_get_partitions(catalog.clone()))
-            .or(partition_get_records(catalog, config.http.max_page))
+            .or(partition_get_records(catalog, inner_config.http.max_page))
     });
 
-    let server = rweb::serve(filter.or(openapi_docs(spec)).with(log).recover(emit_error));
+    let inner_config = config.clone();
+    let server = rweb::serve(
+        filter
+            .or(openapi_docs(spec))
+            .with(log)
+            .recover(move |e| emit_error(e, inner_config.clone())),
+    );
 
     // Ideally warp would have something like a `run_ephemeral`, but here we
     // are. it's only three lines to copy from Server::run
-    let (addr, fut) = server.bind_ephemeral(http.bind);
+    let (addr, fut) = server.bind_ephemeral(config.http.bind);
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, "listening on http://{}", addr);
 
@@ -173,7 +181,7 @@ impl Drop for TestServer {
 #[openapi(id = "healthcheck")]
 async fn healthcheck(
     #[data] catalog: Catalog,
-    #[data] config: PlateauConfig,
+    #[data] config: Arc<PlateauConfig>,
 ) -> Result<Json<serde_json::Value>, Rejection> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
     let healthy = duration

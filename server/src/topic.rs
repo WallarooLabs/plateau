@@ -1136,6 +1136,23 @@ mod benches {
     }
 
     #[bench]
+    fn chunk_sizing_bench(b: &mut Bencher) {
+        let mut a = inferences_schema_a();
+        for _ in 1..1000 {
+            a.extend(inferences_schema_a());
+        }
+
+        let s = SchemaChunk {
+            schema: a.schema.clone(),
+            chunk: arrow2::chunk::Chunk::new(a.chunk[..500]),
+        };
+
+        b.iter(|| {
+            let _ = s.to_bytes();
+        })
+    }
+
+    #[bench]
     fn forward_iteration_bench(b: &mut Bencher) -> () {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = rt.block_on(prep_dataset());
