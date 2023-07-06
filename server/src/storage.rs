@@ -60,6 +60,7 @@ impl DiskMonitor {
 
     /// Loops indefinitely while checking for available disk space on the configured path.
     pub async fn run(&self, root: impl AsRef<Path>, config: &Config) -> anyhow::Result<()> {
+        let path = canonicalize(root).await?;
         loop {
             let deadline = self
                 .epoch
@@ -70,7 +71,7 @@ impl DiskMonitor {
                 || self.last_write.load(Ordering::SeqCst) < deadline
             {
                 let stat = System::new();
-                let path = root.as_ref().to_path_buf();
+                let path = path.clone();
                 let avail = spawn_blocking(move || {
                     let fs = stat.mount_at(path)?;
                     Ok::<_, anyhow::Error>(fs.avail)
@@ -86,6 +87,14 @@ impl DiskMonitor {
         }
     }
 }
+
+#[cfg(test)]
+pub async fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<std::path::PathBuf> {
+    Ok(path.as_ref().to_path_buf())
+}
+
+#[cfg(not(test))]
+use tokio::fs::canonicalize;
 
 /// Stores configuration properties used for storage monitoring.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
