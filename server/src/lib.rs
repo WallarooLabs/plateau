@@ -10,6 +10,7 @@ pub mod metrics;
 mod partition;
 mod segment;
 mod slog;
+mod storage;
 mod topic;
 
 use plateau_transport::arrow2;

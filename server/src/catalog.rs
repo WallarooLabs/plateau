@@ -2,7 +2,7 @@
 //! It is used to route reads and writes to the correct topic / partition.
 use crate::limit::Retention;
 use crate::manifest::Scope;
-use ::log::{debug, info, trace, warn};
+use ::log::{debug, error, info, trace, warn};
 use bytesize::ByteSize;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
@@ -14,6 +14,7 @@ use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::manifest::Manifest;
 use crate::partition;
+use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -21,6 +22,7 @@ use crate::topic::Topic;
 pub struct Config {
     retain: Retention,
     partition: partition::Config,
+    storage: storage::Config,
 }
 
 #[derive(Clone)]
@@ -30,16 +32,20 @@ pub struct Catalog {
     root: Arc<PathBuf>,
     topics: Arc<RwLock<HashMap<String, Topic>>>,
     last_checkpoint: Arc<RwLock<SystemTime>>,
+    disk_monitor: DiskMonitor,
 }
 
 impl Catalog {
     pub async fn attach(root: PathBuf, config: Config) -> Self {
+        let disk_monitor = DiskMonitor::new();
+
         Catalog {
             config,
             manifest: Manifest::attach(root.join("manifest.json")).await,
             root: Arc::new(root),
             topics: Arc::new(RwLock::new(HashMap::new())),
             last_checkpoint: Arc::new(RwLock::new(SystemTime::now())),
+            disk_monitor,
         }
     }
 
@@ -134,6 +140,27 @@ impl Catalog {
                 let read = write.downgrade();
                 RwLockReadGuard::map(read, |m| m.get(name).unwrap())
             }
+        }
+    }
+
+    /// Returns true if the Catalog is not accepting log writes.
+    pub fn is_readonly(&self) -> bool {
+        self.disk_monitor.is_readonly()
+    }
+
+    /// Records an attempted log write.
+    pub fn record_write(&self) {
+        self.disk_monitor.record_write()
+    }
+
+    // Starts running the disk storage monitor.
+    pub async fn monitor_disk_storage(&self) {
+        if let Err(e) = self
+            .disk_monitor
+            .run(&*self.root, &self.config.storage)
+            .await
+        {
+            error!("error while monitoring disk storage capacity: {e:?}");
         }
     }
 }

@@ -40,7 +40,7 @@ async fn main() {
         });
 
     future::select(
-        Box::pin(stream),
+        future::select(Box::pin(stream), Box::pin(catalog.monitor_disk_storage())),
         http::serve(config, catalog.clone()).await.1,
     )
     .await;

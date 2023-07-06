@@ -22,6 +22,7 @@ pub(crate) enum ErrorReply {
     CannotAccept(String),
     CannotEmit(String),
     NoHeartbeat,
+    InsufficientDiskSpace,
     Unknown,
 }
 impl Reject for ErrorReply {}
@@ -53,6 +54,10 @@ pub(crate) async fn emit_error(
         Some(ErrorReply::NoHeartbeat) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             "no heartbeat".to_string(),
+        ),
+        Some(ErrorReply::InsufficientDiskSpace) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "insufficient disk space".to_string(),
         ),
         Some(ErrorReply::Unknown) => (
             StatusCode::INTERNAL_SERVER_ERROR,

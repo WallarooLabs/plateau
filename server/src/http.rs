@@ -11,10 +11,9 @@ use serde_json::json;
 use serde_qs;
 use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
-use tempfile::{tempdir, TempDir};
+use tempfile::tempdir;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
@@ -126,7 +125,6 @@ pub struct TestServer {
     addr: SocketAddr,
     end_tx: mpsc::Sender<()>,
     pub catalog: Catalog,
-    pub temp: TempDir,
 }
 
 impl TestServer {
@@ -145,7 +143,7 @@ impl TestServer {
     pub async fn new_with_config(config: PlateauConfig) -> Result<Self> {
         let (end_tx, mut end_rx) = mpsc::channel(1);
         let temp = tempdir()?;
-        let root = PathBuf::from(temp.path());
+        let root = temp.into_path();
         let catalog = Catalog::attach(root, Default::default()).await;
 
         let serve_catalog = catalog.clone();
@@ -158,7 +156,6 @@ impl TestServer {
             addr,
             end_tx,
             catalog,
-            temp,
         })
     }
 
@@ -211,6 +208,12 @@ async fn topic_append(
     #[data] catalog: Catalog,
     chunk: SchemaChunkRequest,
 ) -> Result<Json<Inserted>, Rejection> {
+    if catalog.is_readonly() {
+        return Err(ErrorReply::InsufficientDiskSpace.into());
+    }
+
+    catalog.record_write();
+
     let topic = catalog.get_topic(&topic_name).await;
     info!(
         "appending {} to {}/{}",
