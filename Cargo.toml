@@ -9,4 +9,5 @@ members = [
 ]
 
 [patch.crates-io]
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/2023.3-0.17.0" }
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema" }
+parquet2 = { git = "https://github.com/WallarooLabs/parquet2", branch = "more-writer-details" }

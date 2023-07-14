@@ -23,7 +23,7 @@ use crate::chunk::{Schema, TimeRange};
 use crate::manifest::{Ordering, SegmentData};
 #[cfg(test)]
 use crate::segment::Record;
-use crate::segment::{CloseArrow, DoubleEndedChunkReader, Segment, SegmentWriter2};
+use crate::segment::{CloseArrow, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::{trace, warn};
@@ -227,7 +227,7 @@ impl Slog {
             return Box::new(std::iter::empty());
         }
 
-        let reader = DoubleEndedChunkReader::open(segment.path()).unwrap();
+        let reader = segment.read_double_ended().unwrap();
         if order.is_reverse() {
             Box::new(reader.iter().rev().map(move |c| SchemaChunk {
                 schema: reader.schema.clone(),

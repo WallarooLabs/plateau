@@ -130,7 +130,7 @@ dependencies = [
 [[package]]
 name = "arrow2"
 version = "0.17.0"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=wallaroo/2023.3-0.17.0#7b1dd1102b42cd27765cf1d744d5b38acb16276b"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/public-arrow-parquet-schema#2294fd35a20300a7d3d300e5ca10d0af75ad2537"
 dependencies = [
  "ahash 0.8.3",
  "arrow-format",
@@ -2135,9 +2135,8 @@ dependencies = [
 
 [[package]]
 name = "parquet2"
-version = "0.17.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "579fe5745f02cef3d5f236bfed216fd4693e49e4e920a13475c6132233283bce"
+version = "0.17.1"
+source = "git+https://github.com/WallarooLabs/parquet2?branch=more-writer-details#431fd7ab06e89eedab0e86e4601329de92624ce0"
 dependencies = [
  "async-stream",
  "futures",
@@ -2271,6 +2270,8 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "parquet",
+ "parquet-format-safe",
+ "parquet2",
  "plateau-transport",
  "pretty_env_logger",
  "rand",

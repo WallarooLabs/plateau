@@ -19,6 +19,8 @@ log = "0.4"
 metrics = "0.16"
 metrics-exporter-prometheus = "0.5"
 thiserror = "1"
+parquet2 = { version = "0.17", default_features = false }
+parquet-format-safe = "0.2"
 plateau-transport = { path = "../transport" }
 bytes = "1"
 pretty_env_logger = "0.4"

@@ -10,7 +10,7 @@ anyhow = "1"
 serde = "1"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "wallaroo/2023.3-0.17.0", features = [
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema", features = [
     "compute_aggregate",
     "compute_cast",
     "compute_comparison",

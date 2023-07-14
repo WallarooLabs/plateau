@@ -4,17 +4,21 @@
 use crate::arrow2::datatypes::Schema;
 use crate::arrow2::io::parquet::read::FileReader as FileReader2;
 use crate::arrow2::io::parquet::read::{infer_schema, read_metadata};
-use crate::arrow2::io::parquet::write::FileWriter as FileWriter2;
 use crate::arrow2::io::parquet::write::{
-    transverse, CompressionOptions, Encoding, RowGroupIterator, Version, WriteOptions,
+    add_arrow_schema, transverse, CompressionOptions, Encoding, RowGroupIterator, Version,
+    WriteOptions,
 };
 use anyhow::Result;
 #[cfg(test)]
 use chrono::{Duration, TimeZone, Utc};
+use log::{debug, warn};
+use parquet2::metadata::{FileMetaData, KeyValue};
 use std::borrow::Borrow;
 use std::convert::TryFrom;
+use std::ffi::OsStr;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter;
 #[cfg(test)]
 use std::sync::Arc;
@@ -35,6 +39,8 @@ use parquet::{
 
 pub use crate::chunk::Record;
 use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};
+
+const PLATEAU_CHECKPOINT_HEADER: &str = "plateau1";
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
@@ -92,6 +98,12 @@ impl Segment {
     }
 
     pub(crate) fn create2(&self, schema: Schema) -> Result<SegmentWriter2> {
+        let checkpoint = self.checkpoint_path();
+        let mut tmp: PathBuf = self.path.clone();
+        assert!(tmp.extension() != Some(OsStr::new("header")));
+        assert!(tmp.extension() != Some(OsStr::new("header.tmp")));
+        assert!(tmp.set_extension("header.tmp"));
+
         // TODO: ideally we'd use compression, but this currently causes nasty dependency issues
         // between parquet2 and parquet
         let options = WriteOptions {
@@ -101,14 +113,33 @@ impl Segment {
             version: Version::V2,
         };
 
+        let parquet_schema = arrow2::io::parquet::write::to_parquet_schema(&schema)?;
+
+        let created_by = Some("plateau v0.1.0".to_string());
+
         let file = self.file()?;
-        let writer = FileWriter2::try_new(file.try_clone()?, schema.clone(), options)?;
+        let writer = parquet2::write::FileWriter::new(
+            file.try_clone()?,
+            parquet_schema,
+            parquet2::write::WriteOptions {
+                version: options.version,
+                write_statistics: options.write_statistics,
+            },
+            created_by,
+        );
+
+        let key_value_metadata = add_arrow_schema(&schema, None);
+
         Ok(SegmentWriter2 {
             path: self.path.clone(),
+            checkpoint,
+            tmp,
             file,
             writer,
             schema,
+            key_value_metadata,
             options,
+            durable_checkpoints: false,
         })
     }
 
@@ -128,7 +159,13 @@ impl Segment {
     }
 
     pub(crate) fn read_double_ended(&self) -> Result<DoubleEndedChunkReader> {
-        DoubleEndedChunkReader::open(self.path.as_path())
+        DoubleEndedChunkReader::open(self.path.as_path(), self.checkpoint_path())
+    }
+
+    fn checkpoint_path(&self) -> PathBuf {
+        let mut path: PathBuf = self.path.clone();
+        assert!(path.set_extension("header"));
+        path
     }
 }
 
@@ -195,10 +232,14 @@ impl CloseArrow for SegmentWriter {
 
 pub struct SegmentWriter2 {
     path: PathBuf,
+    checkpoint: PathBuf,
+    tmp: PathBuf,
     file: fs::File,
-    writer: FileWriter2<fs::File>,
+    writer: parquet2::write::FileWriter<fs::File>,
     schema: Schema,
+    key_value_metadata: Option<Vec<KeyValue>>,
     options: WriteOptions,
+    durable_checkpoints: bool,
 }
 
 impl SegmentWriter2 {
@@ -233,6 +274,56 @@ impl SegmentWriter2 {
             self.writer.write(group?)?;
         }
 
+        self.write_checkpoint()?;
+
+        Ok(())
+    }
+
+    fn write_checkpoint(&self) -> Result<()> {
+        use parquet_format_safe::thrift::protocol::{TCompactOutputProtocol, TOutputProtocol};
+        let metadata = self
+            .writer
+            .compute_metadata(self.key_value_metadata.clone())?;
+
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&self.tmp)?;
+
+        // Write header
+        file.write_all(PLATEAU_CHECKPOINT_HEADER.as_bytes())?;
+
+        // Write offset
+        let offset_bytes = self.writer.offset().to_le_bytes();
+        file.write_all(&offset_bytes)?;
+
+        // Then, write the header
+        let mut protocol = TCompactOutputProtocol::new(&mut file);
+        let metadata_len = metadata.write_to_out_protocol(&mut protocol)? as i32;
+        protocol.flush()?;
+        drop(protocol);
+        file.write_all(&metadata_len.to_le_bytes())?;
+
+        // Now, sync all the things
+        if self.durable_checkpoints {
+            // first the header file
+            file.sync_data()?;
+            drop(file);
+            // then the actual file, to ensure the underlying data is on disk
+            self.file.sync_data()?;
+        }
+
+        std::fs::rename(&self.tmp, &self.checkpoint)?;
+
+        // Finally sync the directory metadata, which will capture the rename.
+        if self.durable_checkpoints {
+            let mut parent = self.path.clone();
+            parent.pop();
+            let directory = fs::File::open(&parent)?;
+            directory.sync_all()?;
+        }
+
         Ok(())
     }
 }
@@ -243,8 +334,9 @@ impl CloseArrow for SegmentWriter2 {
     }
 
     fn end(&mut self) -> Result<()> {
-        self.writer.end(None)?;
+        self.writer.end(self.key_value_metadata.clone())?;
         self.file.sync_data()?;
+        std::fs::remove_file(&self.checkpoint)?;
         Ok(())
     }
 }
@@ -352,15 +444,53 @@ impl SegmentReader {
     }
 }
 
+fn recover(path: &Path, checkpoint_path: &Path) -> Result<FileMetaData> {
+    warn!("attempting to recover checkpoint {:?}", checkpoint_path);
+
+    {
+        let mut checkpoint = fs::File::open(checkpoint_path)?;
+        let mut segment = fs::File::options().write(true).open(path)?;
+
+        let mut buffer = [0u8; 8];
+        checkpoint.read_exact(&mut buffer)?;
+        if std::str::from_utf8(&buffer)? != PLATEAU_CHECKPOINT_HEADER {
+            anyhow::bail!("invalid checkpoint header");
+        }
+        checkpoint.read_exact(&mut buffer)?;
+        let offset = u64::from_le_bytes(buffer);
+        debug!(
+            "found valid v1 checkpoint at offset {} (file length {})",
+            offset,
+            segment.metadata()?.len()
+        );
+
+        let rest: Vec<u8> = checkpoint.bytes().collect::<Result<_, _>>()?;
+
+        segment.set_len(offset)?;
+        segment.seek(SeekFrom::Start(offset))?;
+        segment.write_all(&rest)?;
+        segment.write_all("PAR1".as_bytes())?;
+        warn!("successfully recovered checkpoint {:?}", checkpoint_path);
+    }
+
+    let mut f = fs::File::open(path)?;
+    read_metadata(&mut f).map_err(anyhow::Error::from)
+}
+
 pub(crate) struct DoubleEndedChunkReader {
     pub path: PathBuf,
     pub schema: Schema,
     metadata: arrow2::io::parquet::read::FileMetaData,
 }
 impl DoubleEndedChunkReader {
-    pub fn open(path: &Path) -> Result<Self> {
+    pub fn open(path: &Path, checkpoint_path: PathBuf) -> Result<Self> {
         let mut f = fs::File::open(path)?;
-        let metadata = read_metadata(&mut f)?;
+        let metadata = read_metadata(&mut f)
+            .map_err(anyhow::Error::from)
+            .or_else(|_| {
+                drop(f);
+                recover(path, checkpoint_path.as_path())
+            })?;
         let schema = infer_schema(&metadata)?;
 
         Ok(Self {
@@ -512,6 +642,8 @@ pub mod test {
     fn can_iter_forward_double_ended() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
+        let mut checkpoint = path.clone();
+        checkpoint.set_extension("header");
         let s = Segment::at(path.clone());
         let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
@@ -521,7 +653,7 @@ pub mod test {
         }
         let _ = w.close()?;
 
-        let reader = DoubleEndedChunkReader::open(path.as_path())?;
+        let reader = DoubleEndedChunkReader::open(path.as_path(), checkpoint)?;
 
         assert_eq!(
             collect_records(reader.schema.clone(), reader.iter()),
@@ -534,6 +666,8 @@ pub mod test {
     fn can_iter_reverse_double_ended() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
+        let mut checkpoint = path.clone();
+        checkpoint.set_extension("header");
         let s = Segment::at(path.clone());
         let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
@@ -545,7 +679,7 @@ pub mod test {
 
         records.reverse();
 
-        let reader = DoubleEndedChunkReader::open(path.as_path())?;
+        let reader = DoubleEndedChunkReader::open(path.as_path(), checkpoint)?;
         //let result: Vec<_> = r.map(|i| i.unwrap()).collect();
         //let (schema, iter) = r.into_chunk_iter();
         assert_eq!(
@@ -683,6 +817,49 @@ pub mod test {
                 .collect::<Vec<_>>(),
             records
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_drop_recovery() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("open-drop.parquet");
+        let s = Segment::at(path);
+
+        let a = inferences_schema_a();
+        let mut w = s.create2(a.schema.clone())?;
+        w.log_arrow(a.clone())?;
+        drop(w);
+
+        let r = s.read_double_ended()?;
+        assert_eq!(r.iter().next().map(|v| v.unwrap()), Some(a.chunk));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_write_recovery() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("partial-write.parquet");
+        let s = Segment::at(path.clone());
+
+        let a = inferences_schema_a();
+        let mut w = s.create2(a.schema.clone())?;
+        w.log_arrow(a.clone())?;
+        let prior = std::fs::read(s.checkpoint_path())?;
+        w.log_arrow(a.clone())?;
+        let len = w.writer.offset();
+        drop(w);
+        std::fs::write(s.checkpoint_path(), prior)?;
+
+        std::fs::File::options()
+            .append(true)
+            .open(path)?
+            .set_len(len - 4)?;
+
+        let r = s.read_double_ended()?;
+        assert_eq!(r.iter().next().map(|v| v.unwrap()), Some(a.chunk));
 
         Ok(())
     }
