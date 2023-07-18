@@ -6,16 +6,15 @@
 //! - [BatchSender] for the mechanism used to transmit a [Batch] of data.
 use async_trait::async_trait;
 use core::ops::Range;
-use log::{error, trace, warn};
-use serde::Deserialize;
+use log::{error, warn};
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::runtime::Handle;
-use tokio::sync::mpsc::{channel, Receiver, Sender, UnboundedSender};
-use tokio::sync::Mutex;
-use tokio::time::timeout;
+use std::sync::{Arc, Mutex};
+use tokio::{
+    runtime::Handle,
+    sync::mpsc::{channel, Receiver, Sender},
+    task,
+};
 
 use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 use lazy_static::lazy_static;
@@ -113,6 +112,10 @@ pub trait Batch: Sized {
 
     /// The number of events in this batch.
     fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() > 0
+    }
 
     /// The byte size of this batch.
     fn to_bytes(&self) -> Vec<u8>;
@@ -267,7 +270,7 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
 #[derive(Debug, Clone)]
 pub struct Transmission<E: Clone> {
     work_sender: Sender<E>,
-    dispatch_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    dispatch_task: Arc<Mutex<Option<task::JoinHandle<()>>>>,
 }
 
 impl<B: Clone + Batch + Send + 'static> Transmission<B> {
@@ -279,7 +282,7 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
         let (work_sender, work_receiver) = channel(pending_capacity);
 
         let dispatch_task =
-            Arc::new(std::sync::Mutex::new(Some(runtime.spawn(async move {
+            Arc::new(Mutex::new(Some(runtime.spawn(async move {
                 Self::dispatch_work(work_receiver, sender).await
             }))));
 
@@ -292,8 +295,10 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
     pub async fn end(self) {
         drop(self.work_sender);
 
-        if let Some(task) = self.dispatch_task.lock().unwrap().take() {
-            task.await.unwrap()
+        let task = { self.dispatch_task.lock().unwrap().take() };
+
+        if let Some(task) = task {
+            task.await.unwrap();
         }
     }
 
@@ -304,9 +309,6 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
     }
 
     async fn dispatch_work(mut work_receiver: Receiver<B>, sender: impl BatchSender<Batch = B>) {
-        let mut send = true;
-        let mut drain = false;
-
         let mut workers = WorkerPool::new(sender.clone());
 
         loop {
@@ -332,6 +334,7 @@ mod tests {
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
 
     use parking_lot::Mutex;
 
@@ -516,19 +519,9 @@ mod tests {
             .collect()
     }
 
-    use super::Batch;
-    use plateau_transport::arrow2::array::{
-        Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray,
-        TryExtend, Utf8Array,
-    };
-    use plateau_transport::arrow2::chunk::Chunk;
-    use plateau_transport::arrow2::datatypes::{DataType, Field, Metadata, Schema};
-    use plateau_transport::arrow2::offset::OffsetsBuffer;
-    use plateau_transport::SchemaChunk;
-
     #[tokio::test]
     async fn test_dispatch_start_stop() {
-        let (writer, reader) = recorder(1, 1000, None);
+        let (writer, _) = recorder(1, 1000, None);
         let transmission = Transmission::start(Handle::current(), writer, 10000);
 
         // send a lot of events
