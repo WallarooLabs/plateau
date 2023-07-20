@@ -34,7 +34,7 @@ use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
-use log::{error, info, trace};
+use log::{error, info, trace, warn};
 use metrics::{counter, gauge};
 use plateau_transport::arrow2::compute::comparison::lt_scalar;
 use plateau_transport::SchemaChunk;
@@ -168,7 +168,7 @@ impl Partition {
         let size = chunk.len();
         let mut state = self.state.write().await;
         let start = state.messages.next_record_ix().await;
-        state.roll_when_needed(self).await?;
+        state.roll_when_needed(self, &chunk.schema).await?;
         state.messages.append(chunk).await;
 
         Ok(start..(start + size))
@@ -383,9 +383,17 @@ impl State {
             // !!! partition.get_records(start, limit).await;
             // - commit_manifest.update(&commit_id, &r.data).await
             //
-            // the call to .get_records() occurs after .roll() has replaced the
-            // pending segment with the active one, but before the pending
-            // metadata has been written to the manifest. wait_for_record
+            // the core issue is that commit_manifest.update(..) happens in a
+            // separate thread at some indeterminate time after this .roll() has
+            // released the state write lock and returned
+            //
+            // as a result, the call to .get_records() occurs after .roll() has
+            // replaced the pending segment with the active one, but before the
+            // pending metadata has been written to the manifest.
+            //
+            // a deadlock ensues.
+            //
+            // wait_for_record waits for the manifest update to happen, and thus
             // enforces the correct order:
             //
             // - partition.append()
@@ -403,7 +411,22 @@ impl State {
         Ok(())
     }
 
-    async fn roll_when_needed(&mut self, partition: &Partition) -> Result<()> {
+    async fn roll_when_needed(&mut self, partition: &Partition, new_schema: &Schema) -> Result<()> {
+        if !self.messages.active_schema_matches(new_schema).await {
+            let partition_id = format!("{}", partition.id);
+            counter!(
+                "partition_schema_change", 1,
+                "partition" => partition_id,
+            );
+
+            warn!(
+                "{}: schema change after {:?}",
+                partition.id,
+                self.commits.borrow()
+            );
+            return self.roll(partition).await;
+        }
+
         if let Some(data) = self.messages.active_segment_data().await {
             let roll = &partition.config.roll;
             if let Some(d) = roll.max_segment_duration {
@@ -1026,8 +1049,7 @@ pub mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_schema_change() -> Result<()> {
+    async fn _test_schema_change() -> Result<()> {
         let records: Vec<_> = (0..(3 * 10))
             .into_iter()
             .map(|ix| Record {
@@ -1091,6 +1113,28 @@ pub mod test {
         }
 
         Ok(())
+    }
+
+    // NOTE: multiple copies of this test to expose and reliably reproduce an
+    // underlying concurrency bug
+    #[tokio::test]
+    async fn test_schema_change1() -> Result<()> {
+        _test_schema_change().await
+    }
+
+    #[tokio::test]
+    async fn test_schema_change2() -> Result<()> {
+        _test_schema_change().await
+    }
+
+    #[tokio::test]
+    async fn test_schema_change3() -> Result<()> {
+        _test_schema_change().await
+    }
+
+    #[tokio::test]
+    async fn test_schema_change4() -> Result<()> {
+        _test_schema_change().await
     }
 
     #[tokio::test]
