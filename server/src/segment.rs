@@ -9,8 +9,6 @@ use crate::arrow2::io::parquet::write::{
     WriteOptions,
 };
 use anyhow::Result;
-#[cfg(test)]
-use chrono::{Duration, TimeZone, Utc};
 use log::{debug, warn};
 use parquet2::metadata::{FileMetaData, KeyValue};
 use std::borrow::Borrow;
@@ -20,22 +18,7 @@ use std::ffi::OsStr;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter;
-#[cfg(test)]
-use std::sync::Arc;
 use std::{fs, path::Path, path::PathBuf};
-
-#[cfg(test)]
-use parquet::{
-    column::reader::ColumnReader,
-    column::writer::ColumnWriter,
-    data_type::ByteArray,
-    file::{
-        properties::WriterProperties,
-        reader::{FileReader, SerializedFileReader},
-        writer::{FileWriter, SerializedFileWriter},
-    },
-    schema::parser::parse_message_type,
-};
 
 pub use crate::chunk::Record;
 use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};
@@ -72,29 +55,6 @@ impl Segment {
             .create(true)
             .truncate(true)
             .open(&self.path)?)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn create(&self) -> Result<SegmentWriter> {
-        // TODO: better schema for timestamps.
-        // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
-        let message_type = "
-        message schema {
-            REQUIRED INT64 time;
-            REQUIRED BYTE_ARRAY message (UTF8);
-        }
-        ";
-        let schema = Arc::new(parse_message_type(message_type)?);
-        let props = Arc::new(WriterProperties::builder().build());
-
-        let file = self.file()?;
-        let writer = SerializedFileWriter::new(file.try_clone()?, schema, props)?;
-
-        Ok(SegmentWriter {
-            path: self.path.clone(),
-            file,
-            writer,
-        })
     }
 
     pub(crate) fn create2(&self, schema: Schema) -> Result<SegmentWriter2> {
@@ -143,13 +103,6 @@ impl Segment {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn read(&self) -> Result<SegmentReader> {
-        let file = fs::File::open(&self.path)?;
-        let reader = SerializedFileReader::new(file)?;
-        Ok(SegmentReader { reader })
-    }
-
     pub(crate) fn destroy(&self) -> Result<()> {
         fs::remove_file(self.path.as_path()).map_err(|e| e.into())
     }
@@ -166,67 +119,6 @@ impl Segment {
         let mut path: PathBuf = self.path.clone();
         assert!(path.set_extension("header"));
         path
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct SegmentWriter {
-    path: PathBuf,
-    file: fs::File,
-    writer: SerializedFileWriter<fs::File>,
-}
-
-#[cfg(test)]
-impl SegmentWriter {
-    fn log(&mut self, mut record: Vec<Record>) -> Result<()> {
-        let writer = &mut self.writer;
-        let mut row_group_writer = writer.next_row_group()?;
-
-        let mut times = vec![];
-        let mut messages = vec![];
-        for r in record.drain(..) {
-            let dt = r
-                .time
-                .signed_duration_since(Utc.timestamp_opt(0, 0).unwrap());
-            times.push(dt.num_milliseconds());
-            messages.push(ByteArray::from(r.message));
-        }
-
-        if let Some(mut col_writer) = row_group_writer.next_column()? {
-            match col_writer {
-                ColumnWriter::Int64ColumnWriter(ref mut typed_writer) => {
-                    typed_writer.write_batch(&times, None, None)?;
-                }
-                _ => anyhow::bail!("invalid column type"),
-            };
-            row_group_writer.close_column(col_writer)?;
-        }
-
-        if let Some(mut col_writer) = row_group_writer.next_column()? {
-            match col_writer {
-                ColumnWriter::ByteArrayColumnWriter(ref mut typed_writer) => {
-                    typed_writer.write_batch(&messages, None, None)?;
-                }
-                _ => anyhow::bail!("invalid column type"),
-            };
-            row_group_writer.close_column(col_writer)?;
-        }
-
-        writer.close_row_group(row_group_writer)?;
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-impl CloseArrow for SegmentWriter {
-    fn get_path(&self) -> &Path {
-        self.path.as_path()
-    }
-
-    fn end(&mut self) -> Result<()> {
-        self.writer.close()?;
-        self.file.sync_data()?;
-        Ok(())
     }
 }
 
@@ -362,85 +254,6 @@ pub(crate) trait CloseArrow: Sized {
         directory.sync_all()?;
 
         self.size_estimate()
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct SegmentReader {
-    reader: SerializedFileReader<fs::File>,
-}
-
-#[cfg(test)]
-impl SegmentReader {
-    pub(crate) fn into_chunk_iter(self) -> impl Iterator<Item = Result<Vec<Record>>> {
-        let metadata = self.reader.metadata().clone();
-
-        let mut def_levels = vec![0; 8];
-        let mut rep_levels = vec![0; 8];
-
-        (0..metadata.num_row_groups()).into_iter().map(move |i| {
-            let row_group_reader = self.reader.get_row_group(i)?;
-            let row_group_metadata = metadata.row_group(i);
-            let rows = usize::try_from(row_group_metadata.num_rows())?;
-            let mut tvs = vec![0; rows];
-
-            // NOTE - this buffer is dynamically resized by the reader when the
-            // on-disk size exceeds the allocated space, see the large_records
-            // test below for proof
-            let mut arrs: Vec<ByteArray> = vec![ByteArray::from(vec![0; 128])]
-                .into_iter()
-                .cycle()
-                .take(rows)
-                .collect();
-
-            let mut column_reader = row_group_reader.get_column_reader(0)?;
-            match column_reader {
-                ColumnReader::Int64ColumnReader(ref mut typed_reader) => {
-                    let mut read = 0;
-                    while read < rows {
-                        let batch = typed_reader.read_batch(
-                            rows,
-                            None,
-                            None,
-                            &mut tvs.as_mut_slice()[read..],
-                        )?;
-                        read += batch.0;
-                    }
-                }
-                _ => anyhow::bail!("invalid column type"),
-            };
-
-            let mut column_reader = row_group_reader.get_column_reader(1)?;
-            match column_reader {
-                ColumnReader::ByteArrayColumnReader(ref mut typed_reader) => {
-                    let mut read = 0;
-                    while read < rows {
-                        let batch = typed_reader.read_batch(
-                            rows,
-                            Some(&mut def_levels),
-                            Some(&mut rep_levels),
-                            &mut arrs.as_mut_slice()[read..],
-                        )?;
-                        read += batch.0;
-                    }
-                }
-                _ => anyhow::bail!("invalid column type"),
-            };
-
-            let result: Vec<_> = tvs
-                .into_iter()
-                .zip(arrs.into_iter())
-                .map(|(tv, message)| {
-                    let time = Utc.timestamp_opt(0, 0).unwrap() + Duration::milliseconds(tv);
-                    Record {
-                        time,
-                        message: message.data().to_vec(),
-                    }
-                })
-                .collect();
-
-            Ok(result)
-        })
     }
 }
 
@@ -588,6 +401,7 @@ pub mod test {
     use crate::arrow2::datatypes::{Field, Metadata};
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{iter_legacy, legacy_schema, LegacyRecords};
+    use chrono::{TimeZone, Utc};
     use sample_arrow2::{
         array::ArbitraryArray,
         chunk::{ArbitraryChunk, ChainedChunk, ChainedMultiChunk},
@@ -603,32 +417,6 @@ pub mod test {
             message: message.into_bytes(),
         })
         .collect()
-    }
-    #[test]
-    fn round_trip() -> Result<()> {
-        let root = tempdir()?;
-        let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
-        let records: Vec<_> = build_records(
-            (0..20)
-                .into_iter()
-                .map(|ix| (ix, format!("message-{}", ix))),
-        );
-
-        let mut w = s.create()?;
-        w.log(records[0..10].to_vec())?;
-        w.log(records[10..].to_vec())?;
-        let size = w.close()?;
-        assert!(size > 0);
-
-        let r = s.read()?;
-        assert_eq!(
-            r.into_chunk_iter()
-                .flat_map(|b| b.unwrap())
-                .collect::<Vec<_>>(),
-            records
-        );
-        Ok(())
     }
 
     fn collect_records(
@@ -647,9 +435,9 @@ pub mod test {
         let s = Segment::at(path.clone());
         let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
-        let mut w = s.create()?;
+        let mut w = s.create2(legacy_schema())?;
         for record in records.clone() {
-            w.log([record].to_vec())?;
+            w.log_arrow(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?)?;
         }
         let _ = w.close()?;
 
@@ -671,9 +459,9 @@ pub mod test {
         let s = Segment::at(path.clone());
         let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
-        let mut w = s.create()?;
+        let mut w = s.create2(legacy_schema())?;
         for record in records.clone() {
-            w.log([record].to_vec())?;
+            w.log_arrow(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?)?;
         }
         let _ = w.close()?;
 
@@ -691,20 +479,13 @@ pub mod test {
 
     #[test]
     fn round_trip1_2() -> Result<()> {
-        let root = tempdir()?;
-        let path = root.path().join("testing.parquet");
+        let path = PathBuf::from("tests/data/v1.parquet");
         let s = Segment::at(path);
         let records: Vec<_> = build_records(
             (0..20)
                 .into_iter()
                 .map(|ix| (ix, format!("message-{}", ix))),
         );
-
-        let mut w = s.create()?;
-        w.log(records[0..10].to_vec())?;
-        w.log(records[10..].to_vec())?;
-        let size = w.close()?;
-        assert!(size > 0);
 
         let r = s.read_double_ended()?;
         assert_eq!(collect_records(r.schema.clone(), r.iter()), records);
@@ -804,19 +585,18 @@ pub mod test {
                 .map(|ix| (ix, format!("message-{}-{}", ix, large))),
         );
 
-        let mut w = s.create()?;
-        w.log(records[0..10].to_vec())?;
-        w.log(records[10..].to_vec())?;
+        let mut w = s.create2(legacy_schema())?;
+        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
+            records[0..10].to_vec(),
+        ))?)?;
+        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
+            records[10..].to_vec(),
+        ))?)?;
         let size = w.close()?;
         assert!(size > 0);
 
-        let r = s.read()?;
-        assert_eq!(
-            r.into_chunk_iter()
-                .flat_map(|b| b.unwrap())
-                .collect::<Vec<_>>(),
-            records
-        );
+        let r = s.read_double_ended()?;
+        assert_eq!(collect_records(legacy_schema(), r.iter()), records);
 
         Ok(())
     }
