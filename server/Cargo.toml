@@ -11,7 +11,7 @@ test = []
 
 [dependencies]
 anyhow = "1"
-bytesize = {version = "1.1.0", features = ["serde"]}
+bytesize = { version = "1.1.0", features = ["serde"] }
 config = "0.13"
 futures = "0.3"
 itertools = "0.10"
@@ -34,14 +34,21 @@ tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.5", features = [ "chrono", "sqlite", "runtime-tokio-rustls" ] }
+sqlx = { version = "0.5", features = [
+  "chrono",
+  "sqlite",
+  "runtime-tokio-rustls",
+] }
 systemstat = "0.2"
 rand = "0.8"
 
 [dev-dependencies]
 itermore = "0.1"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
-uuid = { version = "1", features = ["v4", "fast-rng"]}
+reqwest = { version = "0.11", default-features = false, features = [
+  "json",
+  "rustls-tls",
+] }
+uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 sample-test = "0.1"
 sample-std = "0.1"

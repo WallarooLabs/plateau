@@ -83,6 +83,18 @@ enum Command {
         #[structopt(flatten)]
         params: TopicIterationQuery,
     },
+    #[cfg(feature = "polars")]
+    /// Iterate through records with Polars
+    IteratePolars {
+        /// Topic name
+        topic_name: String,
+        /// Partition name
+        partition_name: String,
+        /// Iterator position
+        position: usize,
+        #[structopt(flatten)]
+        params: TopicIterationQuery,
+    },
     /// Insert a single record
     Insert {
         /// Topic name
@@ -131,6 +143,12 @@ pub enum OutputFormat {
     #[default]
     Stdout,
     ArrowStdout,
+    #[cfg(feature = "polars")]
+    Polars {
+        path: PathBuf,
+    },
+    #[cfg(feature = "polars")]
+    PolarsStdout,
 }
 
 impl Display for OutputFormat {
@@ -140,6 +158,10 @@ impl Display for OutputFormat {
             OutputFormat::Plaintext { path } => write!(f, "plaintext={}", path.display()),
             OutputFormat::Stdout => write!(f, "plaintext"),
             OutputFormat::ArrowStdout => write!(f, "arrow"),
+            #[cfg(feature = "polars")]
+            OutputFormat::Polars { path } => write!(f, "polars={}", path.display()),
+            #[cfg(feature = "polars")]
+            OutputFormat::PolarsStdout => write!(f, "polars"),
         }
     }
 }
@@ -159,6 +181,12 @@ impl FromStr for OutputFormat {
                 path: filename.into(),
             }),
             (Some("arrow"), None) => Ok(OutputFormat::ArrowStdout),
+            #[cfg(feature = "polars")]
+            (Some("polars"), None) => Ok(OutputFormat::PolarsStdout),
+            #[cfg(feature = "polars")]
+            (Some("polars"), Some(filename)) => Ok(OutputFormat::Polars {
+                path: filename.into(),
+            }),
             _ => Err(anyhow!("invalid output format specificiation: {s}")),
         }
     }
@@ -209,6 +237,27 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
                     print!("-- Chunk {}\n{}", i + params.start, sc.into_string());
                 }
             }
+            #[cfg(feature = "polars")]
+            OutputFormat::PolarsStdout => {
+                let response: polars::frame::DataFrame = client
+                    .get_records(topic_name, partition_name, &params)
+                    .await?;
+
+                print!("\n{}", response);
+
+                let df = response.unnest(["out", "in", "metadata"])?;
+
+                print!("\n{:?}", df);
+            }
+            #[cfg(feature = "polars")]
+            OutputFormat::Polars { path } => {
+                let response: polars::frame::DataFrame = client
+                    .get_records(topic_name, partition_name, &params)
+                    .await?;
+
+                let mut file = File::create(path).await?;
+                file.write_all(response.to_string().as_bytes()).await?;
+            }
         },
         Command::Iterate {
             topic_name,
@@ -224,6 +273,22 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
                 )
                 .await?;
             print!("{}", response.into_string());
+        }
+        #[cfg(feature = "polars")]
+        Command::IteratePolars {
+            topic_name,
+            partition_name,
+            position,
+            params,
+        } => {
+            let response: polars::frame::DataFrame = client
+                .iterate_topic(
+                    topic_name,
+                    &params,
+                    &Some(HashMap::from([(partition_name, position)])),
+                )
+                .await?;
+            print!("{}", response);
         }
         Command::Insert {
             topic_name,

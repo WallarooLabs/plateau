@@ -59,6 +59,9 @@ pub enum Error {
     ArrowDeserialize(ArrowError),
     #[error("Empty stream from server")]
     EmptyStream,
+    #[cfg(feature = "polars")]
+    #[error("Failed polars parse: {0}")]
+    PolarsParse(polars::error::PolarsError),
 }
 
 /// Plateau client. Creation options:
@@ -319,6 +322,16 @@ pub fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchem
         .collect())
 }
 
+#[cfg(feature = "polars")]
+pub fn bytes_into_polars(bytes: Bytes) -> Result<polars::frame::DataFrame, Error> {
+    use polars::prelude::SerReader;
+
+    let cursor = Cursor::new(bytes);
+    let reader = polars::io::ipc::IpcReader::new(cursor);
+    let df = reader.finish();
+    df.map_err(Error::PolarsParse)
+}
+
 /// Trait for providing iteration through a topic's record, providing records in a specific
 ///  `Output` format.
 #[async_trait]
@@ -387,6 +400,52 @@ impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
         .map_err(Error::Server)?;
 
         bytes_into_schemachunk(bytes)
+    }
+}
+
+#[cfg(feature = "polars")]
+#[async_trait]
+impl Iterate<polars::frame::DataFrame> for Client {
+    /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
+    async fn iterate_topic<'a>(
+        &self,
+        topic_name: impl AsRef<str> + Send,
+        params: &TopicIterationQuery,
+        position: impl Into<Option<&'a TopicIterator>> + Send,
+    ) -> Result<polars::frame::DataFrame, Error> {
+        let bytes = process_request(
+            self.iteration_request(topic_name, params, position)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(Error::Server)?;
+
+        bytes_into_polars(bytes)
+    }
+}
+
+#[cfg(feature = "polars")]
+#[async_trait]
+impl Retrieve<polars::frame::DataFrame> for Client {
+    /// Retrieve a set of records from a specifid topic and partition, returning results in
+    /// [Records] (plaintext) format.
+    async fn get_records(
+        &self,
+        topic_name: impl AsRef<str> + Send,
+        partition_name: impl AsRef<str> + Send,
+        params: &RecordQuery,
+    ) -> Result<polars::frame::DataFrame, Error> {
+        let b = process_request(
+            self.retrieve_request(topic_name, partition_name, params)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(Error::Server)?;
+        bytes_into_polars(b)
     }
 }
 
