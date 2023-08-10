@@ -17,12 +17,25 @@ use crate::partition;
 use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;
 
-#[derive(Default, Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     retain: Retention,
     partition: partition::Config,
     storage: storage::Config,
+    #[serde(default = "Catalog::default_max_open_topics")]
+    max_open_topics: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            retain: Default::default(),
+            partition: Default::default(),
+            storage: Default::default(),
+            max_open_topics: Catalog::default_max_open_topics(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -81,6 +94,7 @@ impl Catalog {
 
     pub async fn retain(&self) {
         trace!("begin global retention check");
+        self.prune_topics().await;
         while self.over_retention_limit().await {
             // errors in here are effectively unrecoverable as the loop would otherwise spin.
             // additionally, the disk will eventually fill leading to system failure
@@ -95,6 +109,20 @@ impl Catalog {
             partition.remove_oldest().await;
         }
         trace!("end global retention check");
+    }
+
+    pub async fn prune_topics(&self) {
+        let mut topics = self.topics.write().await;
+        while topics.len() > self.config.max_open_topics {
+            let to_drop = topics.keys().next().expect("no topics left").clone();
+            info!(
+                "open topic limit hit ({} > {}), dropping \"{}\"",
+                topics.len(),
+                self.config.max_open_topics,
+                to_drop
+            );
+            topics.remove(&to_drop);
+        }
     }
 
     async fn byte_size(&self) -> ByteSize {
@@ -163,6 +191,11 @@ impl Catalog {
             error!("error while monitoring disk storage capacity: {e:?}");
         }
     }
+
+    /// Default number of topics to keep in-memory.
+    pub fn default_max_open_topics() -> usize {
+        16
+    }
 }
 
 #[cfg(test)]
@@ -176,9 +209,13 @@ mod test {
     use tempfile::{tempdir, TempDir};
 
     async fn catalog() -> (TempDir, Catalog) {
+        catalog_config(Default::default()).await
+    }
+
+    async fn catalog_config(config: Config) -> (TempDir, Catalog) {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
-        (dir, Catalog::attach(root, Default::default()).await)
+        (dir, Catalog::attach(root, config).await)
     }
 
     #[tokio::test]
@@ -218,7 +255,6 @@ mod test {
 
     #[tokio::test]
     async fn test_retain() -> Result<()> {
-        pretty_env_logger::init();
         let (_root, mut catalog) = catalog().await;
         catalog.config.retain.max_bytes = ByteSize::b(8000);
 
@@ -253,6 +289,58 @@ mod test {
         let topic = catalog.get_topic("oldest").await;
         let partition = topic.get_partition("default").await;
         assert!(partition.byte_size().await < old_size);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_max_open_topics() -> Result<()> {
+        let (_root, catalog) = catalog_config(Config {
+            max_open_topics: 1,
+            ..Default::default()
+        })
+        .await;
+
+        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
+            .into_iter()
+            .map(|message| Record {
+                time: Utc.timestamp_opt(0, 0).unwrap(),
+                message: message.bytes().collect(),
+            })
+            .collect();
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            {
+                catalog
+                    .get_topic(&name)
+                    .await
+                    .extend_records("default", &[record.clone()])
+                    .await?;
+            }
+            catalog.checkpoint().await;
+            catalog.retain().await;
+            {
+                assert!(catalog.topics.read().await.len() <= 1);
+            }
+        }
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            {
+                let topic = catalog.get_topic(&name).await;
+                assert_eq!(
+                    topic
+                        .get_record_by_index("default", RecordIndex(ix / 3))
+                        .await,
+                    Some(record.clone())
+                );
+            }
+            catalog.prune_topics().await;
+            {
+                assert!(catalog.topics.read().await.len() <= 1);
+            }
+        }
 
         Ok(())
     }
