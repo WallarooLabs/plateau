@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 use crate::manifest::Manifest;
@@ -38,13 +38,12 @@ impl Default for Config {
     }
 }
 
-#[derive(Clone)]
 pub struct Catalog {
     config: Config,
     manifest: Manifest,
-    root: Arc<PathBuf>,
-    topics: Arc<RwLock<HashMap<String, Topic>>>,
-    last_checkpoint: Arc<RwLock<SystemTime>>,
+    root: PathBuf,
+    topics: RwLock<HashMap<String, Topic>>,
+    last_checkpoint: RwLock<SystemTime>,
     disk_monitor: DiskMonitor,
 }
 
@@ -55,9 +54,9 @@ impl Catalog {
         Catalog {
             config,
             manifest: Manifest::attach(root.join("manifest.json")).await,
-            root: Arc::new(root),
-            topics: Arc::new(RwLock::new(HashMap::new())),
-            last_checkpoint: Arc::new(RwLock::new(SystemTime::now())),
+            root,
+            topics: RwLock::new(HashMap::new()),
+            last_checkpoint: RwLock::new(SystemTime::now()),
             disk_monitor,
         }
     }
@@ -158,7 +157,7 @@ impl Catalog {
                 let mut write = self.topics.write().await;
                 info!("creating new topic: {}", name);
                 let topic = Topic::attach(
-                    (*self.root).clone(),
+                    self.root.clone(),
                     self.manifest.clone(),
                     String::from(name),
                     self.config.partition.clone(),
@@ -195,6 +194,45 @@ impl Catalog {
     /// Default number of topics to keep in-memory.
     pub fn default_max_open_topics() -> usize {
         16
+    }
+
+    /// Close catalog (perform final checkpoint and drop all writers)
+    pub async fn close(mut catalog: Arc<Self>) -> bool {
+        let now = Instant::now();
+        let secs = 30;
+        info!("waiting {secs}s for all pending operations to complete");
+        let mut exclusive = None;
+        for _ in 0..secs {
+            // gah, into_inner is 1.70 onward...
+            match Arc::try_unwrap(catalog) {
+                Ok(c) => {
+                    exclusive = Some(c);
+                    break;
+                }
+                Err(arc) => {
+                    catalog = arc;
+                }
+            }
+            trace!("outstanding: {}", Arc::strong_count(&catalog));
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+
+        if let Some(exclusive) = exclusive {
+            info!("all pending operations completed in {:?}", now.elapsed());
+            let now = Instant::now();
+            info!("performing final checkpoint");
+            exclusive.checkpoint().await;
+            info!("final checkpoint complete in {:?}", now.elapsed());
+
+            let now = Instant::now();
+            info!("dropping catalog to flush writer queues");
+            drop(exclusive);
+            info!("catalog dropped in {:?}", now.elapsed());
+            true
+        } else {
+            warn!("operations still pending; could not close catalog");
+            false
+        }
     }
 }
 

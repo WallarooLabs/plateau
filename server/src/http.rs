@@ -1,7 +1,7 @@
 use ::log::info;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::future;
+use futures::FutureExt;
 use std::sync::Arc;
 
 use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Rejection, Reply};
@@ -14,7 +14,7 @@ use std::ops::{Range, RangeInclusive};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 use tempfile::tempdir;
-use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tracing::Instrument;
 
 use crate::config::PlateauConfig;
@@ -80,10 +80,16 @@ impl From<BatchStatus> for RecordStatus {
 
 pub async fn serve(
     config: PlateauConfig,
-    catalog: Catalog,
-) -> (SocketAddr, Pin<Box<dyn Future<Output = ()> + Send>>) {
+    catalog: Arc<Catalog>,
+) -> (
+    SocketAddr,
+    oneshot::Sender<()>,
+    Pin<Box<dyn Future<Output = ()> + Send>>,
+) {
     let log = warp::log("plateau::http");
     let config = Arc::new(config);
+
+    let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
     let inner_config = config.clone();
     let (spec, filter) = openapi::spec().build(move || {
@@ -108,11 +114,12 @@ pub async fn serve(
 
     // Ideally warp would have something like a `run_ephemeral`, but here we
     // are. it's only three lines to copy from Server::run
-    let (addr, fut) = server.bind_ephemeral(config.http.bind);
+    let (addr, fut) =
+        server.bind_with_graceful_shutdown(config.http.bind, FutureExt::map(rx_shutdown, |_| ()));
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, "listening on http://{}", addr);
 
-    (addr, Box::pin(fut.instrument(span)))
+    (addr, tx_shutdown, Box::pin(fut.instrument(span)))
 }
 
 /// A RAII wrapper around a full plateau test server.
@@ -123,8 +130,8 @@ pub async fn serve(
 /// prevent port conflicts.
 pub struct TestServer {
     addr: SocketAddr,
-    end_tx: mpsc::Sender<()>,
-    pub catalog: Catalog,
+    end_tx: oneshot::Sender<()>,
+    pub catalog: Arc<Catalog>,
 }
 
 impl TestServer {
@@ -141,16 +148,13 @@ impl TestServer {
     }
 
     pub async fn new_with_config(config: PlateauConfig) -> Result<Self> {
-        let (end_tx, mut end_rx) = mpsc::channel(1);
         let temp = tempdir()?;
         let root = temp.into_path();
-        let catalog = Catalog::attach(root, Default::default()).await;
+        let catalog = Arc::new(Catalog::attach(root, Default::default()).await);
 
         let serve_catalog = catalog.clone();
-        let (addr, server) = serve(config, serve_catalog).await;
-        tokio::spawn(async move {
-            future::select(Box::pin(end_rx.recv()), server).await;
-        });
+        let (addr, end_tx, server) = serve(config, serve_catalog).await;
+        tokio::spawn(server);
 
         Ok(TestServer {
             addr,
@@ -166,18 +170,22 @@ impl TestServer {
     pub fn base(&self) -> String {
         format!("http://{}", self.host())
     }
-}
 
-impl Drop for TestServer {
-    fn drop(&mut self) {
-        self.end_tx.try_send(()).unwrap();
+    pub async fn stop(self) -> Arc<Catalog> {
+        self.end_tx.send(()).unwrap();
+        self.catalog
+    }
+
+    /// This simulates a "clean" plateau shutdown.
+    pub async fn close(self) {
+        Catalog::close(self.stop().await).await;
     }
 }
 
 #[get("/ok")]
 #[openapi(id = "healthcheck")]
 async fn healthcheck(
-    #[data] catalog: Catalog,
+    #[data] catalog: Arc<Catalog>,
     #[data] config: Arc<PlateauConfig>,
 ) -> Result<Json<serde_json::Value>, Rejection> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
@@ -193,7 +201,7 @@ async fn healthcheck(
 
 #[get("/topics")]
 #[openapi(id = "get_topics")]
-async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection> {
+async fn get_topics(#[data] catalog: Arc<Catalog>) -> Result<Json<Topics>, Rejection> {
     let topics = catalog.list_topics().await;
     Ok(Json::from(Topics {
         topics: topics.into_iter().map(|name| Topic { name }).collect(),
@@ -205,7 +213,7 @@ async fn get_topics(#[data] catalog: Catalog) -> Result<Json<Topics>, Rejection>
 async fn topic_append(
     topic_name: String,
     partition_name: String,
-    #[data] catalog: Catalog,
+    #[data] catalog: Arc<Catalog>,
     chunk: SchemaChunkRequest,
 ) -> Result<Json<Inserted>, Rejection> {
     if catalog.is_readonly() {
@@ -237,7 +245,7 @@ async fn topic_append(
 #[openapi(id = "topic.get_partitions")]
 async fn topic_get_partitions(
     topic_name: String,
-    #[data] catalog: Catalog,
+    #[data] catalog: Arc<Catalog>,
 ) -> Result<Json<Partitions>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
     let indices = topic.readable_ids().await;
@@ -292,7 +300,7 @@ async fn topic_iterate(
     #[filter = "nonstrict_query"] query: TopicIterationQuery,
     #[filter = "accept"] content: Option<String>,
     #[json] position: Option<TopicIterator>,
-    #[data] catalog: Catalog,
+    #[data] catalog: Arc<Catalog>,
     #[data] max_page: RowLimit,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
@@ -337,7 +345,7 @@ async fn partition_get_records(
     partition_name: String,
     #[filter = "nonstrict_query"] query: RecordQuery,
     #[filter = "accept"] content: Option<String>,
-    #[data] catalog: Catalog,
+    #[data] catalog: Arc<Catalog>,
     #[data] max_page: RowLimit,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;

@@ -1,6 +1,9 @@
+use ::log::info;
 use futures::stream::StreamExt;
 use futures::{future, stream};
 use rweb::*;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time;
@@ -19,7 +22,7 @@ async fn main() {
     pretty_env_logger::init();
 
     let config = plateau::config::binary_config().expect("error getting configuration");
-    let catalog = Catalog::attach(config.data_path.clone(), config.catalog.clone()).await;
+    let catalog = Arc::new(Catalog::attach(config.data_path.clone(), config.catalog.clone()).await);
     metrics::start_metrics(config.metrics.clone());
 
     let mut exit = stream::select_all(vec![
@@ -30,18 +33,24 @@ async fn main() {
 
     let mut checkpoints = time::interval(Duration::from_millis(config.checkpoint_ms));
     checkpoints.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
-    let catalog_checkpoint = catalog.clone();
-    let stream = IntervalStream::new(checkpoints)
+    let checkpoint_stream = IntervalStream::new(checkpoints)
         .take_until(exit.next())
         .for_each(|_| async {
-            let inner = catalog_checkpoint.clone();
-            inner.checkpoint().await;
-            inner.retain().await;
+            catalog.checkpoint().await;
+            catalog.retain().await;
         });
 
-    future::select(
-        future::select(Box::pin(stream), Box::pin(catalog.monitor_disk_storage())),
-        http::serve(config, catalog.clone()).await.1,
-    )
-    .await;
+    let (_, end_tx, server) = http::serve(config, catalog.clone()).await;
+    {
+        future::select_all([
+            Box::pin(checkpoint_stream) as Pin<Box<dyn Future<Output = ()>>>,
+            Box::pin(catalog.monitor_disk_storage()),
+            server,
+        ])
+        .await;
+    }
+
+    info!("shutting down");
+    end_tx.send(()).ok();
+    Catalog::close(catalog).await;
 }
