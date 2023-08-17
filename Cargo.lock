@@ -2262,6 +2262,7 @@ dependencies = [
  "chrono",
  "config",
  "futures",
+ "humantime-serde",
  "itermore",
  "itertools",
  "log",

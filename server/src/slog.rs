@@ -26,15 +26,16 @@ use crate::segment::Record;
 use crate::segment::{CloseArrow, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use log::trace;
+use log::{debug, error, info, trace};
 use metrics::counter;
 use plateau_transport::{SchemaChunk, SegmentChunk};
+use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
 use std::convert::TryFrom;
 use std::ops::{Add, AddAssign, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
@@ -43,6 +44,25 @@ use tokio::time::timeout;
 pub enum SlogError {
     #[error("writer thread busy")]
     WriterThreadBusy,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    #[serde(with = "humantime_serde")]
+    pub write_queue_timeout: Duration,
+    pub write_queue_size: usize,
+    pub write_queue_batch_limit: usize,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            write_queue_timeout: Duration::from_millis(100),
+            write_queue_size: 16,
+            write_queue_batch_limit: 1000,
+        }
+    }
 }
 
 /// Each segment in the slog has a unique increasing index
@@ -71,6 +91,7 @@ pub(crate) struct SegmentChunkIndex(pub(crate) usize);
 pub(crate) struct Checkpoint {
     pub(crate) segment: SegmentIndex,
     pub(crate) chunk: SegmentChunkIndex,
+    pub(crate) record: RecordIndex,
 }
 
 /// Each record also has a global unique sequential index
@@ -117,11 +138,12 @@ pub struct State {
     active: Option<MemorySegment>,
     active_checkpoint: Checkpoint,
     active_first_record_ix: RecordIndex,
-    writer: mpsc::Sender<AppendRequest>,
-    handle: Option<JoinHandle<()>>,
+    thread: SlogThread,
     pending: Option<MemorySegment>,
+    config: Config,
 }
 
+#[derive(Debug)]
 struct AppendRequest {
     seal: bool,
     segment: SegmentIndex,
@@ -145,19 +167,21 @@ impl Slog {
         name: String,
         active_segment: SegmentIndex,
         active_first_record_ix: RecordIndex,
+        config: Config,
     ) -> (Self, SlogWrites) {
-        let (writer, rx, handle) = spawn_slog_thread(root.clone(), name.clone());
+        let (thread, rx) = spawn_slog_thread(root.clone(), name.clone(), config.write_queue_size);
         let active_checkpoint = Checkpoint {
             segment: active_segment,
             chunk: SegmentChunkIndex(0),
+            record: active_first_record_ix,
         };
         let state = State {
             active: None,
             pending: None,
             active_checkpoint,
             active_first_record_ix,
-            writer,
-            handle: Some(handle),
+            thread,
+            config,
         };
 
         let slog = Slog {
@@ -222,7 +246,6 @@ impl Slog {
         }
 
         let segment = self.get_segment(ix);
-
         if !Path::new(segment.path()).exists() {
             return Box::new(std::iter::empty());
         }
@@ -303,39 +326,32 @@ impl Slog {
 
 impl State {
     pub(crate) async fn append(&mut self, d: SchemaChunk<Schema>) -> Checkpoint {
-        let chunk = SegmentChunkIndex(
-            self.active
-                .as_ref()
-                .map(|segment| segment.chunks.len())
-                .unwrap_or(0),
-        );
         let first = self.active_first_record_ix;
         let index = self.active_checkpoint.segment;
         let data_time_range = d.time_range().unwrap();
 
         let size = d.chunk.len();
-        if let Some(active) = &mut self.active {
-            active.metadata.size += size;
-            active.metadata.records.end += size;
-            active.metadata.time = min(*active.metadata.time.start(), *data_time_range.start())
-                ..=max(*active.metadata.time.end(), *data_time_range.end());
-            active.chunks.push(d.chunk);
-        } else {
-            self.active = Some(MemorySegment {
-                schema: d.schema,
-                metadata: SegmentData {
-                    index,
-                    size,
-                    records: first..(first + size),
-                    time: data_time_range,
-                },
-                chunks: vec![d.chunk],
-            });
-        }
+        let active = self.active.get_or_insert_with(|| MemorySegment {
+            schema: d.schema,
+            metadata: SegmentData {
+                index,
+                size: 0,
+                records: first..first,
+                time: data_time_range.clone(),
+            },
+            chunks: vec![],
+        });
+
+        active.metadata.size += size;
+        active.metadata.records.end += size;
+        active.metadata.time = min(*active.metadata.time.start(), *data_time_range.start())
+            ..=max(*active.metadata.time.end(), *data_time_range.end());
+        active.chunks.push(d.chunk);
 
         Checkpoint {
             segment: index,
-            chunk,
+            chunk: SegmentChunkIndex(active.chunks.len()),
+            record: active.metadata.records.end,
         }
     }
 
@@ -366,36 +382,46 @@ impl State {
     async fn checkpoint(&mut self, seal: bool) -> bool {
         if let Some(segment) = &self.active {
             let chunk_size = segment.chunks.len();
-            let append_indices = self.active_checkpoint.chunk.0..chunk_size;
-            let record_size = segment.chunks[append_indices.clone()]
-                .iter()
-                .map(|c| c.len())
-                .sum();
-            let start = self.active_first_record_ix;
-            let records = start..(start + record_size);
-            if append_indices.end - append_indices.start == 0 {
-                return true;
-            }
-            // TODO make timeout configurable
-            if timeout(
-                Duration::from_millis(100),
-                self.writer.send(AppendRequest {
-                    seal,
+            let mut remaining_chunk_ixs = self.active_checkpoint.chunk.0..chunk_size;
+            while remaining_chunk_ixs.start < remaining_chunk_ixs.end {
+                let mut request_chunk_ixs = remaining_chunk_ixs.start..remaining_chunk_ixs.start;
+                let mut request_len = 0;
+                for ix in remaining_chunk_ixs.clone() {
+                    request_len += segment.chunks[ix].len();
+                    request_chunk_ixs.end = ix + 1;
+                    if request_len >= self.config.write_queue_batch_limit {
+                        break;
+                    }
+                }
+
+                let last_request = remaining_chunk_ixs.end == request_chunk_ixs.end;
+                let last_sent_ix = self.active_checkpoint.record;
+                let request_record_ixs = self.active_first_record_ix..(last_sent_ix + request_len);
+                let request = AppendRequest {
+                    seal: seal && last_request,
                     segment: self.active_checkpoint.segment,
-                    records,
+                    records: request_record_ixs.clone(),
                     time: segment.metadata.time.clone(),
                     schema: segment.schema.clone(),
-                    chunks: segment.chunks[append_indices.clone()].to_vec(),
-                }),
-            )
-            .await
-            .is_ok()
-            {
-                self.active_checkpoint.chunk = SegmentChunkIndex(append_indices.end);
-                true
-            } else {
-                false
+                    chunks: segment.chunks[request_chunk_ixs.clone()].to_vec(),
+                };
+                trace!("{:?}", request);
+                if timeout(
+                    self.config.write_queue_timeout,
+                    self.thread.tx.send(request),
+                )
+                .await
+                .is_ok()
+                {
+                    remaining_chunk_ixs.start = request_chunk_ixs.end;
+                    self.active_checkpoint.chunk = SegmentChunkIndex(request_chunk_ixs.end);
+                    self.active_checkpoint.record = request_record_ixs.end;
+                } else {
+                    return false;
+                }
             }
+
+            true
         } else {
             true
         }
@@ -423,24 +449,40 @@ impl State {
 impl Drop for State {
     fn drop(&mut self) {
         let (tx, _) = mpsc::channel(1);
-        let messages = std::mem::replace(&mut self.writer, tx);
+        let messages = std::mem::replace(&mut self.thread.tx, tx);
+
+        let now = Instant::now();
+        trace!("initiating shutdown");
+        self.thread.tx_fin.try_send(()).ok();
         drop(messages);
-        if let Some(h) = self.handle.take() {
-            h.join().unwrap();
+        if let Some(h) = self.thread.join.take() {
+            if let Err(e) = h.join() {
+                error!("error joining writer thread: {:?}", e);
+            }
+            info!("writer thread shutdown in {:?}", now.elapsed());
         }
     }
+}
+
+struct SlogThread {
+    tx: mpsc::Sender<AppendRequest>,
+    tx_fin: mpsc::Sender<()>,
+    join: Option<JoinHandle<()>>,
 }
 
 fn spawn_slog_thread(
     root: PathBuf,
     name: String,
-) -> (mpsc::Sender<AppendRequest>, SlogWrites, JoinHandle<()>) {
-    let (tx, mut rx_records) = mpsc::channel(1);
-    let (tx_done, rx) = mpsc::channel(1);
+    write_queue_size: usize,
+) -> (SlogThread, SlogWrites) {
+    let (tx, mut rx_records) = mpsc::channel(write_queue_size);
+    let (tx_fin, mut rx_fin) = mpsc::channel(1);
+    let (tx_commits, rx_commits) = mpsc::channel(1);
 
-    let handle = std::thread::spawn(move || {
+    let join = std::thread::spawn(move || {
         let mut active = true;
         let mut current: Option<(Schema, SegmentWriter2, SegmentIndex)> = None;
+        let mut prior_size = 0;
         while active {
             match rx_records.blocking_recv() {
                 Some(AppendRequest {
@@ -451,6 +493,7 @@ fn spawn_slog_thread(
                     schema,
                     chunks,
                 }) => {
+                    trace!("received request for {:?}", records);
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
@@ -470,19 +513,34 @@ fn spawn_slog_thread(
                         )
                     });
 
+                    let now = Instant::now();
                     for chunk in chunks.into_iter() {
-                        let count = chunk.len();
                         writer
                             .log_arrow(SchemaChunk {
                                 schema: schema.clone(),
                                 chunk,
                             })
                             .expect("added records");
-                        counter!("slog_thread_records_written", u64::try_from(count).unwrap(), "name" => name.clone());
                     }
                     let size = writer.size_estimate().expect("segment size estimate");
+                    let record_len = records.end.0 - records.start.0;
+                    debug!(
+                        "wrote to {:?} (end {:?}, len {}, size {}) in {:?}",
+                        segment,
+                        records.end,
+                        record_len,
+                        size - prior_size,
+                        now.elapsed()
+                    );
+                    prior_size = size;
+                    counter!(
+                        "slog_thread_records_written",
+                        u64::try_from(record_len).unwrap(),
+                        "name" => name.clone()
+                    );
 
                     if seal {
+                        prior_size = 0;
                         current
                             .take()
                             .map(|(_, w, _)| w.close().expect("segment close"));
@@ -497,17 +555,34 @@ fn spawn_slog_thread(
                             size,
                         },
                     };
-                    tx_done.blocking_send(response).expect("channel closed");
+                    trace!("commit send");
+                    tx_commits.blocking_send(response).expect("channel closed");
+                    trace!("commit sent");
                 }
                 None => {
-                    current.take().map(|(_, writer, _)| writer.close());
-                    active = false
+                    trace!("channel closed; shutting down");
+                    active = false;
                 }
             }
+
+            if rx_fin.try_recv().is_ok() {
+                info!("received shutdown signal");
+                active = false;
+            }
         }
+
+        current.take().map(|(_, writer, _)| writer.close());
+        info!("writer for \"{}\" closed", name);
     });
 
-    (tx, rx, handle)
+    (
+        SlogThread {
+            tx,
+            tx_fin,
+            join: Some(join),
+        },
+        rx_commits,
+    )
 }
 
 #[cfg(test)]
@@ -555,6 +630,7 @@ mod test {
             String::from("testing"),
             SegmentIndex(0),
             RecordIndex(0),
+            Default::default(),
         );
         let records: Vec<_> = vec!["abc", "def", "ghi"]
             .into_iter()

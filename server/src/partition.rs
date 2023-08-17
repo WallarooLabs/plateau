@@ -28,7 +28,7 @@ use crate::manifest::{Manifest, Ordering};
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
 pub use crate::segment::Record;
 pub use crate::slog::RecordIndex;
-use crate::slog::{SegmentIndex, Slog};
+use crate::slog::{self, SegmentIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Stream, StreamExt};
@@ -50,6 +50,7 @@ use tokio::sync::{watch, RwLock, RwLockReadGuard};
 pub struct Config {
     pub retain: Retention,
     pub roll: Rolling,
+    pub slog: slog::Config,
 }
 
 pub struct Partition {
@@ -84,7 +85,13 @@ impl Partition {
         let (segment, record) =
             Self::find_starting_index(&id, root.as_path(), &slog_name, &manifest).await;
 
-        let (messages, mut writes) = Slog::attach(root.clone(), slog_name, segment, record);
+        let (messages, mut writes) = Slog::attach(
+            root.clone(),
+            slog_name,
+            segment,
+            record,
+            config.slog.clone(),
+        );
 
         let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
@@ -615,12 +622,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_head_get() -> Result<()> {
-        let (_, partition) = partition(Config {
-            retain: Default::default(),
-            roll: Default::default(),
-        })
-        .await
-        .unwrap();
+        let (_, partition) = partition(Config::default()).await.unwrap();
         init_records(&partition, 10).await?;
 
         let start = RecordIndex(0);
@@ -647,12 +649,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_tail_get() -> Result<()> {
-        let (_, partition) = partition(Config {
-            retain: Default::default(),
-            roll: Default::default(),
-        })
-        .await
-        .unwrap();
+        let (_, partition) = partition(Config::default()).await.unwrap();
         init_records(&partition, 10).await?;
 
         let result = partition
@@ -678,12 +675,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_head_get_rev() -> Result<()> {
-        let (_, partition) = partition(Config {
-            retain: Default::default(),
-            roll: Default::default(),
-        })
-        .await
-        .unwrap();
+        let (_, partition) = partition(Config::default()).await.unwrap();
         init_records(&partition, 10).await?;
 
         let result = partition
@@ -709,12 +701,7 @@ pub mod test {
 
     #[tokio::test]
     async fn test_tail_get_rev() -> Result<()> {
-        let (_, partition) = partition(Config {
-            retain: Default::default(),
-            roll: Default::default(),
-        })
-        .await
-        .unwrap();
+        let (_, partition) = partition(Config::default()).await.unwrap();
         init_records(&partition, 10).await?;
 
         let result = partition
@@ -745,16 +732,7 @@ pub mod test {
         let dir = tempdir()?;
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let partition = Partition::attach(
-            root,
-            manifest,
-            id,
-            Config {
-                retain: Default::default(),
-                roll: Default::default(),
-            },
-        )
-        .await;
+        let partition = Partition::attach(root, manifest, id, Config::default()).await;
 
         partition
             .extend_records(&[Record {
@@ -774,12 +752,7 @@ pub mod test {
     #[tokio::test]
     async fn test_get_multiple_segments_rev() -> Result<()> {
         // create first segment and shut down
-        let (dir, partition) = partition(Config {
-            retain: Default::default(),
-            roll: Default::default(),
-        })
-        .await
-        .unwrap();
+        let (dir, partition) = partition(Config::default()).await.unwrap();
         init_records(&partition, 5).await?;
         partition.commit().await?;
         drop(partition);
@@ -788,16 +761,7 @@ pub mod test {
         // re-init and create second segment
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let partition = Partition::attach(
-            root,
-            manifest,
-            id,
-            Config {
-                retain: Default::default(),
-                roll: Default::default(),
-            },
-        )
-        .await;
+        let partition = Partition::attach(root, manifest, id, Config::default()).await;
         init_records(&partition, 5).await?;
 
         let result = partition
@@ -924,7 +888,20 @@ pub mod test {
         test_rolling_get(true).await
     }
 
-    #[tokio::test]
+    // two threads are necessary because this test intermittently triggers a
+    // sneaky bug:
+    //
+    // - Slog::drop is called in an async task
+    // - this blocks, waiting on the writer thread to quit
+    // - meanwhile, the writer thread receives an append request, and attempts
+    //   to send a checkpoint back to the partition
+    // - BUT the checkpoint writer thread cannot progress because the entire
+    //   executor is blocked waiting on the drop
+    //
+    // we probably want to pull slog shutdown out of the drop method entirely so
+    // we can actually do it async instead of blocking, unless we want to wait
+    // for async drop
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_rolling_get_cached() -> Result<()> {
         test_rolling_get(false).await
     }
@@ -961,8 +938,7 @@ pub mod test {
         Partition::attach(root, p.0, p.1, p.2).await
     }
 
-    #[tokio::test]
-    async fn test_durability() -> Result<()> {
+    async fn test_durability(config: Config) -> Result<()> {
         let records: Vec<_> = (0..(3 * 10))
             .into_iter()
             .map(|ix| Record {
@@ -971,7 +947,7 @@ pub mod test {
             })
             .collect();
 
-        let (dir, part) = partition(segment_3s()).await?;
+        let (dir, part) = partition(config).await?;
         let spec = {
             for record in records.iter() {
                 part.extend_records(&[record.clone()]).await?;
@@ -998,6 +974,31 @@ pub mod test {
         }
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_durability_3s() -> Result<()> {
+        test_durability(segment_3s()).await
+    }
+
+    fn batch_limit(write_queue_batch_limit: usize) -> Config {
+        Config {
+            slog: slog::Config {
+                write_queue_batch_limit,
+                ..Default::default()
+            },
+            ..segment_3s()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_durability_3s_single_batch() -> Result<()> {
+        test_durability(batch_limit(1)).await
+    }
+
+    #[tokio::test]
+    async fn test_durability_3s_double_batch() -> Result<()> {
+        test_durability(batch_limit(2)).await
     }
 
     #[tokio::test]
@@ -1432,6 +1433,7 @@ pub mod test {
                     max_segment_count: Some(1),
                     ..Retention::default()
                 },
+                slog: Default::default(),
             },
         )
         .await;
