@@ -409,7 +409,7 @@ impl State {
                 self.active_checkpoint.segment = segment.next();
                 self.active_checkpoint.chunk = SegmentChunkIndex(0);
                 self.active_first_record_ix += records;
-                self.pending = std::mem::replace(&mut self.active, None);
+                self.pending = self.active.take();
                 Ok(())
             } else {
                 Err(anyhow::Error::new(SlogError::WriterThreadBusy))
