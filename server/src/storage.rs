@@ -97,32 +97,27 @@ pub async fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<std::path::
 use tokio::fs::canonicalize;
 
 /// Stores configuration properties used for storage monitoring.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(default)]
 pub struct Config {
     /// Maximum number of log writes before checking for available storage.
-    #[serde(default = "Config::default_max_writes")]
     max_writes: usize,
 
     /// Maximum duration to wait between storage availability checks.
-    #[serde(default = "Config::default_max_duration")]
+    #[serde(with = "humantime_serde")]
     max_duration: Duration,
 
     /// Minimum bytes available for storage before turning read-only.
-    #[serde(default = "Config::default_min_available")]
     min_available: ByteSize,
 }
 
-impl Config {
-    fn default_max_writes() -> usize {
-        MAX_WRITES
-    }
-
-    fn default_max_duration() -> Duration {
-        MAX_DURATION
-    }
-
-    fn default_min_available() -> ByteSize {
-        MIN_AVAILABLE
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            max_writes: MAX_WRITES,
+            max_duration: MAX_DURATION,
+            min_available: MIN_AVAILABLE,
+        }
     }
 }
 

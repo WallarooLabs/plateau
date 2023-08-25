@@ -188,6 +188,10 @@ impl Catalog {
             .await
         {
             error!("error while monitoring disk storage capacity: {e:?}");
+            // we want to loop here; otherwise the select() in main exits early
+            // this could allow the server to run without the disk watcher, but
+            // that seems preferable to not running at all
+            std::future::pending().await
         }
     }
 
