@@ -144,7 +144,17 @@ impl Catalog {
     }
 
     pub async fn list_topics(&self) -> Vec<String> {
-        self.manifest.get_topics().await
+        let mem_topics = self.topics.read().await;
+        let mut topics: Vec<String> = mem_topics.keys().cloned().collect();
+        let disk_topics: Vec<String> = self
+            .manifest
+            .get_topics()
+            .await
+            .into_iter()
+            .filter(|t| !topics.contains(t))
+            .collect();
+        topics.extend(disk_topics);
+        topics
     }
 
     pub async fn get_topic(&self, name: &str) -> RwLockReadGuard<'_, Topic> {
@@ -280,6 +290,8 @@ mod test {
                 .extend_records("default", &[record.clone()])
                 .await?;
         }
+
+        assert_eq!(catalog.list_topics().await.len(), 3);
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("topic-{}", ix % 3);
