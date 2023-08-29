@@ -42,6 +42,7 @@ sqlx = { version = "0.5", features = [
 ] }
 systemstat = "0.2"
 rand = "0.8"
+uuid = "1.4"
 
 [dev-dependencies]
 itermore = "0.1"

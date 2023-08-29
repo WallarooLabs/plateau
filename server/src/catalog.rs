@@ -20,11 +20,11 @@ use crate::topic::Topic;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    retain: Retention,
-    partition: partition::Config,
-    storage: storage::Config,
+    pub retain: Retention,
+    pub partition: partition::Config,
+    pub storage: storage::Config,
     #[serde(default = "Catalog::default_max_open_topics")]
-    max_open_topics: usize,
+    pub max_open_topics: usize,
 }
 
 impl Default for Config {
@@ -197,7 +197,11 @@ impl Catalog {
             .run(&*self.root, &self.config.storage)
             .await
         {
-            error!("error while monitoring disk storage capacity: {e:?}");
+            error!(
+                "error while monitoring disk storage capacity for {}: {:?}",
+                std::fs::canonicalize(&self.root).unwrap().display(),
+                e
+            );
             // we want to loop here; otherwise the select() in main exits early
             // this could allow the server to run without the disk watcher, but
             // that seems preferable to not running at all

@@ -10,6 +10,7 @@ use systemstat::{Platform, System};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
 
+const MONITOR: bool = true;
 const MAX_WRITES: usize = 10_000;
 const MAX_DURATION: Duration = Duration::from_secs(10);
 const MIN_AVAILABLE: ByteSize = ByteSize::gb(1);
@@ -100,20 +101,24 @@ use tokio::fs::canonicalize;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Config {
+    /// Enable disk monitoring.
+    pub monitor: bool,
+
     /// Maximum number of log writes before checking for available storage.
-    max_writes: usize,
+    pub max_writes: usize,
 
     /// Maximum duration to wait between storage availability checks.
     #[serde(with = "humantime_serde")]
-    max_duration: Duration,
+    pub max_duration: Duration,
 
     /// Minimum bytes available for storage before turning read-only.
-    min_available: ByteSize,
+    pub min_available: ByteSize,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
+            monitor: MONITOR,
             max_writes: MAX_WRITES,
             max_duration: MAX_DURATION,
             min_available: MIN_AVAILABLE,
@@ -163,6 +168,7 @@ mod tests {
         let monitor = DiskMonitor::default();
         let fixture = monitor.clone();
         let config = Config {
+            monitor: true,
             max_writes: 1,
             max_duration: Duration::from_secs(20),
             min_available: ByteSize::b(1024),
@@ -184,6 +190,7 @@ mod tests {
         let monitor = DiskMonitor::default();
         let fixture = monitor.clone();
         let config = Config {
+            monitor: true,
             max_writes: 1,
             max_duration: Duration::ZERO,
             min_available: ByteSize::b(1024),

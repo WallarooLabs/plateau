@@ -40,14 +40,18 @@ async fn main() {
             catalog.retain().await;
         });
 
-    let (_, end_tx, server) = http::serve(config, catalog.clone()).await;
+    let (_, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
     {
-        future::select_all([
+        let mut tasks = vec![
             Box::pin(checkpoint_stream) as Pin<Box<dyn Future<Output = ()>>>,
-            Box::pin(catalog.monitor_disk_storage()),
             server,
-        ])
-        .await;
+        ];
+
+        if config.catalog.storage.monitor {
+            tasks.push(Box::pin(catalog.monitor_disk_storage()));
+        }
+
+        future::select_all(tasks.into_iter()).await;
     }
 
     info!("shutting down");

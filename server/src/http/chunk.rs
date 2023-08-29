@@ -81,11 +81,23 @@ impl FromRequest for SchemaChunkRequest {
                 let schema = metadata.schema.clone();
                 let mut reader = read::FileReader::new(cursor, metadata, None, None);
                 if let Some(chunk) = reader.next() {
-                    let chunk = chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
-                    Ok(SchemaChunkRequest(
-                        new_schema_chunk(schema, chunk)
-                            .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
-                    ))
+                    let mut chunk = new_schema_chunk(
+                        schema.clone(),
+                        chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
+                    )
+                    .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?;
+                    for next_chunk in reader {
+                        chunk
+                            .extend(
+                                new_schema_chunk(
+                                    schema.clone(),
+                                    next_chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
+                                )
+                                .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
+                            )
+                            .map_err(|_| reject::custom(ErrorReply::InvalidSchema))?;
+                    }
+                    Ok(SchemaChunkRequest(chunk))
                 } else {
                     Err(reject::custom(ErrorReply::EmptyBody))
                 }
