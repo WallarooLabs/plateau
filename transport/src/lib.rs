@@ -131,7 +131,7 @@ pub fn is_variable_len(data_type: &DataType) -> bool {
     }
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Default, Schema, Serialize, Deserialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
 pub struct InsertQuery {
     /// RFC3339 timestamp associated with inserted records
@@ -154,7 +154,7 @@ pub struct Partitions {
     pub partitions: HashMap<String, Span>,
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -661,6 +661,35 @@ fn index_into(key: &str, fields: &[Field], arrays: &[Box<dyn Array>]) -> Option<
         .filter_map(|(ix, f)| if f.name == key { Some(ix) } else { None })
         .next()
         .and_then(|ix| arrays.get(ix).cloned())
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct PartitionId {
+    pub topic: String,
+    pub partition: String,
+}
+
+impl PartitionId {
+    pub fn new(topic: &str, partition: &str) -> Self {
+        PartitionId {
+            topic: String::from(topic),
+            partition: String::from(partition),
+        }
+    }
+
+    pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    pub fn partition(&self) -> &str {
+        &self.partition
+    }
+}
+
+impl std::fmt::Display for PartitionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}/{}", self.topic, self.partition)
+    }
 }
 
 #[cfg(test)]

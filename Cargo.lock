@@ -2279,6 +2279,7 @@ dependencies = [
 name = "plateau-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "futures",
@@ -2290,6 +2291,7 @@ dependencies = [
  "plateau",
  "plateau-transport",
  "polars 0.31.1",
+ "pretty_env_logger",
  "reqwest",
  "serde",
  "serde_json",

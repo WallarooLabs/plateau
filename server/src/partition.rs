@@ -132,7 +132,7 @@ impl Partition {
         while index.is_none() {
             if let Some(ix) = current {
                 let segment = Slog::segment_from_name(root, slog_name, ix);
-                let data = manifest.get_segment_data(id.segment_id(ix)).await;
+                let data = manifest.get_segment_data(ix.to_id(id)).await;
                 let valid = segment.validate();
                 index = match data {
                     Some(data) if valid => Some((ix.next(), data.records.end)),
@@ -141,7 +141,7 @@ impl Partition {
                         if let Err(e) = segment.destroy() {
                             error!("error destroying {:?}: {}", ix, e);
                         }
-                        manifest.remove_segment(id.segment_id(ix)).await;
+                        manifest.remove_segment(ix.to_id(id)).await;
                         current = ix.prev();
                         None
                     }
@@ -426,11 +426,14 @@ impl State {
                 "partition" => partition_id,
             );
 
-            warn!(
-                "{}: schema change after {:?}",
-                partition.id,
-                self.commits.borrow()
-            );
+            if *self.commits.borrow() != RecordIndex(0) {
+                warn!(
+                    "{}: schema change after {:?}",
+                    partition.id,
+                    *self.commits.borrow()
+                );
+            }
+
             return self.roll(partition).await;
         }
 
@@ -547,7 +550,7 @@ impl State {
             // TODO ensure we handle failure if this call
             partition
                 .manifest
-                .remove_segment(partition.id.segment_id(ix))
+                .remove_segment(ix.to_id(&partition.id))
                 .await;
             // succeeds but this does not complete e.g. due to node failure
             self.messages.destroy(ix).expect("segment destroyed");
@@ -1362,7 +1365,7 @@ pub mod test {
 
         // delete the next data entry from the manifest
         let ix = last.prev().unwrap();
-        manifest.remove_segment(spec.1.segment_id(ix)).await;
+        manifest.remove_segment(ix.to_id(&spec.1)).await;
 
         // delete the next file entirely
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());

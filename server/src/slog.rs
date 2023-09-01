@@ -20,7 +20,7 @@
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
 use crate::chunk::{Schema, TimeRange};
-use crate::manifest::{Ordering, SegmentData};
+use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId};
 #[cfg(test)]
 use crate::segment::Record;
 use crate::segment::{CloseArrow, Segment, SegmentWriter2};
@@ -79,6 +79,13 @@ impl SegmentIndex {
             Some(SegmentIndex(self.0 - 1))
         } else {
             None
+        }
+    }
+
+    pub fn to_id(self, partition_id: &PartitionId) -> SegmentId<&PartitionId> {
+        SegmentId {
+            partition_id,
+            segment: self,
         }
     }
 }
@@ -287,13 +294,14 @@ impl Slog {
     }
 
     pub(crate) async fn active_schema_matches(&self, other: &Schema) -> bool {
-        self.state
-            .read()
-            .await
-            .active
-            .as_ref()
-            .map(|s| &s.schema == other)
-            .unwrap_or(true)
+        let active = &self.state.read().await.active;
+
+        let matches = active.as_ref().map(|s| &s.schema == other).unwrap_or(true);
+        if !matches {
+            trace!("{:?} != {:?}", active.as_ref().map(|s| &s.schema), other);
+        }
+
+        matches
     }
 
     pub(crate) async fn active_segment_data(&self) -> Option<SegmentData> {

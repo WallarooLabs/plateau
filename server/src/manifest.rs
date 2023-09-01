@@ -12,6 +12,7 @@
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
+pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
@@ -57,58 +58,22 @@ pub enum Scope<'a> {
     Partition(&'a PartitionId),
 }
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-pub struct PartitionId {
-    topic: String,
-    partition: String,
-}
-
-impl PartitionId {
-    pub fn new(topic: &str, partition: &str) -> Self {
-        PartitionId {
-            topic: String::from(topic),
-            partition: String::from(partition),
-        }
-    }
-
-    pub fn topic(&self) -> &str {
-        &self.topic
-    }
-
-    pub fn partition(&self) -> &str {
-        &self.partition
-    }
-
-    pub fn segment_id(&self, segment: SegmentIndex) -> SegmentId<&PartitionId> {
-        SegmentId {
-            partition_id: self,
-            segment,
-        }
-    }
-
-    fn from_row(row: &SqliteRow) -> Self {
-        PartitionId::new(
-            &row.get::<String, _>("topic"),
-            &row.get::<String, _>("partition"),
-        )
-    }
-}
-
-impl std::fmt::Display for PartitionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}/{}", self.topic, self.partition)
-    }
+fn partition_id_from_row(row: &SqliteRow) -> PartitionId {
+    PartitionId::new(
+        &row.get::<String, _>("topic"),
+        &row.get::<String, _>("partition"),
+    )
 }
 
 #[derive(Clone, Debug)]
 pub struct SegmentId<P: Borrow<PartitionId>> {
-    partition_id: P,
-    segment: SegmentIndex,
+    pub(crate) partition_id: P,
+    pub(crate) segment: SegmentIndex,
 }
 
 impl SegmentId<PartitionId> {
     fn from_row(row: &SqliteRow) -> Self {
-        let partition_id = PartitionId::from_row(row);
+        let partition_id = partition_id_from_row(row);
         Self {
             partition_id,
             segment: SegmentIndex::from_row(row, "segment_index"),
@@ -794,7 +759,7 @@ mod test {
         assert_eq!(state.get_min_segment(&id).await, Some(SegmentIndex(0)));
         assert_eq!(state.get_max_segment(&id).await, Some(SegmentIndex(1)));
 
-        state.remove_segment(id.segment_id(SegmentIndex(0))).await;
+        state.remove_segment(SegmentIndex(0).to_id(&id)).await;
         assert_eq!(state.get_segment_for_ix(&id, RecordIndex(0)).await, None);
         assert_eq!(
             state.get_segment_for_ix(&id, RecordIndex(15)).await,
@@ -808,7 +773,7 @@ mod test {
         assert_eq!(state.get_max_segment(&id).await, Some(SegmentIndex(1)));
         assert_eq!(state.get_size(Scope::Partition(&id)).await, 13);
 
-        state.remove_segment(id.segment_id(SegmentIndex(1))).await;
+        state.remove_segment(SegmentIndex(1).to_id(&id)).await;
         assert_eq!(state.get_segment_for_ix(&id, RecordIndex(0)).await, None);
         assert_eq!(state.get_segment_for_ix(&id, RecordIndex(15)).await, None);
         assert_eq!(state.get_min_segment(&id).await, None);
@@ -870,13 +835,13 @@ mod test {
             );
         }
 
-        add_record(&state, id.segment_id(SegmentIndex(0)), 0..10, 500..=600).await;
+        add_record(&state, SegmentIndex(0).to_id(&id), 0..10, 500..=600).await;
         // overlap
-        add_record(&state, id.segment_id(SegmentIndex(1)), 10..20, 580..=800).await;
+        add_record(&state, SegmentIndex(1).to_id(&id), 10..20, 580..=800).await;
         // gap
-        add_record(&state, id.segment_id(SegmentIndex(2)), 20..30, 820..=900).await;
+        add_record(&state, SegmentIndex(2).to_id(&id), 20..30, 820..=900).await;
         // out-of order
-        add_record(&state, id.segment_id(SegmentIndex(3)), 30..40, 590..=800).await;
+        add_record(&state, SegmentIndex(3).to_id(&id), 30..40, 590..=800).await;
 
         // single points-in-time
         verify_stream(&state, &id, 0, 400..=400, vec![]).await;

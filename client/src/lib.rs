@@ -25,6 +25,8 @@ use thiserror::Error;
 #[cfg(feature = "batch")]
 pub mod batch;
 
+pub mod replicate;
+
 #[derive(Debug)]
 pub struct MaxRequestSize(pub Option<usize>);
 impl std::fmt::Display for MaxRequestSize {
@@ -39,6 +41,8 @@ impl std::fmt::Display for MaxRequestSize {
 /// Plateau errors
 #[derive(Debug, Error)]
 pub enum Error {
+    #[error("Configuration error: {0}")]
+    Config(String),
     #[error("URL parse error for {1}: {0}")]
     UrlParse(url::ParseError, String),
     #[error("URL join error for '{1}'.join('{2}'): {0}")]
@@ -59,6 +63,8 @@ pub enum Error {
     ArrowDeserialize(ArrowError),
     #[error("Empty stream from server")]
     EmptyStream,
+    #[error("Schemas do not match")]
+    SchemaMismatch,
     #[cfg(feature = "polars")]
     #[error("Failed polars parse: {0}")]
     PolarsParse(polars::error::PolarsError),
@@ -282,6 +288,36 @@ impl Insertion for Insert {
 impl Insertion for SchemaChunk<ArrowSchema> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let bytes = self.to_bytes().map_err(Error::ArrowSerialize)?;
+        Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
+            .header(CONTENT_LENGTH, bytes.len())
+            .body(bytes))
+    }
+}
+
+impl Insertion for Vec<SchemaChunk<ArrowSchema>> {
+    fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
+        let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let options = ipc::write::WriteOptions { compression: None };
+
+        let schema = self.first().map(|d| &d.schema).ok_or_else(|| {
+            Error::ArrowSerialize(ArrowError::InvalidArgumentError(
+                "cannot send empty request".to_string(),
+            ))
+        })?;
+        let mut writer = ipc::write::FileWriter::new(bytes, schema.clone(), None, options);
+
+        writer.start().map_err(Error::ArrowSerialize)?;
+        for data in self.iter() {
+            if &data.schema != schema {
+                return Err(Error::SchemaMismatch);
+            }
+            writer
+                .write(&data.chunk, None)
+                .map_err(Error::ArrowSerialize)?;
+        }
+        writer.finish().map_err(Error::ArrowSerialize)?;
+
+        let bytes = writer.into_inner().into_inner();
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
             .header(CONTENT_LENGTH, bytes.len())
             .body(bytes))
