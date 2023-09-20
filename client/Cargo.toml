@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+backoff = { version = "0.4", features = ["tokio"], optional = true }
 humantime-serde = { version = "1", optional = true }
 log = "0.4"
 tokio = { version = "1", features = ["full"], optional = true }
@@ -42,3 +43,4 @@ pretty_env_logger = "0.4"
 [features]
 batch = ["dep:humantime-serde", "dep:tokio"]
 polars = ["dep:polars"]
+replicate = ["dep:backoff", "dep:tokio"]

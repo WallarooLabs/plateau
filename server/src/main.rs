@@ -10,8 +10,8 @@ use tokio::time;
 use tokio_stream::wrappers::{IntervalStream, SignalStream};
 
 use plateau::catalog::Catalog;
-use plateau::http;
 use plateau::metrics;
+use plateau::{http, replication};
 
 fn signal_stream(k: SignalKind) -> impl Stream<Item = ()> {
     SignalStream::new(signal(k).unwrap())
@@ -40,7 +40,7 @@ async fn main() {
             catalog.retain().await;
         });
 
-    let (_, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
+    let (addr, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
     {
         let mut tasks = vec![
             Box::pin(checkpoint_stream) as Pin<Box<dyn Future<Output = ()>>>,
@@ -49,6 +49,10 @@ async fn main() {
 
         if config.catalog.storage.monitor {
             tasks.push(Box::pin(catalog.monitor_disk_storage()));
+        }
+
+        if let Some(replicate) = config.replication {
+            tasks.push(Box::pin(replication::run(replicate, addr)));
         }
 
         future::select_all(tasks.into_iter()).await;

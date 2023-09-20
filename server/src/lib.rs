@@ -8,6 +8,7 @@ mod limit;
 pub mod manifest;
 pub mod metrics;
 mod partition;
+pub mod replication;
 mod segment;
 mod slog;
 mod storage;

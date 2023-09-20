@@ -1,4 +1,15 @@
-use std::collections::HashMap;
+//! Prototype for replicating data between various plateau hosts.
+//!
+//! [`Replicate`] is [`Serialize`] and [`Deserialize`], and can be read from a
+//! config.
+//!
+//! This config can then be parsed via [`ReplicationWorker::from_replicate`],
+//! which returns a [`ReplicationWorker`]. [`ReplicationWorker::pump`] can then
+//! be used to advance the worker.
+//!
+//! You'll probably want to just fire and forget this worker in a
+//! [`tokio::task`] via [`ReplicationWorker::run_forever`].
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use plateau_transport::{ArrowSchema, PartitionId, RecordQuery, SchemaChunk};
@@ -6,10 +17,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Client, Error, Retrieve};
 
-use log::{debug, info};
+use log::{debug, error, info};
 
-#[derive(Clone)]
-pub struct ClientPartition {
+#[cfg(feature = "replicate")]
+use std::time::Duration;
+
+#[cfg(feature = "replicate")]
+pub use backoff::ExponentialBackoff;
+
+#[derive(Debug, Clone)]
+struct ClientPartition {
     host_id: String,
     id: PartitionId,
     client: Client,
@@ -22,15 +39,17 @@ impl fmt::Display for ClientPartition {
 }
 
 #[derive(Clone)]
-pub struct ReplicatePartitionJob {
+struct ReplicatePartitionJob {
     source: ClientPartition,
     target: ClientPartition,
     page_size: Option<usize>,
     record_ix: usize,
 }
 
+type ReplicatePartitionJobKey = (HostPartition, HostPartition);
+
 impl ReplicatePartitionJob {
-    pub async fn begin(
+    async fn begin(
         source: ClientPartition,
         target: ClientPartition,
         page_size: Option<usize>,
@@ -50,7 +69,7 @@ impl ReplicatePartitionJob {
         })
     }
 
-    pub async fn page(&mut self) -> Result<bool, Error> {
+    async fn page(&mut self) -> Result<bool, Error> {
         let query = RecordQuery {
             start: self.record_ix,
             page_size: self.page_size,
@@ -100,6 +119,115 @@ impl ReplicatePartitionJob {
     }
 }
 
+#[derive(Clone)]
+struct ClientTopic {
+    host_id: String,
+    topic: String,
+    client: Client,
+}
+
+impl ClientTopic {
+    fn to_client_partition(&self, partition: &str) -> ClientPartition {
+        ClientPartition {
+            host_id: self.host_id.clone(),
+            id: PartitionId {
+                topic: self.topic.clone(),
+                partition: partition.to_string(),
+            },
+            client: self.client.clone(),
+        }
+    }
+}
+
+impl fmt::Display for ClientTopic {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}/{}", self.host_id, self.topic)
+    }
+}
+
+#[derive(Clone)]
+pub struct ReplicateTopicJob {
+    source: ClientTopic,
+    target: ClientTopic,
+    page_size: Option<usize>,
+    pending: BTreeMap<String, ReplicatePartitionJob>,
+    done: BTreeMap<String, ReplicatePartitionJob>,
+}
+
+type ReplicateTopicJobKey = (HostTopic, HostTopic);
+
+impl ReplicateTopicJob {
+    async fn begin(
+        source: ClientTopic,
+        target: ClientTopic,
+        page_size: Option<usize>,
+    ) -> Result<Self, Error> {
+        let job = Self {
+            source,
+            target,
+            page_size,
+            pending: Default::default(),
+            done: Default::default(),
+        };
+
+        Ok(job)
+    }
+
+    async fn sync(&mut self) -> Result<bool, Error> {
+        let source = self
+            .source
+            .client
+            .get_partitions(&self.source.topic)
+            .await?;
+
+        let target = self
+            .target
+            .client
+            .get_partitions(&self.target.topic)
+            .await?;
+
+        let mut new_partition = false;
+        for (partition, _) in source.partitions {
+            if !self.pending.contains_key(&partition) && !self.done.contains_key(&partition) {
+                self.pending.insert(
+                    partition.clone(),
+                    ReplicatePartitionJob {
+                        source: self.source.to_client_partition(&partition),
+                        target: self.target.to_client_partition(&partition),
+                        page_size: self.page_size,
+                        record_ix: target
+                            .partitions
+                            .get(&partition)
+                            .map(|s| s.end)
+                            .unwrap_or(0),
+                    },
+                );
+                new_partition = true;
+            }
+        }
+
+        Ok(new_partition)
+    }
+
+    async fn page(&mut self) -> Result<bool, Error> {
+        if let Some((key, mut job)) = self.pending.pop_first() {
+            if !job.page().await? {
+                self.pending.insert(key, job);
+                Ok(false)
+            } else {
+                self.done.insert(key, job);
+                Ok(false)
+            }
+        } else {
+            let new_partitions = self.sync().await?;
+            if !new_partitions {
+                self.pending = std::mem::take(&mut self.done);
+            }
+            Ok(!new_partitions)
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     pub parallel: usize,
@@ -111,53 +239,64 @@ impl Default for Config {
     }
 }
 
+/// Driver for a number of replication jobs configured via [`Replicate`].
 #[derive(Clone)]
 pub struct ReplicationWorker {
     config: Config,
-    host_urls: Vec<(String, String)>,
-    partitions: Vec<ReplicatePartitionJob>,
+    hosts: HashMap<String, (String, Client)>,
+    topics: HashMap<ReplicateTopicJobKey, ReplicateTopicJob>,
+    partitions: HashMap<ReplicatePartitionJobKey, ReplicatePartitionJob>,
 }
 
 impl ReplicationWorker {
+    /// Build a worker from a user [`Replicate`] config.
     pub async fn from_replicate(replicate: Replicate) -> Result<Self, Error> {
         use futures::stream::{self, StreamExt, TryStreamExt};
-
-        let host_urls = replicate
-            .hosts
-            .iter()
-            .map(|host| (host.id.clone(), host.url.clone()))
-            .collect();
 
         let hosts: HashMap<_, _> = replicate
             .hosts
             .into_iter()
-            .map(|host| Ok((host.id.clone(), Client::new(&host.url)?)))
+            .map(|host| Ok((host.id.clone(), (host.url.clone(), Client::new(&host.url)?))))
             .collect::<Result<_, Error>>()?;
 
         let hosts_ref = &hosts;
 
-        let partitions: Vec<ReplicatePartitionJob> = stream::iter(replicate.partitions.into_iter())
+        let partitions = stream::iter(replicate.partitions.into_iter())
             .flat_map(move |part| stream::once(part.into_job(hosts_ref)))
+            .try_collect()
+            .await?;
+
+        let topics = stream::iter(replicate.topics.into_iter())
+            .flat_map(move |topic| stream::once(topic.into_job(hosts_ref)))
             .try_collect()
             .await?;
 
         Ok(ReplicationWorker {
             config: replicate.config,
-            host_urls,
+            hosts,
+            topics,
             partitions,
         })
     }
 
-    pub async fn page_all(&mut self) -> Result<bool, Error> {
+    async fn page_all(&mut self) -> Result<bool, Error> {
+        use futures::future::FutureExt;
         use futures::stream::{FuturesUnordered, StreamExt};
 
         let mut done = true;
         let mut futures = FuturesUnordered::new();
-        for job in self.partitions.iter_mut() {
+        for job in self.topics.values_mut() {
             if futures.len() >= self.config.parallel {
                 done = done && futures.next().await.unwrap_or(Ok(true))?;
             }
-            futures.push(job.page());
+            futures.push(job.page().boxed());
+        }
+
+        for job in self.partitions.values_mut() {
+            if futures.len() >= self.config.parallel {
+                done = done && futures.next().await.unwrap_or(Ok(true))?;
+            }
+            futures.push(job.page().boxed());
         }
 
         while let Some(job_status) = futures.next().await {
@@ -167,12 +306,26 @@ impl ReplicationWorker {
         Ok(done)
     }
 
+    fn all_jobs(&self) -> impl Iterator<Item = &ReplicatePartitionJob> {
+        self.topics
+            .values()
+            .flat_map(|topic| topic.pending.values().chain(topic.done.values()))
+            .chain(self.partitions.values())
+    }
+
+    /// Proceed through all configured jobs and copy all present records from
+    /// the `source` to the `target`.
+    ///
+    /// Runs until an error is encountered, or all jobs report that their
+    /// `target` is in sync with the `source`. Completion reporting is
+    /// "best-effort". More records may be written after a job reports complete
+    /// and before `pump` exits.
     pub async fn pump(&mut self) -> Result<(), Error> {
-        for (id, url) in &self.host_urls {
+        for (id, (url, _)) in &self.hosts {
             info!("{} url: {}", id, url);
         }
 
-        for job in &self.partitions {
+        for job in self.all_jobs() {
             info!(
                 "start: {} => {} @ {}",
                 job.source, job.target, job.record_ix
@@ -181,11 +334,54 @@ impl ReplicationWorker {
 
         while !self.page_all().await? {}
 
-        for job in &self.partitions {
+        for job in self.all_jobs() {
             info!("end: {} => {} @ {}", job.source, job.target, job.record_ix)
         }
 
         Ok(())
+    }
+
+    /// Add a new partition job to the set of existing jobs.
+    pub async fn add_partition(&mut self, partition: ReplicatePartition) -> Result<bool, Error> {
+        if self.partitions.contains_key(&partition.key()) {
+            return Ok(false);
+        }
+
+        let (key, job) = partition.into_job(&self.hosts).await?;
+        self.partitions.insert(key, job);
+
+        Ok(true)
+    }
+
+    /// Run [`Self::pump`] forever, using an [`ExponentialBackoff`] to retry on
+    /// errors.
+    ///
+    /// Unlike a typical [`backoff`] operation, we never give up. If
+    /// [`ExponentialBackoff::next_backoff`] hits its configured max elapsed
+    /// limit, we retry with the last used interval indefinitely.
+    #[cfg(feature = "replicate")]
+    pub async fn run_forever(
+        mut self,
+        period: Duration,
+        mut backoff: ExponentialBackoff,
+    ) -> Result<(), Error> {
+        use backoff::backoff::Backoff;
+
+        let mut last_duration = backoff.next_backoff().unwrap();
+        loop {
+            match self.pump().await {
+                Ok(_) => {
+                    backoff.reset();
+                    tokio::time::sleep(period).await;
+                }
+                Err(e) => {
+                    error!("error in loop: {:?}", e);
+                    info!("waiting {:?} to retry", last_duration);
+                    tokio::time::sleep(last_duration).await;
+                    last_duration = backoff.next_backoff().unwrap_or(last_duration)
+                }
+            }
+        }
     }
 }
 
@@ -194,19 +390,47 @@ pub struct Replicate {
     #[serde(default)]
     pub config: Config,
     pub hosts: Vec<ReplicateHost>,
+    pub topics: Vec<ReplicateTopic>,
     pub partitions: Vec<ReplicatePartition>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ReplicateHost {
     pub id: String,
     pub url: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReplicateTopic {
+    pub source: HostTopic,
+    pub target: HostTopic,
+    #[serde(default)]
+    pub page_size: Option<usize>,
+}
+
+impl ReplicateTopic {
+    async fn into_job(
+        self,
+        clients: &HashMap<String, (String, Client)>,
+    ) -> Result<(ReplicateTopicJobKey, ReplicateTopicJob), Error> {
+        let source = self.source.to_client_topic(clients)?;
+        let target = self.target.to_client_topic(clients)?;
+
+        Ok((
+            self.key(),
+            ReplicateTopicJob::begin(source, target, self.page_size).await?,
+        ))
+    }
+
+    pub fn key(&self) -> ReplicateTopicJobKey {
+        (self.source.clone(), self.target.clone())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReplicatePartition {
-    pub source: PartitionClientId,
-    pub target: PartitionClientId,
+    pub source: HostPartition,
+    pub target: HostPartition,
     #[serde(default)]
     pub page_size: Option<usize>,
 }
@@ -214,27 +438,34 @@ pub struct ReplicatePartition {
 impl ReplicatePartition {
     async fn into_job(
         self,
-        clients: &HashMap<String, Client>,
-    ) -> Result<ReplicatePartitionJob, Error> {
+        clients: &HashMap<String, (String, Client)>,
+    ) -> Result<(ReplicatePartitionJobKey, ReplicatePartitionJob), Error> {
         let source = self.source.to_client_partition(clients)?;
         let target = self.target.to_client_partition(clients)?;
 
-        ReplicatePartitionJob::begin(source, target, self.page_size).await
+        Ok((
+            self.key(),
+            ReplicatePartitionJob::begin(source, target, self.page_size).await?,
+        ))
+    }
+
+    pub fn key(&self) -> ReplicatePartitionJobKey {
+        (self.source.clone(), self.target.clone())
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PartitionClientId {
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct HostPartition {
     pub host_id: String,
     pub partition_id: PartitionId,
 }
 
-impl PartitionClientId {
+impl HostPartition {
     fn to_client_partition(
         &self,
-        clients: &HashMap<String, Client>,
+        clients: &HashMap<String, (String, Client)>,
     ) -> Result<ClientPartition, Error> {
-        let client = clients
+        let (_, client) = clients
             .get(&self.host_id)
             .ok_or_else(|| Error::Config(format!("invalid host id: {}", self.host_id)))?
             .clone();
@@ -242,6 +473,30 @@ impl PartitionClientId {
         Ok(ClientPartition {
             host_id: self.host_id.clone(),
             id: self.partition_id.clone(),
+            client,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct HostTopic {
+    pub host_id: String,
+    pub topic: String,
+}
+
+impl HostTopic {
+    fn to_client_topic(
+        &self,
+        clients: &HashMap<String, (String, Client)>,
+    ) -> Result<ClientTopic, Error> {
+        let (_, client) = clients
+            .get(&self.host_id)
+            .ok_or_else(|| Error::Config(format!("invalid host id: {}", self.host_id)))?
+            .clone();
+
+        Ok(ClientTopic {
+            host_id: self.host_id.clone(),
+            topic: self.topic.clone(),
             client,
         })
     }
@@ -322,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_basic_replication() -> Result<()> {
+    async fn test_partition_replication() -> Result<()> {
         let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
         let (target_url, client_target, _target) = setup_with_config(Default::default()).await?;
 
@@ -350,11 +605,11 @@ mod tests {
         ];
 
         let partitions = vec![ReplicatePartition {
-            source: PartitionClientId {
+            source: HostPartition {
                 host_id: "edge".to_string(),
                 partition_id: source_id.clone(),
             },
-            target: PartitionClientId {
+            target: HostPartition {
                 host_id: "mothership".to_string(),
                 partition_id: target_id.clone(),
             },
@@ -363,6 +618,7 @@ mod tests {
 
         let replicate = Replicate {
             hosts,
+            topics: Default::default(),
             partitions,
             config: Default::default(),
         };
@@ -402,6 +658,97 @@ mod tests {
                 end: 50 + 30
             })
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_topic_replication() -> Result<()> {
+        let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
+        let (target_url, client_target, _target) = setup_with_config(Default::default()).await?;
+
+        let data: Vec<_> = (0..10).map(|_| inferences_schema_b()).collect();
+
+        let topic = "replicate".to_string();
+        let partitions = vec!["a", "b", "c", "d"];
+
+        for partition in &partitions {
+            client_source
+                .append_records(&topic, partition, &Default::default(), data.clone())
+                .await?;
+        }
+
+        let hosts = vec![
+            ReplicateHost {
+                id: "edge".to_string(),
+                url: source_url.clone(),
+            },
+            ReplicateHost {
+                id: "mothership".to_string(),
+                url: target_url.clone(),
+            },
+        ];
+
+        let topics = vec![ReplicateTopic {
+            source: HostTopic {
+                host_id: "edge".to_string(),
+                topic: topic.clone(),
+            },
+            target: HostTopic {
+                host_id: "mothership".to_string(),
+                topic: topic.clone(),
+            },
+            page_size: Some(15),
+        }];
+
+        let replicate = Replicate {
+            hosts,
+            topics,
+            partitions: Default::default(),
+            config: Default::default(),
+        };
+
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+        replicator.pump().await?;
+
+        for partition in &partitions {
+            assert_eq!(
+                client_target
+                    .get_partitions(&topic)
+                    .await?
+                    .partitions
+                    .get(*partition)
+                    .cloned(),
+                Some(Span { start: 0, end: 50 })
+            );
+        }
+
+        // now let's simulate some more writes
+        for partition in &partitions {
+            client_source
+                .append_records(&topic, partition, &Default::default(), data[0..6].to_vec())
+                .await?;
+        }
+
+        // and a brand new replicator run
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+
+        replicator.pump().await?;
+
+        for partition in &partitions {
+            assert_eq!(
+                client_target
+                    .get_partitions(&topic)
+                    .await?
+                    .partitions
+                    .get(*partition)
+                    .cloned(),
+                Some(Span {
+                    start: 0,
+                    end: 50 + 30
+                })
+            );
+        }
 
         Ok(())
     }

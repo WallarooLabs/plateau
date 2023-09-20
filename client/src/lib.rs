@@ -80,7 +80,7 @@ pub enum Error {
 /// // Client pointed at an alternate URL.
 /// let client = Client::new("plateau.my-wallaroo-cluster.dev:1234");
 /// ```
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Client {
     server_url: Url,
     http_client: reqwest::Client,

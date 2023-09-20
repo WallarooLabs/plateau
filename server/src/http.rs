@@ -147,14 +147,19 @@ impl TestServer {
         Self::new_with_config(config).await
     }
 
-    pub async fn new_with_config(config: PlateauConfig) -> Result<Self> {
+    pub async fn new_with_config(mut config: PlateauConfig) -> Result<Self> {
         let temp = tempdir()?;
         let root = temp.into_path();
         let catalog = Arc::new(Catalog::attach(root, Default::default()).await);
 
         let serve_catalog = catalog.clone();
+        let replication = std::mem::take(&mut config.replication);
         let (addr, end_tx, server) = serve(config, serve_catalog).await;
         tokio::spawn(server);
+
+        if let Some(replication) = replication {
+            tokio::spawn(crate::replication::run(replication, addr));
+        }
 
         Ok(TestServer {
             addr,

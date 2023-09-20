@@ -4,7 +4,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::{catalog, http, metrics};
+use crate::{catalog, http, metrics, replication};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -15,6 +15,7 @@ pub struct PlateauConfig {
     pub http: http::Config,
     pub catalog: catalog::Config,
     pub metrics: metrics::Config,
+    pub replication: Option<replication::Config>,
 }
 
 impl Default for PlateauConfig {
@@ -26,6 +27,7 @@ impl Default for PlateauConfig {
             http: http::Config::default(),
             catalog: catalog::Config::default(),
             metrics: metrics::Config::default(),
+            replication: None,
         }
     }
 }
@@ -37,6 +39,10 @@ pub fn binary_config() -> Result<PlateauConfig> {
         .add_source(File::with_name("./plateau.yaml").required(false))
         .add_source(File::with_name("/etc/plateau.toml").required(false))
         .add_source(File::with_name("./plateau.toml").required(false))
+        .add_source(File::with_name("/etc/replication.yaml").required(false))
+        .add_source(File::with_name("./replication.yaml").required(false))
+        .add_source(File::with_name("/etc/replication.toml").required(false))
+        .add_source(File::with_name("./replication.toml").required(false))
         .add_source(
             config::Environment::with_prefix("PLATEAU")
                 .try_parsing(true)
