@@ -53,6 +53,8 @@ pub enum Error {
     SendingRequest(reqwest::Error),
     #[error("The request body is too long. Max request size: {0}")]
     RequestTooLong(MaxRequestSize),
+    #[error("The request failed: {0}")]
+    RequestFailed(String),
     #[error("Error from server: {0}")]
     Server(reqwest::Error),
     #[error("Error deserializing server response: {0}")]
