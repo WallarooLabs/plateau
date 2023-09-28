@@ -1,7 +1,8 @@
 //! Utilities for managing and monitoring local log storage.
 use bytesize::ByteSize;
+use log::info;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -61,7 +62,13 @@ impl DiskMonitor {
 
     /// Loops indefinitely while checking for available disk space on the configured path.
     pub async fn run(&self, root: impl AsRef<Path>, config: &Config) -> anyhow::Result<()> {
-        let path = canonicalize(root).await?;
+        let root = root.as_ref();
+
+        let path = root.to_path_buf();
+        let path = tokio::task::spawn_blocking(|| canonical_mount(path)).await??;
+
+        info!("storage monitor starting for {root:?} (mount point: {path:?})");
+
         loop {
             let deadline = self
                 .epoch
@@ -89,13 +96,42 @@ impl DiskMonitor {
     }
 }
 
-#[cfg(test)]
-pub async fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<std::path::PathBuf> {
-    Ok(path.as_ref().to_path_buf())
+/// Climbs the directory tree looking for a moint point we can monitor
+#[cfg(unix)]
+fn find_mount_point(path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let path = path.as_ref().to_path_buf();
+
+    let dev = std::fs::metadata(path.as_path())?.dev();
+    let mut last = path.as_path();
+
+    for parent in path.ancestors() {
+        if std::fs::metadata(parent)?.dev() != dev {
+            return Ok(last.to_path_buf());
+        } else {
+            last = parent;
+        }
+    }
+
+    Ok(last.to_path_buf())
+}
+
+/// Punt
+#[cfg(not(unix))]
+fn find_mount_point(path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    Ok(std::fs::canonicalize(path)?)
 }
 
 #[cfg(not(test))]
-use tokio::fs::canonicalize;
+fn canonical_mount(path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    let path = std::fs::canonicalize(path)?;
+    find_mount_point(path)
+}
+
+#[cfg(test)]
+fn canonical_mount(path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+    Ok(path.as_ref().to_path_buf())
+}
 
 /// Stores configuration properties used for storage monitoring.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -135,6 +171,8 @@ impl System {
         Self
     }
 
+    /// Parses a free space value from the supplied path, and if found includes it
+    /// in a mock fs stats struct
     fn mount_at(&self, path: impl AsRef<Path>) -> std::io::Result<systemstat::Filesystem> {
         let mut fs = systemstat::Filesystem {
             files: Default::default(),
@@ -164,6 +202,13 @@ mod tests {
     use tokio::time::timeout;
 
     #[tokio::test]
+    async fn can_find_mount_point() {
+        assert_eq!(Path::new("/"), find_mount_point("/bin").unwrap());
+        assert_eq!(Path::new("/"), find_mount_point("/").unwrap());
+        assert_eq!(Path::new("/dev"), find_mount_point("/dev/null").unwrap());
+    }
+
+    #[tokio::test]
     async fn monitor_available_disk_space() {
         let monitor = DiskMonitor::default();
         let fixture = monitor.clone();
@@ -174,7 +219,7 @@ mod tests {
             min_available: ByteSize::b(1024),
         };
 
-        tokio::spawn(async move { monitor.run("/test/1024", &config).await });
+        tokio::spawn(async move { monitor.run("/temp/1024", &config).await });
 
         sleep(Duration::from_secs(1)).await;
         assert!(!fixture.is_readonly());
@@ -196,7 +241,7 @@ mod tests {
             min_available: ByteSize::b(1024),
         };
 
-        let _ = timeout(Duration::from_secs(2), monitor.run("/test/1023", &config)).await;
+        let _ = timeout(Duration::from_secs(2), monitor.run("/temp/1023", &config)).await;
         assert!(fixture.is_readonly());
     }
 }
