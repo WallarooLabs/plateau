@@ -19,7 +19,7 @@ fn signal_stream(k: SignalKind) -> impl Stream<Item = ()> {
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
 
     let config = plateau::config::binary_config().expect("error getting configuration");
     let catalog = Arc::new(Catalog::attach(config.data_path.clone(), config.catalog.clone()).await);
