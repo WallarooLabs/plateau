@@ -1,6 +1,5 @@
 use anyhow::Result;
 use config::{Config, File};
-use log::info;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -16,6 +15,11 @@ pub struct PlateauConfig {
     pub catalog: catalog::Config,
     pub metrics: metrics::Config,
     pub replication: Option<replication::Config>,
+}
+impl PlateauConfig {
+    pub fn to_string_pretty(&self) -> Result<String> {
+        toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("could not format config: {}", e))
+    }
 }
 
 impl Default for PlateauConfig {
@@ -52,10 +56,6 @@ pub fn binary_config() -> Result<PlateauConfig> {
         .unwrap();
 
     let config: PlateauConfig = config.try_deserialize()?;
-
-    for line in toml::to_string_pretty(&config)?.lines() {
-        info!("{}", line);
-    }
 
     Ok(config)
 }

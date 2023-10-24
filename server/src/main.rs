@@ -1,7 +1,8 @@
-use ::log::info;
+use ::log::{error, info};
 use futures::stream::StreamExt;
 use futures::{future, stream};
 use rweb::*;
+use std::env;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,11 +18,51 @@ fn signal_stream(k: SignalKind) -> impl Stream<Item = ()> {
     SignalStream::new(signal(k).unwrap())
 }
 
+fn squawk(config: &plateau::config::PlateauConfig) {
+    let version = env!("CARGO_PKG_VERSION");
+    let commit = option_env!("BUILD_COMMIT").unwrap_or("unknown");
+    let build_time = env!("BUILD_TIME");
+    let run_time = chrono::Utc::now().to_rfc2822();
+    let port = config.http.bind.port();
+    let pid = std::process::id();
+    let log_level = env::var("RUST_LOG").unwrap_or("unset".to_string());
+
+    eprintln!(
+        r#"
+/*
+** plateau v{version}
+**
+** commit:        {commit}
+** build time:    {build_time}
+** startup time:  {run_time}
+** port:          {port}
+** pid:           {pid}
+** log level:     {log_level}
+**
+** https://wallaroo.ai
+\*
+"#
+    );
+
+    match config.to_string_pretty() {
+        Ok(c) => {
+            for line in c.lines() {
+                info!("config toml: {}", line);
+            }
+        }
+        Err(e) => error!("{}", e),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    if env::var("RUST_LOG").is_err() {
+        env::set_var("RUST_LOG", "warn")
+    }
     pretty_env_logger::init_timed();
-
     let config = plateau::config::binary_config().expect("error getting configuration");
+    squawk(&config);
+
     let catalog = Arc::new(Catalog::attach(config.data_path.clone(), config.catalog.clone()).await);
     metrics::start_metrics(config.metrics.clone());
 
