@@ -221,8 +221,20 @@ async fn topic_append(
     #[data] catalog: Arc<Catalog>,
     chunk: SchemaChunkRequest,
 ) -> Result<Json<Inserted>, Rejection> {
+    topic_append_internal(topic_name, partition_name, catalog, chunk).await
+}
+async fn topic_append_internal(
+    topic_name: String,
+    partition_name: String,
+    catalog: Arc<Catalog>,
+    chunk: SchemaChunkRequest,
+) -> Result<Json<Inserted>, Rejection> {
     if catalog.is_readonly() {
         return Err(ErrorReply::InsufficientDiskSpace.into());
+    }
+
+    if chunk.0.contains_null_type() {
+        return Err(ErrorReply::NullTypes.into());
     }
 
     catalog.record_write();
@@ -307,6 +319,17 @@ async fn topic_iterate(
     #[json] position: Option<TopicIterator>,
     #[data] catalog: Arc<Catalog>,
     #[data] max_page: RowLimit,
+) -> Result<Box<dyn Reply>, Rejection> {
+    topic_iterate_internal(topic_name, query, content, position, catalog, max_page).await
+}
+
+async fn topic_iterate_internal(
+    topic_name: String,
+    query: TopicIterationQuery,
+    content: Option<String>,
+    position: Option<TopicIterator>,
+    catalog: Arc<Catalog>,
+    max_page: RowLimit,
 ) -> Result<Box<dyn Reply>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);

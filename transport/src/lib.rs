@@ -361,6 +361,12 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
     pub fn is_empty(&self) -> bool {
         self.chunk.is_empty()
     }
+
+    /// Checks for [DataType::Null] on any field of the schema, including
+    /// nested fields
+    pub fn contains_null_type(&self) -> bool {
+        contains_null_type(self.schema.borrow())
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -548,6 +554,28 @@ impl SchemaChunk<ArrowSchema> {
         }
 
         Ok((current_path, current))
+    }
+}
+
+fn contains_null_type(schema: &arrow2::datatypes::Schema) -> bool {
+    schema
+        .fields
+        .iter()
+        .flat_map(all_datatypes)
+        .any(|d| d == DataType::Null)
+}
+
+fn all_datatypes(field: &Field) -> Vec<DataType> {
+    match &field.data_type {
+        DataType::Struct(fields) | DataType::Union(fields, _, _) => {
+            fields.iter().flat_map(all_datatypes).collect()
+        }
+        DataType::List(f)
+        | DataType::LargeList(f)
+        | DataType::FixedSizeList(f, _)
+        | DataType::Map(f, _) => all_datatypes(f),
+        DataType::Dictionary(_, f, _) => vec![*f.clone()],
+        data_type => vec![data_type.clone()],
     }
 }
 
@@ -746,6 +774,29 @@ mod tests {
                 index.boxed(),
             ),
         )
+    }
+
+    #[test]
+    fn test_null_detection() {
+        let mut schema = ArrowSchema::default();
+        schema.fields.push(Field::new(
+            "column",
+            DataType::List(Box::new(Field::new("inner_field", DataType::Null, false))),
+            true,
+        ));
+        assert!(super::contains_null_type(&schema));
+
+        let mut schema = ArrowSchema::default();
+        schema
+            .fields
+            .push(Field::new("column", DataType::Float64, false));
+        assert!(!super::contains_null_type(&schema));
+
+        let mut schema = ArrowSchema::default();
+        schema
+            .fields
+            .push(Field::new("column", DataType::Float64, true));
+        assert!(!super::contains_null_type(&schema));
     }
 
     #[test]

@@ -74,36 +74,40 @@ impl FromRequest for SchemaChunkRequest {
 
         let chunk = content_type
             .and(body::bytes())
-            .and_then(|_, bytes: Bytes| async move {
-                let mut cursor = Cursor::new(bytes);
-                let metadata = read::read_file_metadata(&mut cursor)
-                    .map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
-                let schema = metadata.schema.clone();
-                let mut reader = read::FileReader::new(cursor, metadata, None, None);
-                if let Some(chunk) = reader.next() {
-                    let mut chunk = new_schema_chunk(
-                        schema.clone(),
-                        chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
-                    )
-                    .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?;
-                    for next_chunk in reader {
-                        chunk
-                            .extend(
-                                new_schema_chunk(
-                                    schema.clone(),
-                                    next_chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
-                                )
-                                .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
-                            )
-                            .map_err(|_| reject::custom(ErrorReply::InvalidSchema))?;
-                    }
-                    Ok(SchemaChunkRequest(chunk))
-                } else {
-                    Err(reject::custom(ErrorReply::EmptyBody))
-                }
-            });
+            .and_then(|_, bytes: Bytes| async move { deserialize_request(bytes).await });
 
         json.or(chunk).unify().boxed()
+    }
+}
+
+pub(crate) async fn deserialize_request(
+    bytes: Bytes,
+) -> Result<SchemaChunkRequest, rweb::Rejection> {
+    let mut cursor = Cursor::new(bytes);
+    let metadata =
+        read::read_file_metadata(&mut cursor).map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
+    let schema = metadata.schema.clone();
+    let mut reader = read::FileReader::new(cursor, metadata, None, None);
+    if let Some(chunk) = reader.next() {
+        let mut chunk = new_schema_chunk(
+            schema.clone(),
+            chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
+        )
+        .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?;
+        for next_chunk in reader {
+            chunk
+                .extend(
+                    new_schema_chunk(
+                        schema.clone(),
+                        next_chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
+                    )
+                    .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
+                )
+                .map_err(|_| reject::custom(ErrorReply::InvalidSchema))?;
+        }
+        Ok(SchemaChunkRequest(chunk))
+    } else {
+        Err(reject::custom(ErrorReply::EmptyBody))
     }
 }
 

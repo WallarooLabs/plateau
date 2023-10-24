@@ -9,7 +9,7 @@ use crate::arrow2::io::parquet::write::{
     WriteOptions,
 };
 use anyhow::Result;
-use log::{debug, warn};
+use log::{debug, error, warn};
 use parquet2::metadata::{FileMetaData, KeyValue};
 use std::borrow::Borrow;
 use std::convert::TryFrom;
@@ -257,7 +257,9 @@ pub(crate) trait CloseArrow: Sized {
     }
 }
 
-fn recover(path: &Path, checkpoint_path: &Path) -> Result<FileMetaData> {
+fn recover(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<FileMetaData> {
+    let path = path.as_ref();
+    let checkpoint_path = checkpoint_path.as_ref();
     warn!("attempting to recover checkpoint {:?}", checkpoint_path);
 
     {
@@ -296,18 +298,18 @@ pub(crate) struct DoubleEndedChunkReader {
     metadata: arrow2::io::parquet::read::FileMetaData,
 }
 impl DoubleEndedChunkReader {
-    pub fn open(path: &Path, checkpoint_path: PathBuf) -> Result<Self> {
-        let mut f = fs::File::open(path)?;
+    pub fn open(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<Self> {
+        let mut f = fs::File::open(path.as_ref())?;
         let metadata = read_metadata(&mut f)
             .map_err(anyhow::Error::from)
             .or_else(|_| {
                 drop(f);
-                recover(path, checkpoint_path.as_path())
+                recover(path.as_ref(), checkpoint_path)
             })?;
         let schema = infer_schema(&metadata)?;
 
         Ok(Self {
-            path: path.to_path_buf(),
+            path: path.as_ref().to_path_buf(),
             schema,
             metadata,
         })
@@ -354,7 +356,11 @@ impl Iterator for DoubleEndedChunkIterator {
             self.fwd_position += 1;
             if self.chunks.len() < self.fwd_position {
                 match self.fwd_reader.next() {
-                    Some(r) => self.chunks.push(r.ok()),
+                    Some(Ok(r)) => self.chunks.push(Some(r)),
+                    Some(Err(e)) => {
+                        error!("failed to read chunk from segment: {e}");
+                        self.chunks.push(None)
+                    }
                     None => {
                         // we reached the end of the segment
                         self.full_read = true;

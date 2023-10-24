@@ -258,16 +258,19 @@ impl Slog {
         }
 
         let reader = segment.read_double_ended().unwrap();
+        let schema = reader.schema.clone();
+        let filter = move |c: Result<SegmentChunk>| {
+            c.map_or(None, |chunk| {
+                Some(SchemaChunk {
+                    schema: schema.clone(),
+                    chunk,
+                })
+            })
+        };
         if order.is_reverse() {
-            Box::new(reader.iter().rev().map(move |c| SchemaChunk {
-                schema: reader.schema.clone(),
-                chunk: c.unwrap(),
-            }))
+            Box::new(reader.iter().rev().filter_map(filter))
         } else {
-            Box::new(reader.iter().map(move |c| SchemaChunk {
-                schema: reader.schema.clone(),
-                chunk: c.unwrap(),
-            }))
+            Box::new(reader.iter().filter_map(filter))
         }
     }
 

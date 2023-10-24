@@ -18,6 +18,7 @@ pub(crate) enum ErrorReply {
     WriterBusy,
     InvalidQuery,
     InvalidSchema,
+    NullTypes,
     BadEncoding,
     CannotAccept(String),
     CannotEmit(String),
@@ -38,6 +39,10 @@ pub(crate) async fn emit_error(
         Some(ErrorReply::Path(e)) => (StatusCode::BAD_REQUEST, format!("invalid path: {}", e)),
         Some(ErrorReply::InvalidQuery) => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
         Some(ErrorReply::InvalidSchema) => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
+        Some(ErrorReply::NullTypes) => (
+            StatusCode::BAD_REQUEST,
+            "schema includes null datatypes".to_string(),
+        ),
         Some(ErrorReply::WriterBusy) => (StatusCode::TOO_MANY_REQUESTS, "writer busy".to_string()),
         Some(ErrorReply::BadEncoding) => (
             StatusCode::BAD_REQUEST,
