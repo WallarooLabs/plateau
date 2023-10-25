@@ -17,7 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Client, Error, Retrieve};
 
-use log::{debug, error, info};
+use log::{debug, info};
+
+#[cfg(feature = "replicate")]
+use log::error;
 
 #[cfg(feature = "replicate")]
 use std::time::Duration;
