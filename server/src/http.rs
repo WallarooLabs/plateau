@@ -265,7 +265,7 @@ async fn topic_get_partitions(
     #[data] catalog: Arc<Catalog>,
 ) -> Result<Json<Partitions>, Rejection> {
     let topic = catalog.get_topic(&topic_name).await;
-    let indices = topic.readable_ids().await;
+    let indices = topic.readable_ids(None).await;
 
     Ok(Json::from(Partitions {
         partitions: indices
@@ -334,6 +334,7 @@ async fn topic_iterate_internal(
     let topic = catalog.get_topic(&topic_name).await;
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let position = position.unwrap_or_default();
+    let partition_filter = query.partition_filter;
     let order: Ordering = query.order.unwrap_or(TopicIterationOrder::Asc).into();
 
     let mut result = if let Some(start) = query.start_time {
@@ -341,9 +342,13 @@ async fn topic_iterate_internal(
         if order == Ordering::Reverse {
             Err(warp::reject::custom(ErrorReply::InvalidQuery))?
         }
-        topic.get_records_by_time(position, times, page_size).await
+        topic
+            .get_records_by_time(position, times, page_size, partition_filter)
+            .await
     } else {
-        topic.get_records(position, page_size, &order).await
+        topic
+            .get_records(position, page_size, &order, partition_filter)
+            .await
     };
 
     let status = TopicIterationStatus {

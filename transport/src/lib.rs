@@ -279,7 +279,14 @@ pub struct TopicIterationQuery {
     #[serde(flatten)]
     #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
     pub data_focus: DataFocus,
+    #[serde(default)]
+    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    pub partition_filter: PartitionFilter,
 }
+
+/// An optional filter that can limit the partitions data is taken from.
+/// A [`None`] value indicates no filter and that all partitions should be used.
+pub type PartitionFilter = Option<Vec<String>>;
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
 pub struct TopicIterationReply {

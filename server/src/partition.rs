@@ -60,6 +60,12 @@ pub struct Partition {
     manifest: Manifest,
 }
 
+impl std::fmt::Debug for Partition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Partition").field("id", &self.id).finish()
+    }
+}
+
 pub struct State {
     last_roll: Instant,
     messages: Slog,
@@ -307,6 +313,7 @@ impl Partition {
     pub(crate) async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
         let read = self.state.read().await;
         let stored = self.manifest.get_partition_range(&self.id).await;
+        log::debug!("stored: {:?}", stored);
 
         read.messages
             .cached_segment_data()

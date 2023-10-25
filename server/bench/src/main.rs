@@ -61,7 +61,7 @@ struct Writer {
 impl Writer {
     fn create(topic: &str, partition: &str, record: &str, batch_size: usize) -> Self {
         let url = format!("topic/{}/partition/{}", topic, partition);
-        let records: Vec<_> = vec![record.to_string()]
+        let records: Vec<_> = [record.to_string()]
             .iter()
             .cycle()
             .take(batch_size)
