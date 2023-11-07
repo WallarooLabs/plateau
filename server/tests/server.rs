@@ -613,7 +613,7 @@ async fn topic_iterate_schema_change() -> Result<()> {
     .await?;
     assert_eq!(
         response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
-        vec![5, 5, 5, 5, 5, 4]
+        vec![5 + 5 + 5 + 5 + 5 + 4]
     );
     assert_eq!(
         schema_field_names(&schema),
@@ -631,7 +631,7 @@ async fn topic_iterate_schema_change() -> Result<()> {
     .await?;
     assert_eq!(
         response.into_iter().map(|c| c.len()).collect::<Vec<_>>(),
-        vec![1, 5, 5, 5, 5]
+        vec![1 + 5 + 5 + 5 + 5]
     );
     assert_eq!(
         schema_field_names(&schema),

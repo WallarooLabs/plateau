@@ -12,6 +12,7 @@
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
+use log::trace;
 pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
 use sqlx::query::Query;
@@ -221,6 +222,7 @@ impl Manifest {
 
     /// Upserts data for a segment with the given identifier.
     pub(crate) async fn update(&self, id: &PartitionId, data: &SegmentData) {
+        trace!("update {:?}: {:?}", id, data);
         sqlx::query(
             "
             INSERT INTO segments(
@@ -428,6 +430,7 @@ impl Manifest {
 
     /// Remove the identified segment from the manifest.
     pub async fn remove_segment(&self, id: SegmentId<&PartitionId>) {
+        trace!("remove segment {:?}", id);
         sqlx::query(
             "
             DELETE FROM segments

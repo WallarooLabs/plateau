@@ -1,12 +1,14 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
-use crate::arrow2::array::{
-    Array, BooleanArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray,
-    Utf8Array,
-};
-use crate::arrow2::chunk::Chunk;
-use crate::arrow2::compute::filter::filter_chunk;
 pub use crate::arrow2::datatypes::Schema;
-use crate::arrow2::datatypes::{DataType, Field, Metadata};
+use crate::arrow2::{
+    array::{
+        Array, BooleanArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray,
+        Utf8Array,
+    },
+    chunk::Chunk,
+    compute::{self, filter::filter_chunk},
+    datatypes::{DataType, Field, Metadata},
+};
 use crate::manifest::Ordering;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
@@ -310,6 +312,38 @@ impl From<IndexedChunk> for SegmentChunk {
         arrays.truncate(arrays.len() - 1);
         SegmentChunk::new(arrays)
     }
+}
+
+pub fn concatenate(chunks: &[SegmentChunk]) -> anyhow::Result<SegmentChunk> {
+    let arrays_len = chunks
+        .first()
+        .map(|c| c.arrays().len())
+        .ok_or_else(|| anyhow::anyhow!("cannot concat empty list"))?;
+    let columns: Vec<_> = (0..arrays_len)
+        .map(|_| Vec::with_capacity(chunks.len()))
+        .collect();
+
+    let transpose = chunks.iter().fold(columns, |mut rows, chunk| {
+        for (row, array) in rows.iter_mut().zip(chunk.arrays()) {
+            row.push(array.as_ref());
+        }
+        rows
+    });
+
+    Ok(SegmentChunk::new(
+        transpose
+            .into_iter()
+            .map(|arrays| compute::concatenate::concatenate(&arrays))
+            .collect::<Result<Vec<_>, _>>()?,
+    ))
+}
+
+pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
+    let mut arrays = chunk.into_arrays();
+    for array in arrays.iter_mut() {
+        array.slice(offset, len);
+    }
+    SegmentChunk::new(arrays)
 }
 
 #[cfg(any(test, bench, feature = "test"))]

@@ -784,7 +784,6 @@ pub mod test {
                 &Ordering::Reverse,
             )
             .await;
-        assert_eq!(10, result.chunks.len());
 
         let r = result
             .chunks
@@ -792,6 +791,8 @@ pub mod test {
             .map(|c| c.display_vec())
             .flatten()
             .collect::<Vec<String>>();
+
+        assert_eq!(10, r.len());
         assert_eq!(["9: m4", "8: m3", "7: m2", "6: m1", "5: m0"], r[0..5]);
         assert_eq!(["4: m4", "3: m3", "2: m2", "1: m1", "0: m0"], r[5..10]);
 
@@ -994,7 +995,7 @@ pub mod test {
     fn batch_limit(write_queue_batch_limit: usize) -> Config {
         Config {
             slog: slog::Config {
-                write_queue_batch_limit,
+                min_full_chunk_len: write_queue_batch_limit,
                 ..Default::default()
             },
             ..segment_3s()
@@ -1103,10 +1104,17 @@ pub mod test {
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
-                vec![
-                    IndexedChunk::from_start(start, chunk_a.clone(), order),
-                    IndexedChunk::from_start(start + chunk_a.len(), chunk_a.clone(), order)
-                ]
+                vec![IndexedChunk::from_start(
+                    start,
+                    SchemaChunk {
+                        schema: chunk_a.schema.clone(),
+                        chunk: crate::chunk::concatenate(&[
+                            chunk_a.chunk.clone(),
+                            chunk_a.chunk.clone()
+                        ])?
+                    },
+                    order
+                )],
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;

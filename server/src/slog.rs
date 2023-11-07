@@ -1,7 +1,12 @@
-//! The slog (segment log) is a sequence of segments with a well-known storage
-//! location.
+//! The slog (segment log) is a persistent sequence of segments with a
+//! well-known storage location.
 //!
-//! Currently, local files named with a simple logical index is the only
+//! It is additionally responsible for compaction. It buffers incoming writes
+//! and periodically concatenates them together into large chunks. Large chunks
+//! mitigate heap fragmentation, as well as providing faster indexing and more
+//! predictable read and write performance.
+//!
+//! Currently, local segment files named with a simple logical index is the only
 //! supported slog type.
 //!
 //! Every slog has a background writer thread. This achieves two goals:
@@ -19,11 +24,11 @@
 //! Load is shed by failing any roll or checkpoint operation while an existing
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
-use crate::chunk::{Schema, TimeRange};
+use crate::chunk::{self, Schema, TimeRange};
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId};
 #[cfg(test)]
 use crate::segment::Record;
-use crate::segment::{CloseArrow, Segment, SegmentWriter2};
+use crate::segment::{Config as SegmentConfig, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use log::{debug, error, info, trace};
@@ -52,15 +57,17 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub write_queue_timeout: Duration,
     pub write_queue_size: usize,
-    pub write_queue_batch_limit: usize,
+    pub min_full_chunk_len: usize,
+    pub segment: SegmentConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
             write_queue_timeout: Duration::from_millis(100),
-            write_queue_size: 16,
-            write_queue_batch_limit: 1000,
+            write_queue_size: 1,
+            min_full_chunk_len: 1000,
+            segment: SegmentConfig::default(),
         }
     }
 }
@@ -90,14 +97,9 @@ impl SegmentIndex {
     }
 }
 
-/// Each chunk inside a segment has its own segment-scoped unique index
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
-pub(crate) struct SegmentChunkIndex(pub(crate) usize);
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Checkpoint {
     pub(crate) segment: SegmentIndex,
-    pub(crate) chunk: SegmentChunkIndex,
     pub(crate) record: RecordIndex,
 }
 
@@ -132,12 +134,77 @@ pub(crate) struct Slog {
 struct MemorySegment {
     metadata: SegmentData,
     schema: Schema,
-    chunks: Vec<SegmentChunk>,
+    full_chunks: Vec<SegmentChunk>,
+    full_chunk_len: usize,
+    active_chunk: Vec<SegmentChunk>,
 }
 
 impl MemorySegment {
     fn record_count(&self) -> usize {
-        self.chunks.iter().map(|c| c.len()).sum()
+        self.full_chunks
+            .iter()
+            .chain(self.active_chunk.iter())
+            .map(|c| c.len())
+            .sum()
+    }
+
+    /// Compact the chunks that have accumulated in this memory segment into
+    /// "full" chunks that have a minimum size limit.
+    ///
+    /// Any existing chunks that meet the size limit will be left unmodified.
+    ///
+    /// The final chunk will often be a "partial" chunk that does not meet the
+    /// size limit. Future calls to `compact` will merge any new chunks into
+    /// this partial chunk until it meets the limit, at which point the cycle
+    /// begins anew.
+    ///
+    /// Returns the total number of rows in this memory segment.
+    fn compact(&mut self, config: &Config) -> usize {
+        if self.active_chunk.is_empty() {
+            return 0;
+        }
+
+        let mut last_ix = 0;
+        let mut indices = vec![];
+        let mut cur_rows = 0;
+        let mut all_rows = 0;
+        for (ix, chunk) in self.active_chunk.iter().enumerate() {
+            all_rows += chunk.len();
+            cur_rows += chunk.len();
+            if cur_rows >= config.min_full_chunk_len {
+                let next = ix + 1;
+                trace!("full chunk {:?} {}", last_ix..next, cur_rows);
+                indices.push(last_ix..next);
+                last_ix = next;
+                cur_rows = 0;
+            }
+        }
+
+        fn log_concat(slice: &[SegmentChunk]) -> Option<SegmentChunk> {
+            if slice.len() > 1 {
+                match chunk::concatenate(slice) {
+                    Ok(full_chunk) => Some(full_chunk),
+                    Err(e) => {
+                        error!("error building full chunk: {:?}", e);
+                        None
+                    }
+                }
+            } else {
+                slice.first().cloned()
+            }
+        }
+
+        let active = std::mem::take(&mut self.active_chunk);
+        let mut compact = vec![];
+        for slice in indices {
+            compact.extend(log_concat(&active[slice]));
+        }
+
+        trace!("compact active segment {:?}", last_ix..active.len());
+        compact.extend(log_concat(&active[last_ix..]));
+        self.active_chunk = compact;
+
+        all_rows
     }
 }
 
@@ -157,7 +224,8 @@ struct AppendRequest {
     records: Range<RecordIndex>,
     time: RangeInclusive<DateTime<Utc>>,
     schema: Schema,
-    chunks: Vec<SegmentChunk>,
+    full_chunks: Vec<SegmentChunk>,
+    active_chunk: SegmentChunk,
 }
 
 #[derive(Debug)]
@@ -176,10 +244,14 @@ impl Slog {
         active_first_record_ix: RecordIndex,
         config: Config,
     ) -> (Self, SlogWrites) {
-        let (thread, rx) = spawn_slog_thread(root.clone(), name.clone(), config.write_queue_size);
+        let (thread, rx) = spawn_slog_thread(
+            root.clone(),
+            name.clone(),
+            config.write_queue_size,
+            config.segment.clone(),
+        );
         let active_checkpoint = Checkpoint {
             segment: active_segment,
-            chunk: SegmentChunkIndex(0),
             record: active_first_record_ix,
         };
         let state = State {
@@ -240,8 +312,14 @@ impl Slog {
         if let Some(in_mem) = state.get_segment(ix).await {
             let schema = in_mem.schema.clone();
             // NOTE: the backing [Buffer] behind arrow2 arrays is actually
-            // arc-ed, so this clone _should_ be relatively cheap.
-            let mut chunks = in_mem.chunks.clone();
+            // arc-ed, so the clones here _should_ be relatively cheap.
+            let mut chunks: Vec<_> = in_mem
+                .full_chunks
+                .iter()
+                .chain(in_mem.active_chunk.iter())
+                .cloned()
+                .collect();
+
             if order.is_reverse() {
                 chunks.reverse();
             }
@@ -350,18 +428,19 @@ impl State {
                 records: first..first,
                 time: data_time_range.clone(),
             },
-            chunks: vec![],
+            full_chunks: vec![],
+            full_chunk_len: 0,
+            active_chunk: vec![],
         });
 
         active.metadata.size += size;
         active.metadata.records.end += size;
         active.metadata.time = min(*active.metadata.time.start(), *data_time_range.start())
             ..=max(*active.metadata.time.end(), *data_time_range.end());
-        active.chunks.push(d.chunk);
+        active.active_chunk.push(d.chunk);
 
         Checkpoint {
             segment: index,
-            chunk: SegmentChunkIndex(active.chunks.len()),
             record: active.metadata.records.end,
         }
     }
@@ -391,43 +470,52 @@ impl State {
     /// should be finalized via `close()`, which writes the parquet footer and
     /// syncs the file.
     async fn checkpoint(&mut self, seal: bool) -> bool {
-        if let Some(segment) = &self.active {
-            let chunk_size = segment.chunks.len();
-            let mut remaining_chunk_ixs = self.active_checkpoint.chunk.0..chunk_size;
-            while remaining_chunk_ixs.start < remaining_chunk_ixs.end {
-                let mut request_chunk_ixs = remaining_chunk_ixs.start..remaining_chunk_ixs.start;
-                let mut request_len = 0;
-                for ix in remaining_chunk_ixs.clone() {
-                    request_len += segment.chunks[ix].len();
-                    request_chunk_ixs.end = ix + 1;
-                    if request_len >= self.config.write_queue_batch_limit {
-                        break;
-                    }
-                }
+        if let Some(segment) = &mut self.active {
+            let active_rows = segment.compact(&self.config);
 
-                let last_request = remaining_chunk_ixs.end == request_chunk_ixs.end;
-                let last_sent_ix = self.active_checkpoint.record;
-                let request_record_ixs = self.active_first_record_ix..(last_sent_ix + request_len);
+            let active_start = segment.metadata.records.start;
+            let records = active_start..(active_start + segment.full_chunk_len + active_rows);
+            if !segment.active_chunk.is_empty() && records.end > self.active_checkpoint.record {
+                let mut full_chunks = std::mem::take(&mut segment.active_chunk);
+                let active_chunk = full_chunks
+                    .split_off(full_chunks.len() - 1)
+                    .into_iter()
+                    .next()
+                    .unwrap(); // SAFETY: !segment.active_chunk.is_empty(), so full_chunks.len() > 0
+
                 let request = AppendRequest {
-                    seal: seal && last_request,
+                    seal,
                     segment: self.active_checkpoint.segment,
-                    records: request_record_ixs.clone(),
+                    records: records.clone(),
                     time: segment.metadata.time.clone(),
                     schema: segment.schema.clone(),
-                    chunks: segment.chunks[request_chunk_ixs.clone()].to_vec(),
+                    full_chunks: full_chunks.clone(),
+                    active_chunk: active_chunk.clone(),
                 };
-                trace!("{:?}", request);
+
+                trace!(
+                    "{:?}: {:?} (seal: {}, full chunks: {}, active rows: {})",
+                    segment.metadata.index,
+                    records,
+                    seal,
+                    full_chunks.len(),
+                    active_chunk.len()
+                );
+
                 if timeout(
                     self.config.write_queue_timeout,
                     self.thread.tx.send(request),
                 )
                 .await
-                .is_ok()
+                .is_ok_and(|r| r.is_ok())
                 {
-                    remaining_chunk_ixs.start = request_chunk_ixs.end;
-                    self.active_checkpoint.chunk = SegmentChunkIndex(request_chunk_ixs.end);
-                    self.active_checkpoint.record = request_record_ixs.end;
+                    segment.full_chunk_len += full_chunks.iter().map(|c| c.len()).sum::<usize>();
+                    segment.full_chunks.extend(full_chunks);
+                    segment.active_chunk = vec![active_chunk];
+                    self.active_checkpoint.record = records.end;
                 } else {
+                    full_chunks.push(active_chunk);
+                    segment.active_chunk = full_chunks;
                     return false;
                 }
             }
@@ -444,7 +532,6 @@ impl State {
                 let segment = self.active_checkpoint.segment;
                 trace!("rolling {:?}", segment);
                 self.active_checkpoint.segment = segment.next();
-                self.active_checkpoint.chunk = SegmentChunkIndex(0);
                 self.active_first_record_ix += records;
                 self.pending = self.active.take();
                 Ok(())
@@ -485,6 +572,7 @@ fn spawn_slog_thread(
     root: PathBuf,
     name: String,
     write_queue_size: usize,
+    config: SegmentConfig,
 ) -> (SlogThread, SlogWrites) {
     let (tx, mut rx_records) = mpsc::channel(write_queue_size);
     let (tx_fin, mut rx_fin) = mpsc::channel(1);
@@ -502,13 +590,14 @@ fn spawn_slog_thread(
                     records,
                     time,
                     schema,
-                    chunks,
+                    full_chunks,
+                    active_chunk,
                 }) => {
-                    trace!("received request for {:?}", records);
+                    trace!("{}: received request for {:?}", name, records);
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
-                            trace!("segment change {:?} {:?}", id, segment);
+                            trace!("{}: segment change {:?} {:?}", name, id, segment);
                             writer.close().expect("sealed segment");
                             None
                         } else {
@@ -516,16 +605,18 @@ fn spawn_slog_thread(
                         }
                     });
                     let (schema, ref mut writer, _) = current.get_or_insert_with(|| {
-                        trace!("opening segment {:?}", segment);
+                        trace!("{}: opening segment {:?}", name, segment);
                         (
                             schema.clone(),
-                            new_segment.create2(schema).expect("segment creation"),
+                            new_segment
+                                .create2(schema, config.clone())
+                                .expect("segment creation"),
                             segment,
                         )
                     });
 
                     let now = Instant::now();
-                    for chunk in chunks.into_iter() {
+                    for chunk in full_chunks.into_iter() {
                         writer
                             .log_arrow(SchemaChunk {
                                 schema: schema.clone(),
@@ -533,10 +624,13 @@ fn spawn_slog_thread(
                             })
                             .expect("added records");
                     }
+                    writer.update_cache(active_chunk).expect("updating cache");
+
                     let size = writer.size_estimate().expect("segment size estimate");
                     let record_len = records.end.0 - records.start.0;
                     debug!(
-                        "wrote to {:?} (end {:?}, len {}, size {}) in {:?}",
+                        "{}: wrote to {:?} (end {:?}, len {}, size {}) in {:?}",
+                        name,
                         segment,
                         records.end,
                         record_len,
@@ -555,7 +649,7 @@ fn spawn_slog_thread(
                         current
                             .take()
                             .map(|(_, w, _)| w.close().expect("segment close"));
-                        trace!("sealed {:?} {:?}", segment, records);
+                        trace!("{}: sealed {:?} {:?}", name, segment, records);
                     }
 
                     let response = WriteResult {
@@ -566,9 +660,9 @@ fn spawn_slog_thread(
                             size,
                         },
                     };
-                    trace!("commit send");
+                    trace!("{}: commit send", name);
                     tx_commits.blocking_send(response).expect("channel closed");
-                    trace!("commit sent");
+                    trace!("{}: commit sent", name);
                 }
                 None => {
                     trace!("channel closed; shutting down");
@@ -641,7 +735,10 @@ mod test {
             String::from("testing"),
             SegmentIndex(0),
             RecordIndex(0),
-            Default::default(),
+            Config {
+                segment: crate::segment::Config::default(),
+                ..Default::default()
+            },
         );
         let records: Vec<_> = vec!["abc", "def", "ghi"]
             .into_iter()
@@ -685,6 +782,88 @@ mod test {
                 slog.get_record(second.segment, ix).await,
                 Some(record.clone())
             );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn checkpoint_timeouts() -> Result<()> {
+        pretty_env_logger::init();
+        let root = tempdir().unwrap();
+
+        let segment = SegmentIndex(0);
+        let (slog, mut commits) = Slog::attach(
+            PathBuf::from(root.path()),
+            String::from("testing"),
+            segment,
+            RecordIndex(0),
+            Config {
+                write_queue_timeout: Duration::from_millis(1),
+                ..Default::default()
+            },
+        );
+
+        // kill the writer thread to ensure that checkpoints time out
+        {
+            let thread = &mut slog.state.write().await.thread;
+            thread.tx_fin.try_send(()).ok();
+            // now to receive some records so we can process the fin signal...
+        }
+
+        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno"]
+            .into_iter()
+            .map(|message| Record {
+                time: Utc.timestamp_opt(0, 0).unwrap(),
+                message: message.bytes().collect(),
+            })
+            .collect();
+
+        let chunk = SchemaChunk::try_from(LegacyRecords(records[0..1].to_vec()))?;
+
+        let first = slog.append(chunk).await;
+        assert!(slog.state.write().await.checkpoint(false).await);
+
+        {
+            let thread = &mut slog.state.write().await.thread;
+            assert!(thread.join.take().unwrap().join().is_ok());
+        }
+
+        for (ix, record) in records[0..1].iter().enumerate() {
+            assert_eq!(
+                slog.get_record(first.segment, ix).await,
+                Some(record.clone())
+            );
+        }
+        assert_eq!(
+            commits
+                .recv()
+                .await
+                .map(|r| (r.data.records, r.data.size > 0)),
+            Some((RecordIndex(0)..RecordIndex(1), true))
+        );
+
+        for record in records[1..].iter() {
+            let chunk = SchemaChunk::try_from(LegacyRecords(vec![record.clone()]))?;
+            slog.append(chunk).await;
+        }
+        assert!(!slog.state.write().await.checkpoint(true).await);
+
+        for (ix, record) in records.iter().enumerate() {
+            assert_eq!(slog.get_record(segment, ix).await, Some(record.clone()));
+        }
+
+        // verify post first compaction
+        assert!(!slog.state.write().await.checkpoint(true).await);
+        for (ix, record) in records.iter().enumerate() {
+            assert_eq!(slog.get_record(segment, ix).await, Some(record.clone()));
+        }
+
+        // verify that compaction runs properly again and everything still can
+        // be fetched
+        assert!(!slog.state.write().await.checkpoint(true).await);
+        for (ix, record) in records.iter().enumerate() {
+            assert_eq!(slog.get_record(segment, ix).await, Some(record.clone()));
         }
 
         Ok(())
