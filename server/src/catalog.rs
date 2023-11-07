@@ -1,18 +1,20 @@
 //! The catalog indexes all currently attached topics.
 //! It is used to route reads and writes to the correct topic / partition.
-use crate::limit::Retention;
-use crate::manifest::Scope;
-use ::log::{debug, error, info, trace, warn};
-use bytesize::ByteSize;
-use metrics::gauge;
-use serde::{Deserialize, Serialize};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-use tokio::sync::{RwLock, RwLockReadGuard};
 
+use bytesize::ByteSize;
+use metrics::gauge;
+use serde::{Deserialize, Serialize};
+use tokio::sync::{RwLock, RwLockReadGuard};
+use tracing::{debug, error, info, trace, warn};
+
+use crate::limit::Retention;
 use crate::manifest::Manifest;
+use crate::manifest::Scope;
 use crate::partition;
 use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;

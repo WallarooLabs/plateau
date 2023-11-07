@@ -1,3 +1,7 @@
+use std::io::Cursor;
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use anyhow::Result;
 use arrow2::array::{
     Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray, TryExtend,
@@ -16,9 +20,7 @@ use plateau_transport::{
 };
 use reqwest::Client;
 use serde_json::json;
-use std::io::Cursor;
-use std::net::SocketAddr;
-use std::time::Duration;
+use tracing_subscriber::{fmt, EnvFilter};
 
 use plateau_transport::{DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
 
@@ -358,7 +360,11 @@ async fn setup() -> (Client, String, http::TestServer) {
 }
 
 async fn setup_with_config(config: http::Config) -> (Client, String, http::TestServer) {
-    pretty_env_logger::try_init().ok(); // called multiple times, so ignore errors
+    fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .try_init()
+        .ok(); // called multiple times, so ignore errors
+
     (
         Client::new(),
         format!("topic-{}", uuid::Uuid::new_v4()),

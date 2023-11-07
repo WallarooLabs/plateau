@@ -1,12 +1,14 @@
+use std::collections::HashMap;
+use std::time::{Duration, SystemTime};
+
 use async_trait::async_trait;
 use hdrhistogram::Histogram;
-use log::{debug, info, trace};
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 use reqwest::Client;
 use serde_json::json;
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
 use tokio::sync::{mpsc, watch};
+use tracing::{debug, info, trace};
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[derive(Clone)]
 struct Config {
@@ -232,7 +234,8 @@ impl Task for HealthCheck {
 
 #[tokio::main]
 async fn main() {
-    pretty_env_logger::init();
+    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+
     let config = Config {
         base: String::from("http://localhost:3030"),
         client: Client::new(),

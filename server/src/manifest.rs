@@ -12,7 +12,6 @@
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
-use log::{info, trace};
 pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
 use sqlx::query::Query;
@@ -24,6 +23,7 @@ use std::convert::TryFrom;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use tracing::{info, trace};
 
 use crate::slog::{RecordIndex, SegmentIndex};
 

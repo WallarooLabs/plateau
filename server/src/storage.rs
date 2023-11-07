@@ -1,15 +1,17 @@
 //! Utilities for managing and monitoring local log storage.
-use bytesize::ByteSize;
-use log::info;
-use serde::{Deserialize, Serialize};
+
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use bytesize::ByteSize;
+use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
 use systemstat::{Platform, System};
 use tokio::task::spawn_blocking;
 use tokio::time::sleep;
+use tracing::info;
 
 const MONITOR: bool = true;
 const MAX_WRITES: usize = 10_000;

@@ -1,14 +1,16 @@
-use ::log::{error, info};
-use futures::stream::StreamExt;
-use futures::{future, stream};
-use rweb::*;
 use std::env;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+
+use futures::stream::StreamExt;
+use futures::{future, stream};
+use rweb::*;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time;
 use tokio_stream::wrappers::{IntervalStream, SignalStream};
+use tracing::{error, info};
+use tracing_subscriber::{fmt, EnvFilter};
 
 use plateau::catalog::Catalog;
 use plateau::metrics;
@@ -59,7 +61,8 @@ async fn main() {
     if env::var("RUST_LOG").is_err() {
         env::set_var("RUST_LOG", "warn")
     }
-    pretty_env_logger::init_timed();
+    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+
     let config = plateau::config::binary_config().expect("error getting configuration");
     squawk(&config);
 

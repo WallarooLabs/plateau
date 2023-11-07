@@ -1,7 +1,7 @@
-use log::error;
 use plateau_client::replicate::{ExponentialBackoff, Replicate, ReplicateHost, ReplicationWorker};
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, time::Duration};
+use tracing::error;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {

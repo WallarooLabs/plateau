@@ -4,17 +4,19 @@
 //! Requires downstream consumers to implement:
 //! - [Batch] for data to transmit.
 //! - [BatchSender] for the mechanism used to transmit a [Batch] of data.
-use async_trait::async_trait;
-use core::ops::Range;
-use log::{error, warn};
+
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
 use tokio::{
     runtime::Handle,
     sync::mpsc::{channel, Receiver, Sender},
     task,
 };
+use tracing::{error, warn};
 
 use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 use lazy_static::lazy_static;

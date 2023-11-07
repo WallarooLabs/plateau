@@ -25,6 +25,22 @@
 //! - `{segment}.header.tmp`: A temporary file that the above data is written
 //!   into before moving to the above file, to avoid issues occurring if we
 //!   crash while writing the recovery header.
+
+use std::borrow::Borrow;
+use std::convert::TryFrom;
+use std::ffi::OsStr;
+#[cfg(test)]
+use std::hash::{Hash, Hasher};
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::iter;
+use std::{fs, path::Path, path::PathBuf};
+
+use anyhow::Result;
+use parquet2::metadata::{FileMetaData, KeyValue};
+use plateau_client::ipc::read::StreamState;
+use serde::{Deserialize, Serialize};
+use tracing::{debug, error, warn};
+
 use crate::arrow2::{
     datatypes::Schema,
     io::ipc,
@@ -35,19 +51,6 @@ use crate::arrow2::{
         WriteOptions,
     },
 };
-use anyhow::Result;
-use log::{debug, error, warn};
-use parquet2::metadata::{FileMetaData, KeyValue};
-use plateau_client::ipc::read::StreamState;
-use serde::{Deserialize, Serialize};
-use std::borrow::Borrow;
-use std::convert::TryFrom;
-use std::ffi::OsStr;
-#[cfg(test)]
-use std::hash::{Hash, Hasher};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::iter;
-use std::{fs, path::Path, path::PathBuf};
 
 pub use crate::chunk::Record;
 use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};

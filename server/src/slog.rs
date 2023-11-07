@@ -31,7 +31,6 @@ use crate::segment::Record;
 use crate::segment::{Config as SegmentConfig, Segment, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use log::{debug, error, info, trace};
 use metrics::counter;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
@@ -44,6 +43,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::timeout;
+use tracing::{debug, error, info, trace};
 
 #[derive(Error, Debug)]
 pub enum SlogError {
@@ -789,7 +789,8 @@ mod test {
 
     #[tokio::test]
     async fn checkpoint_timeouts() -> Result<()> {
-        pretty_env_logger::init();
+        use tracing_subscriber::{fmt, EnvFilter};
+        fmt().with_env_filter(EnvFilter::from_default_env()).init();
         let root = tempdir().unwrap();
 
         let segment = SegmentIndex(0);

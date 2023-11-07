@@ -17,6 +17,12 @@
 //! determine when to roll segments and expire old data. `Rolling` policies are
 //! evaluated on every insert, and `Retention` policies are enforced on every
 //! `roll`.
+
+use std::fs;
+use std::ops::{Range, RangeInclusive};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
 use crate::arrow2::array::BooleanArray;
 #[cfg(test)]
 use crate::arrow2::compute::comparison::eq_scalar;
@@ -34,16 +40,12 @@ use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
-use log::{error, info, trace, warn};
 use metrics::{counter, gauge};
 use plateau_transport::arrow2::compute::comparison::lt_scalar;
 use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
-use std::fs;
-use std::ops::{Range, RangeInclusive};
-use std::path::{Path, PathBuf};
-use std::time::Instant;
 use tokio::sync::{watch, RwLock, RwLockReadGuard};
+use tracing::{debug, error, info, trace, warn};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -313,7 +315,7 @@ impl Partition {
     pub(crate) async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
         let read = self.state.read().await;
         let stored = self.manifest.get_partition_range(&self.id).await;
-        log::debug!("stored: {:?}", stored);
+        debug!("stored: {:?}", stored);
 
         read.messages
             .cached_segment_data()

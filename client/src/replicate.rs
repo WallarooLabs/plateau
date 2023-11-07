@@ -17,10 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Client, Error, Retrieve};
 
-use log::{debug, info};
+use tracing::{debug, info};
 
 #[cfg(feature = "replicate")]
-use log::error;
+use tracing::error;
 
 #[cfg(feature = "replicate")]
 use std::time::Duration;
@@ -507,8 +507,10 @@ impl HostTopic {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
     use std::net::SocketAddr;
+
+    use anyhow::Result;
+    use tracing_subscriber::{fmt, EnvFilter};
 
     use super::*;
     use crate::Client;
@@ -565,7 +567,10 @@ mod tests {
     }
 
     async fn setup_with_config(config: http::Config) -> Result<(String, Client, http::TestServer)> {
-        pretty_env_logger::try_init().ok(); // called multiple times, so ignore errors
+        fmt()
+            .with_env_filter(EnvFilter::from_default_env())
+            .try_init()
+            .ok(); // called multiple times, so ignore errors
 
         let server = http::TestServer::new_with_config(PlateauConfig {
             http: http::Config {

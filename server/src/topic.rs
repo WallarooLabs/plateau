@@ -1,5 +1,11 @@
 //! A topic is a collection of partitions. It is an abstraction used for queries
 //! of a given topic over _all_ partitions.
+
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::ops::{Range, RangeInclusive};
+use std::path::{Path, PathBuf};
+
 use crate::chunk::{LegacyRecords, Schema};
 pub use crate::limit::Rolling;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
@@ -8,17 +14,15 @@ pub use crate::partition::Config as PartitionConfig;
 use crate::partition::{Partition, PartitionId};
 pub use crate::segment::Record;
 use crate::slog::RecordIndex;
+
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::FutureExt;
 use futures::stream;
 use futures::stream::StreamExt;
 use plateau_transport::{PartitionFilter, SchemaChunk, TopicIterator};
-use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::ops::{Range, RangeInclusive};
-use std::path::{Path, PathBuf};
 use tokio::sync::{RwLock, RwLockReadGuard};
+use tracing::debug;
 
 type PartitionMap = HashMap<String, Partition>;
 
@@ -65,7 +69,7 @@ impl Topic {
         &self,
         partition_filter: Option<Vec<String>>,
     ) -> HashMap<String, Range<RecordIndex>> {
-        log::debug!("partition map: {:?}", self.partitions);
+        debug!("partition map: {:?}", self.partitions);
         self.map_partitions(
             |partition| async move { partition.readable_ids().await },
             partition_filter,
