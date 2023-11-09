@@ -63,7 +63,11 @@ async fn main() {
     let config = plateau::config::binary_config().expect("error getting configuration");
     squawk(&config);
 
-    let catalog = Arc::new(Catalog::attach(config.data_path.clone(), config.catalog.clone()).await);
+    let catalog = Arc::new(
+        Catalog::attach(config.data_path.clone(), config.catalog.clone())
+            .await
+            .expect("error opening catalog"),
+    );
     metrics::start_metrics(config.metrics.clone());
 
     let mut exit = stream::select_all(vec![

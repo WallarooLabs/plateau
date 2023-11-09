@@ -150,7 +150,7 @@ impl TestServer {
     pub async fn new_with_config(mut config: PlateauConfig) -> Result<Self> {
         let temp = tempdir()?;
         let root = temp.into_path();
-        let catalog = Arc::new(Catalog::attach(root, Default::default()).await);
+        let catalog = Arc::new(Catalog::attach(root, Default::default()).await?);
 
         let serve_catalog = catalog.clone();
         let replication = std::mem::take(&mut config.replication);

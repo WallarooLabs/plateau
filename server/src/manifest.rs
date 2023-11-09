@@ -12,7 +12,7 @@
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
-use log::trace;
+use log::{info, trace};
 pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
 use sqlx::query::Query;
@@ -165,7 +165,31 @@ impl RecordIndex {
     }
 }
 
+fn add_suffix(path: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
+    let mut path = path.to_path_buf();
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("no file name"))?
+        .to_os_string();
+    name.push(suffix);
+    path.set_file_name(name);
+    Ok(path)
+}
+
 impl Manifest {
+    pub async fn current_prior_attach(current: PathBuf, prior: PathBuf) -> anyhow::Result<Self> {
+        if prior.exists() && !current.exists() {
+            info!("migrating {prior:?} to {current:?}");
+            std::fs::copy(add_suffix(&prior, "-shm")?, add_suffix(&current, "-shm")?)?;
+            std::fs::copy(add_suffix(&prior, "-wal")?, add_suffix(&current, "-wal")?)?;
+            std::fs::copy(&prior, &current)?;
+        }
+
+        let manifest = Self::attach(current).await;
+
+        Ok(manifest)
+    }
+
     pub async fn attach(path: PathBuf) -> Self {
         // check for data directory and error if not exist
         if let Some(parent) = path.parent() {

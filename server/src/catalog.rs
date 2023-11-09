@@ -7,7 +7,7 @@ use bytesize::ByteSize;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::{RwLock, RwLockReadGuard};
@@ -42,23 +42,65 @@ pub struct Catalog {
     config: Config,
     manifest: Manifest,
     root: PathBuf,
+    topic_root: PathBuf,
     topics: RwLock<HashMap<String, Topic>>,
     last_checkpoint: RwLock<SystemTime>,
     disk_monitor: DiskMonitor,
 }
 
 impl Catalog {
-    pub async fn attach(root: PathBuf, config: Config) -> Self {
-        let disk_monitor = DiskMonitor::new();
+    pub async fn attach(root: PathBuf, config: Config) -> anyhow::Result<Self> {
+        let manifest = Manifest::current_prior_attach(
+            root.join("manifest.sqlite"),
+            root.join("manifest.json"),
+        )
+        .await?;
 
+        let mut topic_root = root.clone();
+        topic_root.push("topics");
+        if !topic_root.exists() {
+            std::fs::create_dir(&topic_root)?;
+        }
+        Catalog::migrate_topics(&manifest, &root, &topic_root).await?;
+
+        Ok(Self::attach_v0(manifest, root, topic_root, config).await)
+    }
+
+    async fn attach_v0(
+        manifest: Manifest,
+        root: PathBuf,
+        topic_root: PathBuf,
+        config: Config,
+    ) -> Self {
+        let disk_monitor = DiskMonitor::new();
         Catalog {
             config,
-            manifest: Manifest::attach(root.join("manifest.json")).await,
+            manifest,
             root,
+            topic_root,
             topics: RwLock::new(HashMap::new()),
             last_checkpoint: RwLock::new(SystemTime::now()),
             disk_monitor,
         }
+    }
+
+    pub async fn migrate_topics(
+        manifest: &Manifest,
+        root: &Path,
+        topic_root: &Path,
+    ) -> anyhow::Result<()> {
+        for topic in manifest.get_topics().await {
+            let topic = PathBuf::from(topic);
+            let src: PathBuf = root.join(&topic);
+            let dst: PathBuf = topic_root.join(&topic);
+
+            if src.exists() {
+                info!("migrating {src:?} to {dst:?}");
+                std::fs::rename(src, dst)?;
+            }
+        }
+
+        Ok(())
     }
 
     pub async fn last_checkpoint(&self) -> SystemTime {
@@ -167,7 +209,7 @@ impl Catalog {
                 let mut write = self.topics.write().await;
                 info!("creating new topic: {}", name);
                 let topic = Topic::attach(
-                    self.root.clone(),
+                    self.topic_root.clone(),
                     self.manifest.clone(),
                     String::from(name),
                     self.config.partition.clone(),
@@ -271,7 +313,7 @@ mod test {
     async fn catalog_config(config: Config) -> (TempDir, Catalog) {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
-        (dir, Catalog::attach(root, config).await)
+        (dir, Catalog::attach(root, config).await.unwrap())
     }
 
     #[tokio::test]
@@ -300,6 +342,58 @@ mod test {
         for (ix, record) in records.iter().enumerate() {
             let name = format!("topic-{}", ix % 3);
             let topic = catalog.get_topic(&name).await;
+            assert_eq!(
+                topic
+                    .get_record_by_index("default", RecordIndex(ix / 3))
+                    .await,
+                Some(record.clone())
+            );
+        }
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn test_migration() -> Result<()> {
+        let config = Config::default();
+        let dir = tempdir().unwrap();
+        let root = PathBuf::from(dir.path());
+
+        // emulate the v0 attachment process
+        // in v0 the manifest was named "manifest.json" and the topic root was
+        // also the catalog root
+        let manifest = Manifest::attach(root.join("manifest.json")).await;
+        let v0 = Catalog::attach_v0(manifest, root.clone(), root.clone(), config.clone()).await;
+
+        let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
+            .into_iter()
+            .map(|message| Record {
+                time: Utc.timestamp_opt(0, 0).unwrap(),
+                message: message.bytes().collect(),
+            })
+            .collect();
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            let topic = v0.get_topic(&name).await;
+
+            topic.extend_records("default", &[record.clone()]).await?;
+        }
+
+        v0.checkpoint().await;
+        assert_eq!(v0.list_topics().await.len(), 3);
+        assert!(Catalog::close(Arc::new(v0)).await);
+
+        // Will need to investigate; checkpoint + Catalog::close should be
+        // sufficient to ensure durability.
+        std::thread::sleep(Duration::from_millis(1000));
+
+        let v1 = Catalog::attach(root, config).await?;
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            let topic = v1.get_topic(&name).await;
             assert_eq!(
                 topic
                     .get_record_by_index("default", RecordIndex(ix / 3))
