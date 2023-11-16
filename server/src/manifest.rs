@@ -176,12 +176,20 @@ fn add_suffix(path: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
+fn copy_existing(src: &Path, dst: &Path) -> anyhow::Result<()> {
+    if src.exists() {
+        std::fs::copy(src, dst)?;
+    }
+
+    Ok(())
+}
+
 impl Manifest {
     pub async fn current_prior_attach(current: PathBuf, prior: PathBuf) -> anyhow::Result<Self> {
         if prior.exists() && !current.exists() {
             info!("migrating {prior:?} to {current:?}");
-            std::fs::copy(add_suffix(&prior, "-shm")?, add_suffix(&current, "-shm")?)?;
-            std::fs::copy(add_suffix(&prior, "-wal")?, add_suffix(&current, "-wal")?)?;
+            copy_existing(&add_suffix(&prior, "-shm")?, &add_suffix(&current, "-shm")?)?;
+            copy_existing(&add_suffix(&prior, "-wal")?, &add_suffix(&current, "-wal")?)?;
             std::fs::copy(&prior, &current)?;
         }
 
