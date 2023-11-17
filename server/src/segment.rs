@@ -26,13 +26,13 @@
 //!   into before moving to the above file, to avoid issues occurring if we
 //!   crash while writing the recovery header.
 
-use std::borrow::Borrow;
 use std::convert::TryFrom;
 use std::ffi::OsStr;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::iter;
+use std::time::Instant;
 use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::Result;
@@ -53,7 +53,7 @@ use crate::arrow2::{
 };
 
 pub use crate::chunk::Record;
-use plateau_transport::{arrow2, SchemaChunk, SegmentChunk};
+use plateau_transport::{arrow2, SegmentChunk};
 
 const PLATEAU_HEADER: &str = "plateau1";
 
@@ -80,8 +80,18 @@ impl Hash for Record {
 
 /// This is currently a placeholder for future segment storage settings (e.g.
 /// compression)
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Config {}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Config {
+    durable_checkpoints: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            durable_checkpoints: true,
+        }
+    }
+}
 
 pub struct Segment {
     path: PathBuf,
@@ -146,10 +156,9 @@ impl Segment {
             schema,
             key_value_metadata,
             options,
-            durable_checkpoints: false,
             chunk_ix: 0,
             cache: RowGroupCache::empty(self.cache_path(), 0),
-            _config: config,
+            config,
         })
     }
 
@@ -196,6 +205,7 @@ struct RowGroupCache {
     partial_chunk: Option<SegmentChunk>,
     path: PathBuf,
     writer: Option<ipc::write::StreamWriter<fs::File>>,
+    file: Option<fs::File>,
 }
 
 impl RowGroupCache {
@@ -206,6 +216,7 @@ impl RowGroupCache {
             partial_chunk: None,
             path,
             writer: None,
+            file: None,
         }
     }
 
@@ -252,6 +263,7 @@ impl RowGroupCache {
                     partial_chunk,
                     path,
                     writer: None,
+                    file: None,
                 },
             ))
         } else {
@@ -271,6 +283,8 @@ impl RowGroupCache {
 
             let buffer = self.chunk_ix.to_le_bytes();
             file.write_all(&buffer)?;
+            self.file = Some(file.try_clone()?);
+
             let options = ipc::write::WriteOptions { compression: None };
             let mut writer = ipc::write::StreamWriter::new(file, options);
             writer.start(schema, None)?;
@@ -289,6 +303,14 @@ impl RowGroupCache {
 
         Ok(())
     }
+
+    fn sync(&self) -> Result<()> {
+        if let Some(f) = self.file.as_ref() {
+            f.sync_data()?;
+        }
+
+        Ok(())
+    }
 }
 
 pub struct SegmentWriter2 {
@@ -300,10 +322,9 @@ pub struct SegmentWriter2 {
     schema: Schema,
     key_value_metadata: Option<Vec<KeyValue>>,
     options: WriteOptions,
-    durable_checkpoints: bool,
     chunk_ix: u32,
     cache: RowGroupCache,
-    _config: Config,
+    config: Config,
 }
 
 impl SegmentWriter2 {
@@ -333,30 +354,48 @@ impl SegmentWriter2 {
         Ok(())
     }
 
-    pub fn log_arrow<S: Borrow<Schema> + Clone + PartialEq>(
+    /// Log a combination of full and active chunks to this segment.
+    ///
+    /// This operation is append-only. All full chunks are appended as-is onto
+    /// the underlying parquet file.
+    ///
+    /// The "active" chunk is also considered append-only. If no full chunks
+    /// are present, all rows in the active chunk after the end of cache are
+    /// appended onto the cache.
+    ///
+    /// All rows currently in the cache are assumed to be equivalent to their
+    /// same-index counterparts in the "new" active chunk.
+    ///
+    /// When full chunks are present, the cache is reset, as the active chunk
+    /// is always considered to be the last chunk in the file.
+    pub fn log_arrows(
         &mut self,
-        data: SchemaChunk<S>,
+        schema: &Schema,
+        full: Vec<SegmentChunk>,
+        active: Option<SegmentChunk>,
     ) -> Result<()> {
-        if !self.check_schema(data.schema.borrow()) {
-            anyhow::bail!("cannot use different schemas within the same segment");
+        anyhow::ensure!(
+            self.check_schema(schema),
+            "cannot use different schemas within the same segment"
+        );
+
+        let chunk_count = full.len();
+        for chunk in full {
+            self.write_chunk(chunk)?;
         }
 
-        self.write_chunk(data.chunk)?;
+        if chunk_count > 0 {
+            self.chunk_ix += chunk_count as u32;
+            self.cache = RowGroupCache::empty(self.cache.path.clone(), self.chunk_ix);
+        }
+
+        if let Some(active) = active {
+            self.cache.update(&self.schema, active)?;
+        }
+
         self.write_checkpoint()?;
 
-        self.chunk_ix += 1;
-        self.cache = RowGroupCache::empty(self.cache.path.clone(), self.chunk_ix);
-
         Ok(())
-    }
-
-    /// Update the active chunk cache with a superset of the active rows.
-    ///
-    /// This operation is append-only. All rows currently in the cache
-    /// are assumed to be equivalent to their same-index counterparts in the
-    /// "new" active chunk.
-    pub fn update_cache(&mut self, active: SegmentChunk) -> Result<()> {
-        self.cache.update(&self.schema, active)
     }
 
     fn write_checkpoint(&self) -> Result<()> {
@@ -386,22 +425,28 @@ impl SegmentWriter2 {
         file.write_all(&metadata_len.to_le_bytes())?;
 
         // Now, sync all the things
-        if self.durable_checkpoints {
-            // first the header file
+        if self.config.durable_checkpoints {
+            let now = Instant::now();
+            // first the active chunk cache
+            self.cache.sync()?;
+            // then the header file
             file.sync_data()?;
             drop(file);
             // then the actual file, to ensure the underlying data is on disk
             self.file.sync_data()?;
+            debug!("fsync elapsed: {:?}", now.elapsed());
         }
 
         std::fs::rename(&self.tmp, &self.checkpoint)?;
 
         // Finally sync the directory metadata, which will capture the rename.
-        if self.durable_checkpoints {
+        if self.config.durable_checkpoints {
+            let now = Instant::now();
             let mut parent = self.path.clone();
             parent.pop();
             let directory = fs::File::open(&parent)?;
             directory.sync_all()?;
+            debug!("dir sync elapsed: {:?}", now.elapsed());
         }
 
         Ok(())
@@ -622,11 +667,14 @@ impl DoubleEndedIterator for DoubleEndedChunkIterator {
 
 #[cfg(test)]
 pub mod test {
+    use std::borrow::Borrow;
+
     use super::*;
     use crate::arrow2::datatypes::{Field, Metadata};
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{iter_legacy, legacy_schema, LegacyRecords};
     use chrono::{TimeZone, Utc};
+    use plateau_transport::SchemaChunk;
     use sample_arrow2::{
         array::ArbitraryArray,
         chunk::{ArbitraryChunk, ChainedChunk, ChainedMultiChunk},
@@ -635,6 +683,28 @@ pub mod test {
     use sample_std::{Chance, Random, Regex, Sample};
     use sample_test::sample_test;
     use tempfile::tempdir;
+
+    impl Config {
+        fn nocommit() -> Self {
+            Config {
+                durable_checkpoints: false,
+            }
+        }
+    }
+
+    impl SegmentWriter2 {
+        pub fn log_arrow<S: Borrow<Schema> + Clone + PartialEq>(
+            &mut self,
+            data: SchemaChunk<S>,
+            active: Option<SegmentChunk>,
+        ) -> Result<()> {
+            self.log_arrows(data.schema.borrow(), vec![data.chunk], active)
+        }
+
+        pub fn update_cache(&mut self, active: SegmentChunk) -> Result<()> {
+            self.cache.update(&self.schema, active)
+        }
+    }
 
     pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
         it.map(|(ix, message)| Record {
@@ -661,7 +731,10 @@ pub mod test {
         let mut w = s.create2(legacy_schema(), Config::default())?;
         let schema = w.schema.clone();
         for record in records.clone() {
-            w.log_arrow(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?)?;
+            w.log_arrow(
+                SchemaChunk::try_from(LegacyRecords([record].to_vec()))?,
+                None,
+            )?;
         }
         let _ = w.close()?;
 
@@ -681,7 +754,10 @@ pub mod test {
         let mut w = s.create2(legacy_schema(), Config::default())?;
         let schema = w.schema.clone();
         for record in records.clone() {
-            w.log_arrow(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?)?;
+            w.log_arrow(
+                SchemaChunk::try_from(LegacyRecords([record].to_vec()))?,
+                None,
+            )?;
         }
         let _ = w.close()?;
 
@@ -722,12 +798,14 @@ pub mod test {
 
         let schema = legacy_schema();
         let mut w = s.create2(schema.clone(), Config::default())?;
-        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
-            records[0..10].to_vec(),
-        ))?)?;
-        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
-            records[10..].to_vec(),
-        ))?)?;
+        w.log_arrow(
+            SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?,
+            None,
+        )?;
+        w.log_arrow(
+            SchemaChunk::try_from(LegacyRecords(records[10..].to_vec()))?,
+            None,
+        )?;
         let size = w.close()?;
         assert!(size > 0);
 
@@ -744,10 +822,10 @@ pub mod test {
 
         let a = inferences_schema_a();
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a)?;
+        w.log_arrow(a, None)?;
         let b = inferences_schema_b();
         assert!(!w.check_schema(&b.schema));
-        assert!(w.log_arrow(b).is_err());
+        assert!(w.log_arrow(b, None).is_err());
         Ok(())
     }
 
@@ -765,7 +843,7 @@ pub mod test {
             .metadata
             .insert("pipeline.version".to_string(), "3.1".to_string());
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a)?;
+        w.log_arrow(a, None)?;
         w.close()?;
 
         let r = s.read_double_ended()?;
@@ -786,7 +864,7 @@ pub mod test {
 
         let a = inferences_nested();
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a)?;
+        w.log_arrow(a, None)?;
         Ok(())
     }
 
@@ -803,12 +881,14 @@ pub mod test {
         );
 
         let mut w = s.create2(legacy_schema(), Config::default())?;
-        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
-            records[0..10].to_vec(),
-        ))?)?;
-        w.log_arrow(SchemaChunk::try_from(LegacyRecords(
-            records[10..].to_vec(),
-        ))?)?;
+        w.log_arrow(
+            SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?,
+            None,
+        )?;
+        w.log_arrow(
+            SchemaChunk::try_from(LegacyRecords(records[10..].to_vec()))?,
+            None,
+        )?;
         let size = w.close()?;
         assert!(size > 0);
 
@@ -826,7 +906,7 @@ pub mod test {
 
         let a = inferences_schema_a();
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a.clone())?;
+        w.log_arrow(a.clone(), None)?;
         drop(w);
 
         let r = s.read_double_ended()?;
@@ -843,8 +923,7 @@ pub mod test {
 
         let a = inferences_schema_a();
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a.clone())?;
-        w.update_cache(a.chunk.clone())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
         let len = w.writer.offset();
         drop(w);
 
@@ -870,8 +949,7 @@ pub mod test {
 
         let a = inferences_schema_a();
         let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a.clone())?;
-        w.update_cache(a.chunk.clone())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
         drop(w);
 
         let f = std::fs::File::options().append(true).open(s.cache_path())?;
@@ -967,12 +1045,12 @@ pub mod test {
                 .collect(),
             metadata: Metadata::default(),
         };
-        let mut w = s.create2(schema.clone(), Config::default()).unwrap();
+        let mut w = s.create2(schema.clone(), Config::nocommit()).unwrap();
         let expected = SchemaChunk {
             schema,
             chunk: chunk.clone(),
         };
-        w.log_arrow(expected).unwrap();
+        w.log_arrow(expected, None).unwrap();
         w.close().unwrap();
 
         let r = s.read_double_ended().unwrap();
@@ -1007,14 +1085,14 @@ pub mod test {
                 .collect(),
             metadata: Metadata::default(),
         };
-        let mut w = s.create2(schema.clone(), Config::default()).unwrap();
+        let mut w = s.create2(schema.clone(), Config::nocommit()).unwrap();
 
         for chunk in &chunks {
             let expected = SchemaChunk {
                 schema: schema.clone(),
                 chunk: chunk.clone(),
             };
-            w.log_arrow(expected).unwrap();
+            w.log_arrow(expected, None).unwrap();
         }
         w.close().unwrap();
 

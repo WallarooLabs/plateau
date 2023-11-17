@@ -616,15 +616,9 @@ fn spawn_slog_thread(
                     });
 
                     let now = Instant::now();
-                    for chunk in full_chunks.into_iter() {
-                        writer
-                            .log_arrow(SchemaChunk {
-                                schema: schema.clone(),
-                                chunk,
-                            })
-                            .expect("added records");
-                    }
-                    writer.update_cache(active_chunk).expect("updating cache");
+                    writer
+                        .log_arrows(schema, full_chunks, Some(active_chunk))
+                        .expect("extend full chunks");
 
                     let size = writer.size_estimate().expect("segment size estimate");
                     let record_len = records.end.0 - records.start.0;

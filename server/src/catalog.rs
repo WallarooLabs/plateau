@@ -123,7 +123,7 @@ impl Catalog {
                     duration
                 );
             } else {
-                trace!("finished full catalog checkpoint in {:?}", duration);
+                info!("finished full catalog checkpoint in {:?}", duration);
             }
             gauge!(
                 "catalog_checkpoint_ms",
