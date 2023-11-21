@@ -183,7 +183,7 @@ impl TestServer {
 
     /// This simulates a "clean" plateau shutdown.
     pub async fn close(self) {
-        Catalog::close(self.stop().await).await;
+        Catalog::close_arc(self.stop().await).await;
     }
 }
 

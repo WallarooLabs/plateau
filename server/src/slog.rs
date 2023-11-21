@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use thiserror::Error;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
@@ -124,6 +124,7 @@ impl AddAssign<usize> for RecordIndex {
 pub(crate) type SlogWrites = mpsc::Receiver<WriteResult>;
 
 /// A slog (segment log) is a named and ordered series of segments.
+#[must_use = "close() explicitly to flush writes"]
 pub(crate) struct Slog {
     root: PathBuf,
     name: String,
@@ -215,6 +216,12 @@ pub struct State {
     thread: SlogThread,
     pending: Option<MemorySegment>,
     config: Config,
+}
+
+#[derive(Debug)]
+enum WriterMessage {
+    Append(AppendRequest),
+    Fin,
 }
 
 #[derive(Debug)]
@@ -411,6 +418,10 @@ impl Slog {
     pub(crate) async fn checkpoint(&self) -> bool {
         self.state.write().await.checkpoint(false).await
     }
+
+    pub(crate) async fn close(self) {
+        self.state.into_inner().close().await;
+    }
 }
 
 impl State {
@@ -504,7 +515,7 @@ impl State {
 
                 if timeout(
                     self.config.write_queue_timeout,
-                    self.thread.tx.send(request),
+                    self.thread.tx.send(WriterMessage::Append(request)),
                 )
                 .await
                 .is_ok_and(|r| r.is_ok())
@@ -542,30 +553,22 @@ impl State {
             Ok(())
         }
     }
-}
 
-impl Drop for State {
-    fn drop(&mut self) {
-        let (tx, _) = mpsc::channel(1);
-        let messages = std::mem::replace(&mut self.thread.tx, tx);
-
+    pub(crate) async fn close(self) {
         let now = Instant::now();
-        trace!("initiating shutdown");
-        self.thread.tx_fin.try_send(()).ok();
-        drop(messages);
-        if let Some(h) = self.thread.join.take() {
-            if let Err(e) = h.join() {
-                error!("error joining writer thread: {:?}", e);
-            }
-            info!("writer thread shutdown in {:?}", now.elapsed());
+        self.thread.tx_fin.send(()).ok();
+        self.thread.tx.send(WriterMessage::Fin).await.ok();
+        if let Err(e) = self.thread.handle.join() {
+            error!("error joining writer thread: {:?}", e);
         }
+        info!("writer thread shutdown in {:?}", now.elapsed());
     }
 }
 
 struct SlogThread {
-    tx: mpsc::Sender<AppendRequest>,
-    tx_fin: mpsc::Sender<()>,
-    join: Option<JoinHandle<()>>,
+    tx: mpsc::Sender<WriterMessage>,
+    tx_fin: oneshot::Sender<()>,
+    handle: JoinHandle<()>,
 }
 
 fn spawn_slog_thread(
@@ -575,16 +578,16 @@ fn spawn_slog_thread(
     config: SegmentConfig,
 ) -> (SlogThread, SlogWrites) {
     let (tx, mut rx_records) = mpsc::channel(write_queue_size);
-    let (tx_fin, mut rx_fin) = mpsc::channel(1);
+    let (tx_fin, mut rx_fin) = oneshot::channel();
     let (tx_commits, rx_commits) = mpsc::channel(1);
 
-    let join = std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         let mut active = true;
         let mut current: Option<(Schema, SegmentWriter2, SegmentIndex)> = None;
         let mut prior_size = 0;
         while active {
             match rx_records.blocking_recv() {
-                Some(AppendRequest {
+                Some(WriterMessage::Append(AppendRequest {
                     seal,
                     segment,
                     records,
@@ -592,7 +595,7 @@ fn spawn_slog_thread(
                     schema,
                     full_chunks,
                     active_chunk,
-                }) => {
+                })) => {
                     trace!("{}: received request for {:?}", name, records);
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
@@ -649,16 +652,16 @@ fn spawn_slog_thread(
                     let response = WriteResult {
                         data: SegmentData {
                             index: segment,
-                            records,
+                            records: records.clone(),
                             time,
                             size,
                         },
                     };
-                    trace!("{}: commit send", name);
+                    trace!("{}: commit {:?}/{:?} send", name, segment, records.end);
                     tx_commits.blocking_send(response).expect("channel closed");
                     trace!("{}: commit sent", name);
                 }
-                None => {
+                Some(WriterMessage::Fin) | None => {
                     trace!("channel closed; shutting down");
                     active = false;
                 }
@@ -674,14 +677,7 @@ fn spawn_slog_thread(
         info!("writer for \"{}\" closed", name);
     });
 
-    (
-        SlogThread {
-            tx,
-            tx_fin,
-            join: Some(join),
-        },
-        rx_commits,
-    )
+    (SlogThread { tx, tx_fin, handle }, rx_commits)
 }
 
 #[cfg(test)]
@@ -801,8 +797,10 @@ mod test {
 
         // kill the writer thread to ensure that checkpoints time out
         {
-            let thread = &mut slog.state.write().await.thread;
-            thread.tx_fin.try_send(()).ok();
+            let (bogus_tx, _) = oneshot::channel();
+            std::mem::replace(&mut slog.state.write().await.thread.tx_fin, bogus_tx)
+                .send(())
+                .unwrap();
             // now to receive some records so we can process the fin signal...
         }
 
@@ -819,17 +817,6 @@ mod test {
         let first = slog.append(chunk).await;
         assert!(slog.state.write().await.checkpoint(false).await);
 
-        {
-            let thread = &mut slog.state.write().await.thread;
-            assert!(thread.join.take().unwrap().join().is_ok());
-        }
-
-        for (ix, record) in records[0..1].iter().enumerate() {
-            assert_eq!(
-                slog.get_record(first.segment, ix).await,
-                Some(record.clone())
-            );
-        }
         assert_eq!(
             commits
                 .recv()
@@ -837,6 +824,14 @@ mod test {
                 .map(|r| (r.data.records, r.data.size > 0)),
             Some((RecordIndex(0)..RecordIndex(1), true))
         );
+        while commits.recv().await.is_some() {}
+
+        for (ix, record) in records[0..1].iter().enumerate() {
+            assert_eq!(
+                slog.get_record(first.segment, ix).await,
+                Some(record.clone())
+            );
+        }
 
         for record in records[1..].iter() {
             let chunk = SchemaChunk::try_from(LegacyRecords(vec![record.clone()]))?;

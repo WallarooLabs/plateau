@@ -44,7 +44,7 @@ use metrics::{counter, gauge};
 use plateau_transport::arrow2::compute::comparison::lt_scalar;
 use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{watch, RwLock, RwLockReadGuard};
+use tokio::sync::{oneshot, watch, RwLock, RwLockReadGuard};
 use tracing::{debug, error, info, trace, warn};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -55,6 +55,7 @@ pub struct Config {
     pub slog: slog::Config,
 }
 
+#[must_use = "close() explicitly to flush writes"]
 pub struct Partition {
     id: PartitionId,
     state: RwLock<State>,
@@ -72,6 +73,7 @@ pub struct State {
     last_roll: Instant,
     messages: Slog,
     commits: watch::Receiver<RecordIndex>,
+    fin: oneshot::Receiver<()>,
 }
 
 fn merge_ranges<T: Ord>(a: Range<T>, b: Range<T>) -> Range<T> {
@@ -101,6 +103,8 @@ impl Partition {
             config.slog.clone(),
         );
 
+        let (fin_tx, fin_rx) = oneshot::channel();
+
         let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
         let commit_id = id.clone();
@@ -111,12 +115,15 @@ impl Partition {
                 // ok if no receivers, that means nothing is awaiting a commit
                 commit_writer.send(r.data.records.end).ok();
             }
+            trace!("{} exit", commit_id);
+            fin_tx.send(()).ok();
         });
 
         let state = State {
             last_roll: Instant::now(),
             messages,
             commits,
+            fin: fin_rx,
         };
 
         Partition {
@@ -379,6 +386,10 @@ impl Partition {
         state.remove_oldest(self).await;
     }
 
+    pub(crate) async fn close(self) {
+        self.state.into_inner().close().await;
+    }
+
     #[cfg(test)]
     pub(crate) async fn compact(&self) {
         let mut state = self.state.write().await;
@@ -587,6 +598,13 @@ impl State {
         self.roll(partition).await?;
         self.wait_for_record(target).await;
         Ok(())
+    }
+
+    pub(crate) async fn close(self) {
+        self.messages.close().await;
+        if let Err(e) = self.fin.await {
+            error!("error closing: {:?}", e)
+        }
     }
 }
 

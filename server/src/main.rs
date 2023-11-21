@@ -108,5 +108,5 @@ async fn main() {
 
     info!("shutting down");
     end_tx.send(()).ok();
-    Catalog::close(catalog).await;
+    Catalog::close_arc(catalog).await;
 }

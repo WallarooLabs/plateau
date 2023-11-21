@@ -17,7 +17,7 @@ use crate::slog::RecordIndex;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::future::FutureExt;
+use futures::future::{join_all, FutureExt};
 use futures::stream;
 use futures::stream::StreamExt;
 use plateau_transport::{PartitionFilter, SchemaChunk, TopicIterator};
@@ -26,6 +26,7 @@ use tracing::debug;
 
 type PartitionMap = HashMap<String, Partition>;
 
+#[must_use = "close() explicitly to flush writes"]
 pub struct Topic {
     root: PathBuf,
     manifest: Manifest,
@@ -346,6 +347,11 @@ impl Topic {
             part.commit().await?
         }
         Ok(())
+    }
+
+    pub async fn close(self) {
+        let mut partitions = self.partitions.write().await;
+        join_all(partitions.drain().map(|(_, partition)| partition.close())).await;
     }
 }
 

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use bytesize::ByteSize;
+use futures::future::join_all;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, RwLockReadGuard};
@@ -40,6 +41,7 @@ impl Default for Config {
     }
 }
 
+#[must_use = "close() explicitly to flush writes"]
 pub struct Catalog {
     config: Config,
     manifest: Manifest,
@@ -123,7 +125,7 @@ impl Catalog {
                     duration
                 );
             } else {
-                info!("finished full catalog checkpoint in {:?}", duration);
+                trace!("finished full catalog checkpoint in {:?}", duration);
             }
             gauge!(
                 "catalog_checkpoint_ms",
@@ -164,7 +166,10 @@ impl Catalog {
                 self.config.max_open_topics,
                 to_drop
             );
-            topics.remove(&to_drop);
+
+            if let Some(topic) = topics.remove(&to_drop) {
+                topic.close().await;
+            }
         }
     }
 
@@ -258,8 +263,14 @@ impl Catalog {
         16
     }
 
+    pub async fn close(self) {
+        let mut topics = self.topics.write().await;
+
+        join_all(topics.drain().map(|(_, topic)| topic.close())).await;
+    }
+
     /// Close catalog (perform final checkpoint and drop all writers)
-    pub async fn close(mut catalog: Arc<Self>) -> bool {
+    pub async fn close_arc(mut catalog: Arc<Self>) -> bool {
         let now = Instant::now();
         let secs = 30;
         info!("waiting {secs}s for all pending operations to complete");
@@ -287,9 +298,9 @@ impl Catalog {
             info!("final checkpoint complete in {:?}", now.elapsed());
 
             let now = Instant::now();
-            info!("dropping catalog to flush writer queues");
-            drop(exclusive);
-            info!("catalog dropped in {:?}", now.elapsed());
+            info!("closing catalog");
+            exclusive.close().await;
+            info!("catalog closed in {:?}", now.elapsed());
             true
         } else {
             warn!("operations still pending; could not close catalog");
@@ -355,7 +366,6 @@ mod test {
         Ok(())
     }
 
-    #[ignore]
     #[tokio::test]
     async fn test_migration() -> Result<()> {
         let config = Config::default();
@@ -385,14 +395,9 @@ mod test {
 
         v0.checkpoint().await;
         assert_eq!(v0.list_topics().await.len(), 3);
-        assert!(Catalog::close(Arc::new(v0)).await);
-
-        // Will need to investigate; checkpoint + Catalog::close should be
-        // sufficient to ensure durability.
-        std::thread::sleep(Duration::from_millis(1000));
+        assert!(Catalog::close_arc(Arc::new(v0)).await);
 
         let v1 = Catalog::attach(root, config).await?;
-
         for (ix, record) in records.iter().enumerate() {
             let name = format!("topic-{}", ix % 3);
             let topic = v1.get_topic(&name).await;
