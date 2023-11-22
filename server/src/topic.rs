@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use futures::future::{join_all, FutureExt};
 use futures::stream;
 use futures::stream::StreamExt;
-use plateau_transport::{PartitionFilter, SchemaChunk, TopicIterator};
+use plateau_transport::{PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tracing::debug;
 
@@ -68,7 +68,7 @@ impl Topic {
 
     pub async fn readable_ids(
         &self,
-        partition_filter: Option<Vec<String>>,
+        partition_filter: PartitionFilter,
     ) -> HashMap<String, Range<RecordIndex>> {
         debug!("partition map: {:?}", self.partitions);
         self.map_partitions(
@@ -79,14 +79,16 @@ impl Topic {
     }
 
     async fn partition_names(&self) -> Vec<String> {
-        let active: Vec<String> = { self.partitions.read().await.keys().cloned().collect() };
-        let set: HashSet<_> = active.iter().cloned().collect();
+        let active: HashSet<String> = { self.partitions.read().await.keys().cloned().collect() };
+        let copy = active.clone();
+
+        // Find all the "inactive" partitions that are not in self.partitions
         let stored = self
             .manifest
             .get_partitions(&self.name)
             .await
             .into_iter()
-            .filter(|n| !set.contains(n));
+            .filter(|n| !copy.contains(n));
 
         active.into_iter().chain(stored).collect()
     }
@@ -94,13 +96,16 @@ impl Topic {
     pub async fn map_partitions<'a, Fut, F, T>(
         &'a self,
         mut f: F,
-        partition_names: Option<Vec<String>>,
+        partition_filter: PartitionFilter,
     ) -> HashMap<String, T>
     where
         F: FnMut(RwLockReadGuard<'a, Partition>) -> Fut,
         Fut: futures::Future<Output = Option<T>>,
     {
-        stream::iter(partition_names.unwrap_or(self.partition_names().await))
+        let partitions = self.partition_names().await;
+        let expanded = self.partition_filter_expanded(&partitions, partition_filter);
+
+        stream::iter(expanded.unwrap_or(partitions))
             .flat_map(|name| {
                 async move {
                     let partition = self.get_partition(&name).await;
@@ -141,6 +146,24 @@ impl Topic {
                 // `OccupiedEntry` api here, but it is still unstable
                 map.get(partition_name).unwrap()
             })
+        }
+    }
+
+    pub fn partition_filter_expanded(
+        &self,
+        partitions: &[String],
+        partition_filter: PartitionFilter,
+    ) -> Option<Vec<String>> {
+        if let Some(partition_filters) = partition_filter {
+            let expanded = partitions
+                .iter()
+                .cloned()
+                .filter(|name| partition_filters.iter().any(|filter| filter.matches(name)))
+                .collect();
+
+            Some(expanded)
+        } else {
+            None
         }
     }
 
@@ -240,7 +263,7 @@ impl Topic {
         limit: RowLimit,
         order: &Ordering,
         fetch: F,
-        partition_filter: Option<Vec<String>>,
+        partition_filter: Option<Vec<PartitionSelector>>,
     ) -> TopicRecordResponse
     where
         F: Fn(RwLockReadGuard<'a, Partition>, RecordIndex, RowLimit, Ordering) -> Fut,
@@ -366,6 +389,7 @@ mod test {
     use std::collections::HashSet;
     use std::convert::TryFrom;
     use std::iter::FromIterator;
+    use std::str::FromStr;
     use std::time::Instant;
     use tempfile::{tempdir, TempDir};
     use tokio::sync::mpsc::channel;
@@ -477,10 +501,7 @@ mod test {
         ]);
 
         let mut part_records = vec![vec![], vec![], vec![]];
-        let names: Vec<_> = (0..=3)
-            .into_iter()
-            .map(|ix| format!("partition-{}", ix % 3))
-            .collect();
+        let names: Vec<_> = (0..=3).map(|ix| format!("partition-{}", ix % 3)).collect();
         for (ix, record) in records.iter().enumerate() {
             part_records[ix % 3].push(record.clone());
             topic
@@ -576,10 +597,7 @@ mod test {
             vec![&chunk_a, &chunk_b, &chunk_a, &chunk_b, &chunk_b],
             vec![&chunk_a, &chunk_a, &chunk_a, &chunk_a, &chunk_b],
         ];
-        let names: Vec<_> = (1..4)
-            .into_iter()
-            .map(|ix| format!("partition-{}", ix))
-            .collect();
+        let names: Vec<_> = (1..4).map(|ix| format!("partition-{}", ix)).collect();
 
         fn to_iter(names: &[String], v: [usize; 3]) -> HashMap<String, usize> {
             names.iter().cloned().zip(v).collect()
@@ -641,7 +659,7 @@ mod test {
             vec![&chunk_a, &chunk_b, &chunk_a, &chunk_b, &chunk_b],
             vec![&chunk_a, &chunk_a, &chunk_a, &chunk_a, &chunk_b],
         ];
-        let names: Vec<_> = (1..4).into_iter().map(|ix| format!("p{}", ix)).collect();
+        let names: Vec<_> = (1..4).map(|ix| format!("p{}", ix)).collect();
 
         for (name, chunks) in names.iter().zip(chunk_allocation.into_iter()) {
             for chunk in chunks {
@@ -696,16 +714,188 @@ mod test {
     }
 
     #[tokio::test]
+    async fn test_filter_some_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records_per_part = 103;
+        let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{}", ix))));
+
+        // Create 3 partitions
+        for (_, record) in records.iter().enumerate() {
+            topic
+                .extend_records("partition-0", &[record.clone()])
+                .await?;
+            topic
+                .extend_records("partition-1", &[record.clone()])
+                .await?;
+            topic
+                .extend_records("partition-2", &[record.clone()])
+                .await?;
+        }
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 11;
+
+        // The above creates partitions (0..parts)
+        let partitions_to_include = [0, 1];
+        let filter: Vec<PartitionSelector> = partitions_to_include
+            .into_iter()
+            .map(|s| PartitionSelector::from_str(&format!("partition-{s}")).unwrap())
+            .collect();
+
+        for _ in 0..records.len() {
+            let result = topic
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    &Ordering::Forward,
+                    Some(filter.clone()),
+                )
+                .await;
+
+            let status = result.batch.status;
+            fetched.extend(result.batch.into_legacy().unwrap());
+
+            if fetched.len() >= records.len() * partitions_to_include.len() {
+                assert_limit_unreached(&status);
+                break;
+            } else {
+                assert_eq!(status, BatchStatus::RecordsExceeded);
+            }
+            it = result.iter;
+        }
+
+        assert_eq!(fetched.len(), records.len() * partitions_to_include.len());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_filter_all_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+
+        let parts = 7;
+        assert!(records.len() % parts != 0);
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        for (ix, record) in records.iter().enumerate() {
+            topic
+                .extend_records(&names[ix % parts], &[record.clone()])
+                .await?;
+        }
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 11;
+        assert!(fetch_count % parts != 0);
+        assert!(records.len() % fetch_count != 0);
+
+        // The above creates partitions (0..parts)
+        let partitions_to_include = [0, 1, 2, 3, 4, 5, 6, 7];
+        let filter: Vec<PartitionSelector> = partitions_to_include
+            .into_iter()
+            .map(|s| PartitionSelector::from_str(&names[s]).unwrap())
+            .collect();
+
+        for _ in 0..records.len() {
+            let result = topic
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    &Ordering::Forward,
+                    Some(filter.clone()),
+                )
+                .await;
+
+            if fetched.len() + fetch_count >= records.len() {
+                assert_limit_unreached(&result.batch.status);
+            } else {
+                assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
+            }
+            fetched.extend(result.batch.into_legacy().unwrap());
+            it = result.iter;
+        }
+        assert_eq!(
+            records.into_iter().collect::<HashSet<_>>(),
+            fetched.into_iter().collect::<HashSet<_>>()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_filter_regex_iteration() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+
+        let parts = 7;
+        assert!(records.len() % parts != 0);
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        for (ix, record) in records.iter().enumerate() {
+            topic
+                .extend_records(&names[ix % parts], &[record.clone()])
+                .await?;
+        }
+        // Create an extra partition that won't be captured by the regex.
+        let uncap_records =
+            timed_records((0..103).map(|ix| (ix, format!("uncaptured-record-{}", ix))));
+        topic
+            .extend_records("uncaptured-partition", &uncap_records)
+            .await?;
+
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 11;
+        assert!(fetch_count % parts != 0);
+        assert!(records.len() % fetch_count != 0);
+
+        for _ in 0..records.len() {
+            let result = topic
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    &Ordering::Forward,
+                    Some(vec![
+                        PartitionSelector::from_str("regex:partition-.*").unwrap()
+                    ]),
+                )
+                .await;
+
+            let status = result.batch.status;
+            fetched.extend(result.batch.into_legacy().unwrap());
+
+            if fetched.len() >= records.len() {
+                assert_limit_unreached(&status);
+            } else {
+                assert_eq!(status, BatchStatus::RecordsExceeded);
+            }
+            it = result.iter;
+        }
+        assert_eq!(
+            records.iter().collect::<HashSet<_>>(),
+            fetched.iter().collect::<HashSet<_>>()
+        );
+
+        assert_ne!(
+            uncap_records.into_iter().collect::<HashSet<_>>(),
+            fetched.into_iter().collect::<HashSet<_>>()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_full_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
         let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts)
-            .into_iter()
-            .map(|ix| format!("partition-{}", ix))
-            .collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -746,10 +936,7 @@ mod test {
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts)
-            .into_iter()
-            .map(|ix| format!("partition-{}", ix))
-            .collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -1058,7 +1245,6 @@ mod test {
                 let seed = 0..sample;
                 let records: Vec<_> = seed
                     .clone()
-                    .into_iter()
                     .map(|message| Record {
                         time: Utc.timestamp_opt(0, 0).unwrap(),
                         message: format!("{{ \"data\": \"{}-{}\" }}", data, message).into_bytes(),

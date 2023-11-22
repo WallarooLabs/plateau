@@ -2364,6 +2364,7 @@ dependencies = [
  "plateau-client",
  "plateau-transport",
  "rand",
+ "regex",
  "reqwest",
  "rweb",
  "sample-arrow2",

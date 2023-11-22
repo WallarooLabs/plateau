@@ -11,21 +11,22 @@ serde = "1"
 rweb = "0.15"
 structopt = { version = "0.3", optional = true }
 arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema", features = [
-    "compute_aggregate",
-    "compute_cast",
-    "compute_comparison",
-    "compute_concatenate",
-    "compute_filter",
-    "compute_sort",
-    "io_parquet",
-    "io_ipc",
-    "io_ipc_read_async",
-    "io_json",
-    "io_flight",
+  "compute_aggregate",
+  "compute_cast",
+  "compute_comparison",
+  "compute_concatenate",
+  "compute_filter",
+  "compute_sort",
+  "io_parquet",
+  "io_ipc",
+  "io_ipc_read_async",
+  "io_json",
+  "io_flight",
 ] }
 strum = { version = "0.24", features = ["derive"] }
 chrono = "0.4"
 thiserror = "1"
+regex = "1.10"
 
 [features]
 structopt-cli = ["dep:structopt"]

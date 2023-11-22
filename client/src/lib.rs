@@ -11,9 +11,10 @@ pub use plateau_transport::{
     arrow2::io::ipc,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
     estimate_array_size, estimate_size, is_variable_len, ArrowError, ArrowSchema, ChunkError,
-    DataFocus, Insert, InsertQuery, Inserted, PartitionFilter, Partitions, RecordQuery,
-    RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder, TopicIterationQuery,
-    TopicIterationReply, TopicIterationStatus, TopicIterator, Topics, CONTENT_TYPE_ARROW,
+    DataFocus, Insert, InsertQuery, Inserted, PartitionFilter, PartitionSelector, Partitions,
+    RecordQuery, RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder,
+    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+    CONTENT_TYPE_ARROW,
 };
 pub use reqwest;
 use reqwest::{

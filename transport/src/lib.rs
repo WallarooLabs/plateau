@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::fmt::Formatter;
 use std::str::FromStr;
 use std::{
@@ -13,6 +14,8 @@ use arrow2::{
     datatypes::Field,
     io::ipc::{read, write},
 };
+use regex::Regex;
+use rweb::openapi::Entity;
 use rweb::Schema;
 use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(feature = "structopt-cli")]
@@ -210,6 +213,9 @@ pub struct RecordQuery {
     #[serde(flatten)]
     #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
     pub data_focus: DataFocus,
+    #[serde(default)]
+    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    pub partition_filter: PartitionFilter,
 }
 
 /// Status of the record request query.
@@ -286,7 +292,97 @@ pub struct TopicIterationQuery {
 
 /// An optional filter that can limit the partitions data is taken from.
 /// A [`None`] value indicates no filter and that all partitions should be used.
-pub type PartitionFilter = Option<Vec<String>>;
+/// PartitionSelector is always specified as a string, but can optionally
+/// begin with "regex:" to signify that any partition matching the following string can be converted.
+pub type PartitionFilter = Option<Vec<PartitionSelector>>;
+
+#[derive(Debug, Clone)]
+pub enum PartitionSelector {
+    /// The exact name of a partition.
+    String(String),
+    /// A string beginning with `regex:`. The suffix will be matched against partition names.
+    Regex(Regex),
+}
+
+impl Entity for PartitionSelector {
+    fn type_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("partition_filter")
+    }
+
+    fn describe(
+        _comp_d: &mut rweb::openapi::ComponentDescriptor,
+    ) -> rweb::openapi::ComponentOrInlineSchema {
+        rweb::openapi::ComponentOrInlineSchema::Inline(rweb::openapi::Schema {
+            schema_type: Some(rweb::openapi::Type::String),
+            nullable: Some(true),
+            ..Default::default()
+        })
+    }
+}
+struct StrVisitor;
+
+impl<'de> serde::de::Visitor<'de> for StrVisitor {
+    type Value = PartitionSelector;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("an integer between -2^31 and 2^31")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        PartitionSelector::from_str(value).map_err(|e| serde::de::Error::custom(e))
+    }
+}
+
+impl Serialize for PartitionSelector {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            PartitionSelector::String(s) => serializer.serialize_str(s),
+            PartitionSelector::Regex(r) => {
+                serializer.serialize_str(&format!("regex:{}", r.as_str()))
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PartitionSelector {
+    fn deserialize<D>(deserializer: D) -> Result<PartitionSelector, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(StrVisitor)
+    }
+}
+
+impl FromStr for PartitionSelector {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(if let Some(suffix) = value.strip_prefix("regex:") {
+            if let Ok(reg) = regex::RegexBuilder::new(suffix).size_limit(2 << 12).build() {
+                Self::Regex(reg)
+            } else {
+                Self::String(value.to_string())
+            }
+        } else {
+            Self::String(value.to_string())
+        })
+    }
+}
+
+impl PartitionSelector {
+    pub fn matches(&self, name: &str) -> bool {
+        match self {
+            PartitionSelector::String(s) => s == name,
+            PartitionSelector::Regex(r) => r.is_match(name),
+        }
+    }
+}
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
 pub struct TopicIterationReply {
