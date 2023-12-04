@@ -1,12 +1,16 @@
-use std::collections::HashMap;
-use std::time::{Duration, SystemTime};
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
+use futures::future::FutureExt;
 use hdrhistogram::Histogram;
+use plateau::config::PlateauConfig;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde_json::json;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, trace};
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -33,15 +37,18 @@ struct Worker {
     delay: Duration,
     stats: mpsc::Sender<(usize, Duration)>,
     status: watch::Sender<String>,
+    fin: oneshot::Receiver<()>,
 }
 
 impl Worker {
-    async fn run(&mut self, seed: u64) {
+    async fn run(mut self, seed: u64) -> usize {
+        let mut total = 0;
         let mut rng = StdRng::seed_from_u64(seed);
-        loop {
+        while self.fin.try_recv() == Err(oneshot::error::TryRecvError::Empty) {
             let start = SystemTime::now();
             let (dn, status) = self.task.run(&self.config).await;
             let dt = SystemTime::now().duration_since(start).unwrap();
+            total += dn;
             trace!("{}", status);
             self.status.send(status).unwrap();
             self.stats.send((dn, dt)).await.unwrap();
@@ -50,6 +57,7 @@ impl Worker {
             }
             tokio::time::sleep(Duration::from_millis(rng.gen_range(0..=5))).await;
         }
+        total
     }
 }
 
@@ -63,7 +71,7 @@ struct Writer {
 impl Writer {
     fn create(topic: &str, partition: &str, record: &str, batch_size: usize) -> Self {
         let url = format!("topic/{}/partition/{}", topic, partition);
-        let records: Vec<_> = [record.to_string()]
+        let records: Vec<_> = vec![record.to_string()]
             .iter()
             .cycle()
             .take(batch_size)
@@ -83,19 +91,25 @@ impl Writer {
 impl Task for Writer {
     async fn run(&mut self, config: &Config) -> (usize, String) {
         let url = config.relative(&self.url);
-        config
+        let r = config
             .client
             .post(&url)
             .json(&self.msg)
             .send()
             .await
-            .unwrap()
-            .error_for_status()
             .unwrap();
-        self.count += self.batch_size;
+
+        let batch_size = if r.status() != StatusCode::TOO_MANY_REQUESTS {
+            r.error_for_status().unwrap();
+            self.count += self.batch_size;
+            self.batch_size
+        } else {
+            trace!("{url} rate limited");
+            0
+        };
 
         (
-            self.batch_size,
+            batch_size,
             format!("[write] {} - sent {}", self.url, self.count),
         )
     }
@@ -236,6 +250,17 @@ impl Task for HealthCheck {
 async fn main() {
     fmt().with_env_filter(EnvFilter::from_default_env()).init();
 
+    let path = Path::new("./data");
+    if !path.exists() {
+        fs::create_dir(path).unwrap();
+    }
+
+    let (tx_exit, rx_exit) = tokio::sync::oneshot::channel();
+    let exit = rx_exit.map(|_| ()).boxed();
+    let plateau_server = tokio::spawn(plateau::task_from_config(PlateauConfig::default(), exit));
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
     let config = Config {
         base: String::from("http://localhost:3030"),
         client: Client::new(),
@@ -243,46 +268,64 @@ async fn main() {
     let small: String = (0..128).map(|_| "x").collect();
 
     let mut tasks = vec![];
-    for topic in 0..4 {
+    for topic in 0..1 {
         let name = format!("pipeline-{}", topic);
         let topic_tasks: Vec<(&str, u64, Box<dyn Task + Send>)> = vec![
-            ("sum", 100, Box::new(HealthCheck::new())),
-            (
-                "write",
-                100,
-                Box::new(Writer::create(&name, "engine-0", &small, 300)),
-            ),
-            (
-                "write",
-                100,
-                Box::new(Writer::create(&name, "engine-1", &small, 300)),
-            ),
-            (
-                "write",
-                100,
-                Box::new(Writer::create(&name, "engine-2", &small, 300)),
-            ),
-            (
-                "write",
-                100,
-                Box::new(Writer::create(&name, "engine-3", &small, 300)),
-            ),
-            ("sum", 100, Box::new(Summarizer::create(&name))),
+            ("check", 1_000_000, Box::new(HealthCheck::new())),
+            ("sum", 100_000, Box::new(Summarizer::create(&name))),
             ("read", 10, Box::new(Iterator::create(&name, 2000))),
         ];
+
+        for _ in 0..4 {
+            let writers: [(&str, u64, Box<dyn Task + Send>); 6] = [
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-0", &small, 10)),
+                ),
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-1", &small, 10)),
+                ),
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-2", &small, 10)),
+                ),
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-3", &small, 10)),
+                ),
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-4", &small, 10)),
+                ),
+                (
+                    "write",
+                    0,
+                    Box::new(Writer::create(&name, "engine-5", &small, 10)),
+                ),
+            ];
+            tasks.extend(writers);
+        }
         tasks.extend(topic_tasks);
     }
 
     let mut rng = rand::thread_rng();
     let seed = rng.next_u64();
-    info!("seed: {}", seed);
+    debug!("seed: {}", seed);
     let mut rng = StdRng::seed_from_u64(seed);
     tasks.shuffle(&mut rng);
 
+    let mut counters = HashMap::new();
     let mut stat_groups = HashMap::new();
-    let mut handles = vec![];
+    let mut handles = BTreeMap::new();
     let mut updates = vec![];
-    for (group, cadence_ms, task) in tasks {
+    let mut fins = vec![];
+    for (group, cadence_us, task) in tasks {
         let (status, rx) = watch::channel(String::from(""));
         updates.push(rx);
 
@@ -290,18 +333,23 @@ async fn main() {
             .entry(group)
             .or_insert_with(|| mpsc::channel(32));
 
-        let mut w = Worker {
+        let (tx_fin, fin) = oneshot::channel();
+
+        let worker = Worker {
             task,
-            delay: Duration::from_millis(cadence_ms),
+            delay: Duration::from_micros(cadence_us),
             status,
             stats: stats.clone(),
             config: config.clone(),
+            fin,
         };
+        fins.push(tx_fin);
 
         let seed = rng.next_u64();
-        handles.push(tokio::spawn(async move {
-            w.run(seed).await;
-        }));
+        let ix: &mut usize = counters.entry(group).or_default();
+        let name = format!("{}-{}", group, *ix);
+        *ix += 1;
+        handles.insert(name, tokio::spawn(worker.run(seed)));
 
         tokio::time::sleep(Duration::from_millis(rng.gen_range(0..=5))).await;
     }
@@ -314,8 +362,7 @@ async fn main() {
             let mut total = 0;
             let start = SystemTime::now();
             let mut h = Histogram::<u64>::new_with_bounds(1, 1000 * 1000, 2).unwrap();
-            loop {
-                let (dn, d) = rx.recv().await.unwrap();
+            while let Some((dn, d)) = rx.recv().await {
                 let elapsed = SystemTime::now().duration_since(start).unwrap().as_secs();
                 total += dn;
                 let nps = if elapsed > 0 {
@@ -341,22 +388,45 @@ async fn main() {
         stat_updates.push(update);
     }
 
-    loop {
-        info!("{:->80}", "");
-        let mut strings: Vec<_> = updates.iter_mut().map(|up| up.borrow().clone()).collect();
-        strings.sort();
-        for up in strings {
+    let start = Instant::now();
+    let mut strings = vec![];
+    while start.elapsed() < Duration::from_secs(30) {
+        debug!("{:->80}", "");
+        let mut update_strings: Vec<_> = updates.iter_mut().map(|up| up.borrow().clone()).collect();
+        update_strings.sort();
+        for up in update_strings {
             debug!("{}", up);
         }
 
-        let mut strings: Vec<_> = stat_updates
+        strings = stat_updates
             .iter_mut()
             .map(|up| up.borrow().clone())
             .collect();
         strings.sort();
-        for up in strings {
-            info!("{}", up);
+        for up in &strings {
+            debug!("{}", up);
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+
+    info!("shutting down load generation");
+    for fin in fins {
+        fin.send(()).unwrap();
+    }
+
+    for (name, handle) in handles {
+        let value = handle.await.unwrap();
+        debug!("{}: {}", name, value);
+    }
+
+    info!("shutting down plateau");
+    tx_exit.send(()).unwrap();
+    assert!(
+        plateau_server.await.unwrap(),
+        "plateau failed to shutdown cleanly"
+    );
+
+    for up in strings {
+        info!("{}", up);
     }
 }

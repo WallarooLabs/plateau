@@ -9,7 +9,6 @@ use crate::{catalog, http, metrics, replication};
 #[serde(default)]
 pub struct PlateauConfig {
     pub data_path: PathBuf,
-    pub checkpoint_ms: u64,
 
     pub http: http::Config,
     pub catalog: catalog::Config,
@@ -26,7 +25,6 @@ impl Default for PlateauConfig {
     fn default() -> Self {
         PlateauConfig {
             data_path: PathBuf::from("./data"),
-            checkpoint_ms: 1000,
 
             http: http::Config::default(),
             catalog: catalog::Config::default(),

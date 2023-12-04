@@ -10,7 +10,11 @@ use bytesize::ByteSize;
 use futures::future::join_all;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{RwLock, RwLockReadGuard};
+use tokio::{
+    sync::{RwLock, RwLockReadGuard},
+    time,
+};
+use tokio_stream::wrappers::IntervalStream;
 use tracing::{debug, error, info, trace, warn};
 
 use crate::limit::Retention;
@@ -23,6 +27,8 @@ use crate::topic::Topic;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    #[serde(with = "humantime_serde")]
+    pub checkpoint_interval: Duration,
     pub retain: Retention,
     pub partition: partition::Config,
     pub storage: storage::Config,
@@ -33,6 +39,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
+            checkpoint_interval: Duration::from_millis(1000),
             retain: Default::default(),
             partition: Default::default(),
             storage: Default::default(),
@@ -119,10 +126,10 @@ impl Catalog {
         }
         let end = SystemTime::now();
         if let Ok(duration) = end.duration_since(start) {
-            if duration.as_secs() > 1 {
+            if duration > self.config.checkpoint_interval {
                 warn!(
-                    "full catalog checkpoint took {:?} (longer than 1s!)",
-                    duration
+                    "full catalog checkpoint took {:?} (longer than interval ({:?})!)",
+                    duration, self.config.checkpoint_interval
                 );
             } else {
                 trace!("finished full catalog checkpoint in {:?}", duration);
@@ -135,6 +142,20 @@ impl Catalog {
             warn!("finished full catalog checkpoint; time skew");
         }
         *self.last_checkpoint.write().await = end;
+    }
+
+    pub async fn checkpoints(catalog: Arc<Catalog>) {
+        use futures::stream::StreamExt;
+
+        let mut checkpoints = time::interval(catalog.config.checkpoint_interval);
+        checkpoints.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+        IntervalStream::new(checkpoints)
+            .for_each(|_| async {
+                let r = catalog.as_ref();
+                r.checkpoint().await;
+                r.retain().await;
+            })
+            .await;
     }
 
     pub async fn retain(&self) {

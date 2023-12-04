@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::ops::{Range, RangeInclusive};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -195,7 +195,7 @@ async fn healthcheck(
 ) -> Result<Json<serde_json::Value>, Rejection> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
     let healthy = duration
-        .map(|d| d < Duration::from_millis(config.checkpoint_ms * 10))
+        .map(|d| d < config.catalog.checkpoint_interval * 10)
         .unwrap_or(true);
     if healthy {
         Ok(Json::from(json!({"ok": "true"})))
