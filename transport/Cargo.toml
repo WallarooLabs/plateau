@@ -8,7 +8,7 @@ rust-version = "1.60"
 [dependencies]
 anyhow = "1"
 serde = "1"
-rweb = "0.15"
+rweb = { version = "0.15", features = ["openapi"] }
 structopt = { version = "0.3", optional = true }
 arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema", features = [
   "compute_aggregate",
