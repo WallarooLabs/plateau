@@ -1,5 +1,6 @@
 use std::convert::Infallible;
 use std::fmt::Formatter;
+use std::ops::Range;
 use std::str::FromStr;
 use std::{
     borrow::Borrow,
@@ -157,10 +158,16 @@ pub struct Partitions {
     pub partitions: HashMap<String, Span>,
 }
 
-#[derive(Clone, Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
+}
+
+impl From<Span> for Range<usize> {
+    fn from(value: Span) -> Self {
+        value.start..value.end
+    }
 }
 
 #[derive(Debug, Schema, Serialize, Deserialize)]
@@ -170,7 +177,7 @@ pub struct Records {
     pub records: Vec<String>,
 }
 
-#[derive(Schema, Debug, Default, Deserialize, Serialize)]
+#[derive(Schema, Debug, Clone, Default, Deserialize, Serialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
 pub struct DataFocus {
     /// Data sets to return for this query.
@@ -219,7 +226,7 @@ pub struct RecordQuery {
 }
 
 /// Status of the record request query.
-#[derive(Debug, Display, Schema, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
+#[derive(Debug, Clone, Display, Schema, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
 pub enum RecordStatus {
     /// All current records returned.
     All,
@@ -231,7 +238,7 @@ pub enum RecordStatus {
     ByteLimited,
 }
 
-#[derive(Schema, Default, Debug, Serialize, PartialEq)]
+#[derive(Schema, Default, Debug, Clone, Serialize, PartialEq)]
 pub enum TopicIterationOrder {
     #[default]
     Asc,
@@ -267,7 +274,7 @@ impl std::fmt::Display for TopicIterationOrder {
     }
 }
 
-#[derive(Schema, Debug, Deserialize, Serialize)]
+#[derive(Schema, Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
 pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
@@ -393,23 +400,23 @@ pub struct TopicIterationReply {
 
 pub type TopicIterator = HashMap<String, usize>;
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
 pub struct TopicIterationStatus {
     pub status: RecordStatus,
     pub next: TopicIterator,
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
 pub struct Topics {
     pub topics: Vec<Topic>,
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
 pub struct Topic {
     pub name: String,
 }
 
-#[derive(Debug, Schema, Deserialize, Serialize)]
+#[derive(Debug, Clone, Schema, Deserialize, Serialize)]
 pub struct ErrorMessage {
     pub message: String,
     pub code: u16,
@@ -469,6 +476,39 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
     /// nested fields
     pub fn contains_null_type(&self) -> bool {
         contains_null_type(self.schema.borrow())
+    }
+}
+
+/// A [Vec] of [SegmentChunk], all of the same [ArrowSchema].
+#[derive(Debug, Clone, PartialEq)]
+pub struct MultiChunk {
+    pub schema: ArrowSchema,
+    pub chunks: Vec<SegmentChunk>,
+}
+
+impl MultiChunk {
+    pub fn extend(&mut self, other: Self) -> anyhow::Result<()> {
+        anyhow::ensure!(self.schema == other.schema, "schemas do not match");
+        self.chunks.extend(other.chunks);
+        Ok(())
+    }
+
+    pub fn to_schemachunks(self) -> Vec<SchemaChunk<ArrowSchema>> {
+        self.chunks
+            .into_iter()
+            .map(|chunk| SchemaChunk {
+                schema: self.schema.clone(),
+                chunk,
+            })
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.chunks.iter().map(|c| c.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 

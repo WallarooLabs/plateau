@@ -1,18 +1,20 @@
 //! General-use client library for accessing plateau.
 use std::fmt::Formatter;
+use std::time::{Duration, Instant};
 use std::{io::Cursor, pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
+use plateau_transport::headers::ITERATION_STATUS_HEADER;
 use plateau_transport::CONTENT_TYPE_JSON;
 pub use plateau_transport::{
-    arrow2,
+    self as transport, arrow2,
     arrow2::io::ipc,
     arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
     estimate_array_size, estimate_size, is_variable_len, ArrowError, ArrowSchema, ChunkError,
-    DataFocus, Insert, InsertQuery, Inserted, PartitionFilter, PartitionSelector, Partitions,
-    RecordQuery, RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder,
+    DataFocus, Insert, InsertQuery, Inserted, MultiChunk, PartitionFilter, PartitionSelector,
+    Partitions, RecordQuery, RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder,
     TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
     CONTENT_TYPE_ARROW,
 };
@@ -64,6 +66,10 @@ pub enum Error {
     ArrowSerialize(ArrowError),
     #[error("Error streaming server response: {0}")]
     ArrowDeserialize(ArrowError),
+    #[error("Error parsing json: {0}")]
+    BadJson(#[from] serde_json::Error),
+    #[error("Server unhealthy")]
+    Unhealthy,
     #[error("Empty stream from server")]
     EmptyStream,
     #[error("Schemas do not match")]
@@ -184,6 +190,34 @@ impl Client {
         url.parse().map_err(|e| Error::UrlParse(e, url.to_owned()))
     }
 
+    /// Wait until the server is healthy.
+    ///
+    /// Returns either `Ok(elapsed)` or the `Error` from the last healthcheck attempt.
+    pub async fn healthy(&self, duration: Duration, retry: Duration) -> Result<Duration, Error> {
+        let start = Instant::now();
+
+        loop {
+            match self.healthcheck().await {
+                Ok(_) => return Ok(start.elapsed()),
+                Err(e) if start.elapsed() > duration => return Err(e),
+                _ => tokio::time::sleep(retry).await,
+            }
+        }
+    }
+
+    /// Perform a server healthcheck.
+    pub async fn healthcheck(&self) -> Result<(), Error> {
+        let response: serde_json::Value =
+            process_deserialize_request(self.http_client.get(self.server_url.try_join("ok")?))
+                .await?;
+
+        if response == serde_json::json!({"ok": "true"}) {
+            Ok(())
+        } else {
+            Err(Error::Unhealthy)
+        }
+    }
+
     /// Retrieve a list of all topics.
     pub async fn get_topics(&self) -> Result<Topics, Error> {
         process_deserialize_request(self.http_client.get(self.server_url.try_join("topics")?)).await
@@ -297,6 +331,26 @@ impl Insertion for SchemaChunk<ArrowSchema> {
     }
 }
 
+impl Insertion for MultiChunk {
+    fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
+        let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let options = ipc::write::WriteOptions { compression: None };
+
+        let mut writer = ipc::write::FileWriter::new(bytes, self.schema.clone(), None, options);
+
+        writer.start().map_err(Error::ArrowSerialize)?;
+        for chunk in &self.chunks {
+            writer.write(chunk, None).map_err(Error::ArrowSerialize)?;
+        }
+        writer.finish().map_err(Error::ArrowSerialize)?;
+
+        let bytes = writer.into_inner().into_inner();
+        Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
+            .header(CONTENT_LENGTH, bytes.len())
+            .body(bytes))
+    }
+}
+
 impl Insertion for Vec<SchemaChunk<ArrowSchema>> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
@@ -343,7 +397,7 @@ impl Insertion for SizedArrowStream {
     }
 }
 
-pub fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
     let mut cursor = Cursor::new(bytes);
     let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
     let schema = metadata.schema.clone();
@@ -352,13 +406,13 @@ pub fn bytes_into_schemachunk(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchem
         .collect::<Result<Vec<_>, _>>()
         .map_err(Error::ArrowDeserialize)?;
 
-    Ok(chunks
-        .into_iter()
-        .map(|chunk| SchemaChunk {
-            schema: schema.clone(),
-            chunk,
-        })
-        .collect())
+    Ok(MultiChunk { schema, chunks })
+}
+
+pub fn bytes_into_schemachunks(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+    let multi = bytes_into_multichunk(bytes)?;
+
+    Ok(multi.to_schemachunks())
 }
 
 #[cfg(feature = "polars")]
@@ -383,6 +437,40 @@ pub trait Iterate<Output> {
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<Output, Error>;
+}
+
+#[derive(Debug, Clone)]
+pub struct ArrowIterationReply {
+    pub chunks: MultiChunk,
+    pub status: Option<TopicIterationStatus>,
+}
+
+#[async_trait]
+impl Iterate<ArrowIterationReply> for Client {
+    /// Iterate over a topic, returning records in a full [`ArrowIterationReply`].
+    async fn iterate_topic<'a>(
+        &self,
+        topic_name: impl AsRef<str> + Send,
+        params: &TopicIterationQuery,
+        position: impl Into<Option<&'a TopicIterator>> + Send,
+    ) -> Result<ArrowIterationReply, Error> {
+        let response = process_request(
+            self.iteration_request(topic_name, params, position)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
+        .await?;
+
+        let status = response
+            .headers()
+            .get(ITERATION_STATUS_HEADER)
+            .map(|header| serde_json::from_slice::<TopicIterationStatus>(header.as_ref()))
+            .transpose()?;
+
+        let bytes = response.bytes().await.map_err(Error::Server)?;
+        let chunks = bytes_into_multichunk(bytes)?;
+
+        Ok(ArrowIterationReply { chunks, status })
+    }
 }
 
 #[async_trait]
@@ -438,7 +526,7 @@ impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
         .await
         .map_err(Error::Server)?;
 
-        bytes_into_schemachunk(bytes)
+        bytes_into_schemachunks(bytes)
     }
 }
 
@@ -557,7 +645,7 @@ impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
         .await
         .map_err(Error::Server)?;
 
-        bytes_into_schemachunk(bytes)
+        bytes_into_schemachunks(bytes)
     }
 }
 
