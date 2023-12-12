@@ -1,5 +1,6 @@
 //! General-use client library for accessing plateau.
 use std::fmt::Formatter;
+#[cfg(feature = "health")]
 use std::time::{Duration, Instant};
 use std::{io::Cursor, pin::Pin, str::FromStr};
 
@@ -193,6 +194,7 @@ impl Client {
     /// Wait until the server is healthy.
     ///
     /// Returns either `Ok(elapsed)` or the `Error` from the last healthcheck attempt.
+    #[cfg(feature = "health")]
     pub async fn healthy(&self, duration: Duration, retry: Duration) -> Result<Duration, Error> {
         let start = Instant::now();
 

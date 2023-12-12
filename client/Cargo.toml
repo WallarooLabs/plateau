@@ -44,5 +44,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 batch = ["dep:humantime-serde", "dep:tokio"]
+health = ["dep:tokio"]
 polars = ["dep:polars"]
 replicate = ["dep:backoff", "dep:tokio"]
