@@ -8,11 +8,31 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub period: Duration,
     pub replicate: Replicate,
+    pub backoff: Backoff,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Backoff {
+    /// Minimum (starting) backoff duration
+    #[serde(with = "humantime_serde")]
+    pub min: Duration,
+    /// Multiplication factor for each successive retry attempt
+    pub scale: f64,
+    /// Random noise offset for each retry attempt
+    pub jitter: f64,
+    /// Maximum possible backoff duration
+    #[serde(with = "humantime_serde")]
+    pub max: Duration,
 }
 
 pub async fn run(mut config: Config, addr: SocketAddr) {
+    let backoff = config.backoff;
     let backoff = ExponentialBackoff {
-        max_interval: Duration::from_secs(3600),
+        current_interval: backoff.min,
+        initial_interval: backoff.min,
+        multiplier: backoff.scale,
+        randomization_factor: backoff.jitter,
+        max_interval: backoff.max,
         max_elapsed_time: None,
         ..Default::default()
     };

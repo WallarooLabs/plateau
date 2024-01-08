@@ -274,6 +274,10 @@ impl ReplicationWorker {
             .try_collect()
             .await?;
 
+        for (id, (url, _)) in &hosts {
+            info!("{} url: {}", id, url);
+        }
+
         Ok(ReplicationWorker {
             config: replicate.config,
             hosts,
@@ -324,10 +328,6 @@ impl ReplicationWorker {
     /// "best-effort". More records may be written after a job reports complete
     /// and before `pump` exits.
     pub async fn pump(&mut self) -> Result<(), Error> {
-        for (id, (url, _)) in &self.hosts {
-            info!("{} url: {}", id, url);
-        }
-
         for job in self.all_jobs() {
             info!(
                 "start: {} => {} @ {}",
@@ -379,16 +379,17 @@ impl ReplicationWorker {
                 }
                 Err(e) => {
                     error!("error in loop: {:?}", e);
-                    info!("waiting {:?} to retry", last_duration);
+                    let next = backoff.next_backoff();
+                    info!("waiting {:.1?} to retry", last_duration);
                     tokio::time::sleep(last_duration).await;
-                    last_duration = backoff.next_backoff().unwrap_or(last_duration)
+                    last_duration = next.unwrap_or(last_duration)
                 }
             }
         }
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Replicate {
     #[serde(default)]
     pub config: Config,

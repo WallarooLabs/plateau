@@ -2,6 +2,7 @@ use anyhow::Result;
 use config::{Config, File};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tracing::{error, info};
 
 use crate::{catalog, http, metrics, replication};
 
@@ -15,9 +16,21 @@ pub struct PlateauConfig {
     pub metrics: metrics::Config,
     pub replication: Option<replication::Config>,
 }
+
 impl PlateauConfig {
     pub fn to_string_pretty(&self) -> Result<String> {
         toml::to_string_pretty(self).map_err(|e| anyhow::anyhow!("could not format config: {}", e))
+    }
+
+    pub fn log(&self) {
+        match self.to_string_pretty() {
+            Ok(c) => {
+                for line in c.lines() {
+                    info!("config toml: {}", line);
+                }
+            }
+            Err(e) => error!("{}", e),
+        }
     }
 }
 
@@ -34,6 +47,12 @@ impl Default for PlateauConfig {
     }
 }
 
+pub fn env_source() -> config::Environment {
+    config::Environment::with_prefix("PLATEAU")
+        .try_parsing(true)
+        .separator("__")
+}
+
 pub fn binary_config() -> Result<PlateauConfig> {
     let config = Config::builder()
         .set_default("catalog.retain.max_bytes", "95GiB")?
@@ -45,11 +64,7 @@ pub fn binary_config() -> Result<PlateauConfig> {
         .add_source(File::with_name("./replication.yaml").required(false))
         .add_source(File::with_name("/etc/replication.toml").required(false))
         .add_source(File::with_name("./replication.toml").required(false))
-        .add_source(
-            config::Environment::with_prefix("PLATEAU")
-                .try_parsing(true)
-                .separator("__"),
-        )
+        .add_source(env_source())
         .build()
         .unwrap();
 
