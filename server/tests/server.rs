@@ -20,6 +20,7 @@ use plateau_transport::{
 };
 use reqwest::Client;
 use serde_json::json;
+use std::fs::File;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use plateau_transport::{DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
@@ -728,6 +729,46 @@ async fn topic_iterate_data_focus() -> Result<()> {
     // writing but the tempdir is deleted, resulting in intermittent test failures.
     //TODO: graceful shutdown of test server
     tokio::time::sleep(Duration::from_millis(300)).await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn topic_time_query() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    let mut file = File::open("./tests/data/timed.arrow")?;
+
+    let metadata = read::read_file_metadata(&mut file)?;
+    let schema = metadata.schema.clone();
+    let reader = read::FileReader::new(file, metadata, None, None);
+    let chunks = reader.collect::<arrow2::error::Result<Vec<_>>>()?;
+
+    let chunk_a = SchemaChunk {
+        chunk: chunks[0].clone(),
+        schema: schema.clone(),
+    };
+
+    chunk_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        chunk_a.clone(),
+    )
+    .await?;
+
+    let topic_url = topic_records_url(&server, &topic_name);
+    let mut response = client.post(&topic_url).json(&json!({}));
+    response = response.header("Accept", CONTENT_TYPE_ARROW);
+    response = response.query(&[("time.start", "2023-11-15T19:00:00+00:00")]);
+    response = response.query(&[("time.end", "2023-11-17T21:00:00+00:00")]);
+    let bytes = response.send().await?.error_for_status()?.bytes().await?;
+
+    let mut cursor = Cursor::new(bytes);
+    let metadata = read::read_file_metadata(&mut cursor)?;
+    let reader = read::FileReader::new(cursor, metadata, None, None);
+
+    let chunks = reader.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(chunks.len(), 1);
 
     Ok(())
 }
