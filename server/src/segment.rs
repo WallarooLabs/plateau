@@ -175,7 +175,13 @@ impl Segment {
     }
 
     pub(crate) fn validate(&self) -> bool {
-        self.read_double_ended().is_ok()
+        match self.read_double_ended() {
+            Ok(_) => true,
+            Err(err) => {
+                warn!("error validating segment: {err:?}");
+                false
+            }
+        }
     }
 
     pub(crate) fn read_double_ended(&self) -> Result<DoubleEndedChunkReader> {
