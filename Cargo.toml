@@ -3,5 +3,5 @@ resolver = "2"
 members = ["client", "server", "transport", "cli", "server/bench"]
 
 [patch.crates-io]
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema" }
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/match-polars" }
 parquet2 = { git = "https://github.com/WallarooLabs/parquet2", branch = "more-writer-details" }

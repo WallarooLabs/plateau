@@ -10,13 +10,14 @@ anyhow = "1"
 serde = "1"
 rweb = { version = "0.15", features = ["openapi"] }
 structopt = { version = "0.3", optional = true }
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/public-arrow-parquet-schema", features = [
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/match-polars", features = [
   "compute_aggregate",
   "compute_cast",
   "compute_comparison",
   "compute_concatenate",
   "compute_filter",
   "compute_sort",
+  "compute_take",
   "io_parquet",
   "io_ipc",
   "io_ipc_read_async",
