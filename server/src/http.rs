@@ -399,7 +399,7 @@ async fn partition_get_records(
             .await
     };
 
-    let start = result.chunks.get(0).and_then(|i| i.start());
+    let start = result.chunks.first().and_then(|i| i.start());
     let end = result
         .chunks
         .iter()

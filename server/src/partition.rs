@@ -32,6 +32,7 @@ use crate::chunk::{parse_time, IndexedChunk, Schema};
 use crate::limit::{LimitedBatch, Retention, Rolling, RowLimit};
 use crate::manifest::{Manifest, Ordering};
 pub use crate::manifest::{PartitionId, Scope, SegmentData};
+#[cfg(test)]
 pub use crate::segment::Record;
 pub use crate::slog::RecordIndex;
 use crate::slog::{self, SegmentIndex, Slog};

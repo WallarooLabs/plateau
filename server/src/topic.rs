@@ -7,7 +7,6 @@ use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use crate::chunk::{LegacyRecords, Schema};
-pub use crate::limit::Rolling;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
 use crate::manifest::{Manifest, Ordering};
 pub use crate::partition::Config as PartitionConfig;
@@ -157,8 +156,8 @@ impl Topic {
         if let Some(partition_filters) = partition_filter {
             let expanded = partitions
                 .iter()
-                .cloned()
                 .filter(|name| partition_filters.iter().any(|filter| filter.matches(name)))
+                .cloned()
                 .collect();
 
             Some(expanded)

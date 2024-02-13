@@ -86,11 +86,11 @@ fn get_time<'a>(
     arrays: &'a [Box<dyn Array>],
     schema: &Schema,
 ) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
-    if schema.borrow().fields.get(0).map(|f| f.name.as_str()) != Some("time") {
+    if schema.borrow().fields.first().map(|f| f.name.as_str()) != Some("time") {
         Err(ChunkError::BadColumn(0, "time"))
     } else {
         arrays
-            .get(0)
+            .first()
             .ok_or(ChunkError::BadColumn(0, "time"))
             .and_then(|arr| {
                 arr.as_any()
@@ -119,7 +119,7 @@ impl TimeRange for SchemaChunk<Schema> {
         let times = self
             .chunk
             .arrays()
-            .get(0)
+            .first()
             .ok_or(ChunkError::BadColumn(0, "time"))
             .and_then(|arr| {
                 arr.as_any()
