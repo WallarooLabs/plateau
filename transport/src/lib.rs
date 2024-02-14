@@ -16,8 +16,8 @@ use arrow2::{
     io::ipc::{read, write},
 };
 use regex::Regex;
-use rweb::openapi::Entity;
-use rweb::Schema;
+#[cfg(feature = "rweb")]
+use rweb::{openapi::Entity, Schema};
 use serde::{Deserialize, Deserializer, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
@@ -28,6 +28,7 @@ use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
 use strum::{Display, EnumIter};
 use thiserror::Error;
+use utoipa::{IntoParams, ToSchema};
 
 pub mod headers {
     pub static ITERATION_STATUS_HEADER: &str = "x-iteration-status";
@@ -135,8 +136,9 @@ pub fn is_variable_len(data_type: &DataType) -> bool {
     }
 }
 
-#[derive(Debug, Default, Schema, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct InsertQuery {
     /// RFC3339 timestamp associated with inserted records
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
@@ -148,17 +150,20 @@ pub struct Insert {
     pub records: Vec<String>,
 }
 
-#[derive(Debug, Schema, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Inserted {
     pub span: Span,
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Partitions {
     pub partitions: HashMap<String, Span>,
 }
 
-#[derive(Clone, Copy, Debug, Schema, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -170,15 +175,17 @@ impl From<Span> for Range<usize> {
     }
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Records {
     pub span: Option<Span>,
     pub status: RecordStatus,
     pub records: Vec<String>,
 }
 
-#[derive(Schema, Debug, Clone, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, IntoParams, ToSchema)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct DataFocus {
     /// Data sets to return for this query.
     #[serde(default)]
@@ -203,8 +210,9 @@ impl DataFocus {
     }
 }
 
-#[derive(Schema, Debug, Default, Deserialize, Serialize)]
+#[derive(Debug, Default, Deserialize, Serialize, IntoParams)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct RecordQuery {
     /// Start position
     pub start: usize,
@@ -226,7 +234,8 @@ pub struct RecordQuery {
 }
 
 /// Status of the record request query.
-#[derive(Debug, Clone, Display, Schema, Serialize, Deserialize, PartialEq, Eq, EnumIter)]
+#[derive(Debug, Clone, Display, Serialize, Deserialize, PartialEq, Eq, EnumIter, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub enum RecordStatus {
     /// All current records returned.
     All,
@@ -238,7 +247,8 @@ pub enum RecordStatus {
     ByteLimited,
 }
 
-#[derive(Schema, Default, Debug, Clone, Serialize, PartialEq)]
+#[derive(Default, Debug, Clone, Serialize, PartialEq, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub enum TopicIterationOrder {
     #[default]
     Asc,
@@ -274,8 +284,9 @@ impl std::fmt::Display for TopicIterationOrder {
     }
 }
 
-#[derive(Schema, Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, IntoParams)]
 #[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
@@ -284,10 +295,10 @@ pub struct TopicIterationQuery {
     #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
     pub order: Option<TopicIterationOrder>,
     /// RFC3339 start time for records (defaults to earliest record)
-    #[serde(rename = "time.start")]
+    #[serde(default, rename = "time.start")]
     pub start_time: Option<String>,
     /// RFC3339 end time for records (required if start time exists)
-    #[serde(rename = "time.end")]
+    #[serde(default, rename = "time.end")]
     pub end_time: Option<String>,
     #[serde(flatten)]
     #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
@@ -303,7 +314,7 @@ pub struct TopicIterationQuery {
 /// begin with "regex:" to signify that any partition matching the following string can be converted.
 pub type PartitionFilter = Option<Vec<PartitionSelector>>;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ToSchema)]
 pub enum PartitionSelector {
     /// The exact name of a partition.
     String(String),
@@ -311,6 +322,7 @@ pub enum PartitionSelector {
     Regex(Regex),
 }
 
+#[cfg(feature = "rweb")]
 impl Entity for PartitionSelector {
     fn type_name() -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed("partition_filter")
@@ -391,7 +403,8 @@ impl PartitionSelector {
     }
 }
 
-#[derive(Debug, Schema, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct TopicIterationReply {
     pub records: Vec<String>,
     #[serde(flatten)]
@@ -400,23 +413,27 @@ pub struct TopicIterationReply {
 
 pub type TopicIterator = HashMap<String, usize>;
 
-#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct TopicIterationStatus {
     pub status: RecordStatus,
     pub next: TopicIterator,
 }
 
-#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Topics {
     pub topics: Vec<Topic>,
 }
 
-#[derive(Debug, Clone, Schema, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Topic {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Schema, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct ErrorMessage {
     pub message: String,
     pub code: u16,
@@ -428,7 +445,8 @@ pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub type SegmentChunk = Chunk<Box<dyn Array>>;
 
 /// A [SegmentChunk] packaged with its associated [ArrowSchema].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, ToSchema)]
+#[aliases(ArrowSchemaChunk = SchemaChunk<ArrowSchema>)]
 pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone + PartialEq> {
     pub schema: S,
     pub chunk: SegmentChunk,

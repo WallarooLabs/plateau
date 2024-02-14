@@ -1,21 +1,30 @@
 use std::net::SocketAddr;
-use std::ops::{Range, RangeInclusive};
+use std::ops::{Deref, Range, RangeInclusive};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use axum::{
+    body::Body,
+    extract::{DefaultBodyLimit, FromRef, Path, State},
+    http::{header::ACCEPT, HeaderMap, Request},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router, Server,
+};
+
 use chrono::{DateTime, Utc};
-use futures::FutureExt;
-use rweb::{get, openapi, openapi_docs, post, warp, Filter, Future, Json, Rejection, Reply};
-use serde::de::DeserializeOwned;
+use futures::{Future, FutureExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use serde_qs;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
+use tower_http::trace::TraceLayer;
 use tracing::info;
 use tracing::Instrument;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::PlateauConfig;
 use plateau_transport::{
@@ -24,6 +33,7 @@ use plateau_transport::{
     TopicIterator, Topics,
 };
 
+use crate::axum_util::{query::Query, Response};
 use crate::catalog::Catalog;
 use crate::http::chunk::SchemaChunkRequest;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
@@ -34,7 +44,7 @@ use crate::topic::Record;
 mod chunk;
 mod error;
 
-use self::error::{emit_error, ErrorReply};
+use self::error::ErrorReply;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -78,6 +88,15 @@ impl From<BatchStatus> for RecordStatus {
     }
 }
 
+#[derive(Clone)]
+struct AppState(Arc<Catalog>, Arc<PlateauConfig>);
+
+impl FromRef<AppState> for PlateauConfig {
+    fn from_ref(state: &AppState) -> PlateauConfig {
+        state.1.deref().clone()
+    }
+}
+
 pub async fn serve(
     config: PlateauConfig,
     catalog: Arc<Catalog>,
@@ -86,40 +105,50 @@ pub async fn serve(
     oneshot::Sender<()>,
     Pin<Box<dyn Future<Output = ()> + Send>>,
 ) {
-    let log = warp::log("plateau::http");
     let config = Arc::new(config);
 
     let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
-    let inner_config = config.clone();
-    let (spec, filter) = openapi::spec().build(move || {
-        healthcheck(catalog.clone(), inner_config.clone())
-            .or(get_topics(catalog.clone()))
-            .or(
-                warp::body::content_length_limit(inner_config.http.max_append_bytes)
-                    .and(topic_append(catalog.clone())),
-            )
-            .or(topic_iterate(catalog.clone(), inner_config.http.max_page))
-            .or(topic_get_partitions(catalog.clone()))
-            .or(partition_get_records(catalog, inner_config.http.max_page))
-    });
+    let filter = Router::new()
+        .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
+        .route("/ok", get(healthcheck))
+        .route("/topics", get(get_topics))
+        .route(
+            "/topic/:topic_name/partition/:partition_name/records",
+            get(partition_get_records),
+        )
+        .route(
+            "/topic/:topic_name/partition/:partition_name",
+            post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes as usize)),
+        )
+        .route("/topic/:topic_name/records", post(topic_iterate))
+        .route("/topic/:topic_name", get(topic_get_partitions))
+        .layer(
+            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+                tracing::span!(
+                    target: "plateau::http",
+                    tracing::Level::INFO,
+                    "request",
+                    method = %request.method(),
+                    uri = %request.uri(),
+                    version = ?request.version(),
+                )
+            }),
+        )
+        .with_state(AppState(catalog, Arc::clone(&config)));
 
-    let inner_config = config.clone();
-    let server = rweb::serve(
-        filter
-            .or(openapi_docs(spec))
-            .with(log)
-            .recover(move |e| emit_error(e, inner_config.clone())),
-    );
+    let server = Server::bind(&config.http.bind).serve(filter.into_make_service());
+    let addr = server.local_addr();
 
-    // Ideally warp would have something like a `run_ephemeral`, but here we
-    // are. it's only three lines to copy from Server::run
-    let (addr, fut) =
-        server.bind_with_graceful_shutdown(config.http.bind, FutureExt::map(rx_shutdown, |_| ()));
+    let fut = server.with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, "listening on http://{}", addr);
 
-    (addr, tx_shutdown, Box::pin(fut.instrument(span)))
+    (
+        addr,
+        tx_shutdown,
+        Box::pin(async move { fut.instrument(span).await.unwrap_or(()) }),
+    )
 }
 
 /// A RAII wrapper around a full plateau test server.
@@ -187,40 +216,63 @@ impl TestServer {
     }
 }
 
-#[get("/ok")]
-#[openapi(id = "healthcheck")]
+#[utoipa::path(
+    get,
+    operation_id = "healthcheck",
+    path = "/ok",
+    responses(
+        (status = 200, description = "Healthcheck", body = serde_json::Value),
+    ),
+  )]
 async fn healthcheck(
-    #[data] catalog: Arc<Catalog>,
-    #[data] config: Arc<PlateauConfig>,
-) -> Result<Json<serde_json::Value>, Rejection> {
+    State(AppState(catalog, config)): State<AppState>,
+) -> Result<Response<serde_json::Value>, ErrorReply> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
     let healthy = duration
         .map(|d| d < config.catalog.checkpoint_interval * 10)
         .unwrap_or(true);
     if healthy {
-        Ok(Json::from(json!({"ok": "true"})))
+        Ok(Response::ok(json!({"ok": "true"})))
     } else {
-        Err(warp::reject::custom(ErrorReply::NoHeartbeat))
+        Err(ErrorReply::NoHeartbeat)
     }
 }
 
-#[get("/topics")]
-#[openapi(id = "get_topics")]
-async fn get_topics(#[data] catalog: Arc<Catalog>) -> Result<Json<Topics>, Rejection> {
+#[utoipa::path(
+    get,
+    operation_id = "get_topics",
+    path = "/topics",
+    responses(
+        (status = 200, description = "List of topics", body = Topics),
+    ),
+  )]
+async fn get_topics(
+    State(AppState(catalog, _config)): State<AppState>,
+) -> Result<Response<Topics>, ErrorReply> {
     let topics = catalog.list_topics().await;
-    Ok(Json::from(Topics {
+    Ok(Response::ok(Topics {
         topics: topics.into_iter().map(|name| Topic { name }).collect(),
     }))
 }
 
-#[post("/topic/{topic_name}/partition/{partition_name}")]
-#[openapi(id = "topic.append")]
+#[utoipa::path(
+    post,
+    operation_id = "topic.append",
+    path = "/topic/{topic_name}/partition/{partition_name}",
+    params(
+        ("topic_name", Path, description = "Topic name"),
+        ("partition_name", Path, description = "Partition name"),
+    ),
+    responses(
+        (status = 200, description = "Span of inserted records", body = Inserted),
+    ),
+    request_body(content = SchemaChunk<plateau_transport::ArrowSchema>, content_type = "application/vnd.apache.arrow.file"),
+  )]
 async fn topic_append(
-    topic_name: String,
-    partition_name: String,
-    #[data] catalog: Arc<Catalog>,
+    State(AppState(catalog, _config)): State<AppState>,
+    Path((topic_name, partition_name)): Path<(String, String)>,
     chunk: SchemaChunkRequest,
-) -> Result<Json<Inserted>, Rejection> {
+) -> Result<Response<Inserted>, ErrorReply> {
     topic_append_internal(topic_name, partition_name, catalog, chunk).await
 }
 async fn topic_append_internal(
@@ -228,13 +280,13 @@ async fn topic_append_internal(
     partition_name: String,
     catalog: Arc<Catalog>,
     chunk: SchemaChunkRequest,
-) -> Result<Json<Inserted>, Rejection> {
+) -> Result<Response<Inserted>, ErrorReply> {
     if catalog.is_readonly() {
-        return Err(ErrorReply::InsufficientDiskSpace.into());
+        return Err(ErrorReply::InsufficientDiskSpace);
     }
 
     if chunk.0.contains_null_type() {
-        return Err(ErrorReply::NullTypes.into());
+        return Err(ErrorReply::NullTypes);
     }
 
     catalog.record_write();
@@ -248,26 +300,33 @@ async fn topic_append_internal(
     );
     let r = topic.extend(&partition_name, chunk.0).await;
 
-    Ok(Json::from(Inserted {
-        span: Span::from_range(r.map_err(|e| {
-            warp::reject::custom(match e.downcast_ref::<SlogError>() {
-                Some(SlogError::WriterThreadBusy) => ErrorReply::WriterBusy,
-                None => ErrorReply::Unknown,
-            })
+    Ok(Response::ok(Inserted {
+        span: Span::from_range(r.map_err(|e| match e.downcast_ref::<SlogError>() {
+            Some(SlogError::WriterThreadBusy) => ErrorReply::WriterBusy,
+            None => ErrorReply::Unknown,
         })?),
     }))
 }
 
-#[get("/topic/{topic_name}")]
-#[openapi(id = "topic.get_partitions")]
+#[utoipa::path(
+    get,
+    operation_id = "topic.get_partitions",
+    path = "/topic/{topic_name}",
+    params(
+        ("topic_name", Path, description = "Topic name"),
+    ),
+    responses(
+        (status = 200, description = "List of partitions for topic", body = Partitions),
+    ),
+  )]
 async fn topic_get_partitions(
-    topic_name: String,
-    #[data] catalog: Arc<Catalog>,
-) -> Result<Json<Partitions>, Rejection> {
+    State(AppState(catalog, _config)): State<AppState>,
+    Path(topic_name): Path<String>,
+) -> Result<Response<Partitions>, ErrorReply> {
     let topic = catalog.get_topic(&topic_name).await;
     let indices = topic.readable_ids(None).await;
 
-    Ok(Json::from(Partitions {
+    Ok(Response::ok(Partitions {
         partitions: indices
             .into_iter()
             .map(|(partition, range)| (partition, Span::from_range(range)))
@@ -275,14 +334,12 @@ async fn topic_get_partitions(
     }))
 }
 
-// issue #4 on warp's github is accept content type negotiation.
-// we've been waiting since 2018...
 fn negotiate<F, J>(
     content: Option<String>,
     batch: LimitedBatch,
     focus: DataFocus,
     to_json: F,
-) -> Result<Box<dyn Reply>, Rejection>
+) -> Result<axum::response::Response, ErrorReply>
 where
     F: FnOnce(Vec<Record>) -> J,
     J: Serialize + Send,
@@ -290,37 +347,47 @@ where
     match content.as_deref() {
         None | Some("*/*") | Some("application/json") => {
             if let Ok(records) = batch.into_legacy() {
-                Ok(Box::new(Json::from(to_json(records)).into_response()))
+                Ok(Json(to_json(records)).into_response())
             } else {
-                Err(warp::reject::custom(ErrorReply::InvalidSchema))
+                Err(ErrorReply::InvalidSchema)
             }
         }
-        Some(accept) => chunk::to_reply(accept, batch, focus).map_err(warp::reject::custom),
+        Some(accept) => chunk::to_reply(accept, batch, focus),
     }
 }
 
-fn accept() -> impl Filter<Extract = (Option<String>,), Error = Rejection> + Copy {
-    warp::filters::header::optional("accept")
-}
-
-fn nonstrict_query<T>() -> impl Filter<Extract = (T,), Error = Rejection> + Clone
-where
-    T: DeserializeOwned + Send + 'static,
-{
-    serde_qs::warp::query(serde_qs::Config::new(2, false))
-}
-
-#[post("/topic/{topic_name}/records")]
-#[openapi(id = "topic.iterate")]
+#[utoipa::path(
+    post,
+    operation_id = "topic.iterate",
+    path = "/topic/{topic_name}/records",
+    params(
+        ("topic_name", Path, description = "Topic name"),
+        TopicIterationQuery,
+    ),
+    responses(
+        (status = 200, description = "Topic's partitions with records", body = serde_json::Value),
+    ),
+    request_body(content = TopicIterator, content_type = "application/json"),
+  )]
 async fn topic_iterate(
-    topic_name: String,
-    #[filter = "nonstrict_query"] query: TopicIterationQuery,
-    #[filter = "accept"] content: Option<String>,
-    #[json] position: Option<TopicIterator>,
-    #[data] catalog: Arc<Catalog>,
-    #[data] max_page: RowLimit,
-) -> Result<Box<dyn Reply>, Rejection> {
-    topic_iterate_internal(topic_name, query, content, position, catalog, max_page).await
+    State(AppState(catalog, config)): State<AppState>,
+    Path(topic_name): Path<String>,
+    query: Option<Query<TopicIterationQuery>>,
+    headers: HeaderMap,
+    position: Option<Json<TopicIterator>>,
+) -> Result<axum::response::Response, ErrorReply> {
+    let max_page = config.http.max_page;
+    topic_iterate_internal(
+        topic_name,
+        query.map(|Query(query)| query).unwrap_or_default(),
+        headers
+            .get(ACCEPT)
+            .and_then(|header| header.to_str().ok().map(ToString::to_string)),
+        position.map(|Json(value)| value),
+        catalog,
+        max_page,
+    )
+    .await
 }
 
 async fn topic_iterate_internal(
@@ -330,7 +397,7 @@ async fn topic_iterate_internal(
     position: Option<TopicIterator>,
     catalog: Arc<Catalog>,
     max_page: RowLimit,
-) -> Result<Box<dyn Reply>, Rejection> {
+) -> Result<axum::response::Response, ErrorReply> {
     let topic = catalog.get_topic(&topic_name).await;
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let position = position.unwrap_or_default();
@@ -340,7 +407,7 @@ async fn topic_iterate_internal(
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         if order == Ordering::Reverse {
-            Err(warp::reject::custom(ErrorReply::InvalidQuery))?
+            Err(ErrorReply::InvalidQuery)?
         }
         topic
             .get_records_by_time(position, times, page_size, partition_filter)
@@ -371,16 +438,26 @@ async fn topic_iterate_internal(
     })
 }
 
-#[get("/topic/{topic_name}/partition/{partition_name}/records")]
-#[openapi(id = "partition.get_records")]
+#[utoipa::path(
+    get,
+    operation_id = "partition.get_records",
+    path = "/topic/{topic_name}/partition/{partition_name}/records",
+    params(
+        ("topic_name", Path, description = "Topic name"),
+        ("partition_name", Path, description = "Partition name"),
+        RecordQuery,
+    ),
+    responses(
+        (status = 200, description = "List of records for partition", body = serde_json::Value),
+    ),
+  )]
 async fn partition_get_records(
-    topic_name: String,
-    partition_name: String,
-    #[filter = "nonstrict_query"] query: RecordQuery,
-    #[filter = "accept"] content: Option<String>,
-    #[data] catalog: Arc<Catalog>,
-    #[data] max_page: RowLimit,
-) -> Result<Box<dyn Reply>, Rejection> {
+    State(AppState(catalog, config)): State<AppState>,
+    Path((topic_name, partition_name)): Path<(String, String)>,
+    Query(query): Query<RecordQuery>,
+    headers: HeaderMap,
+) -> Result<axum::response::Response, ErrorReply> {
+    let max_page = config.http.max_page;
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
@@ -419,11 +496,18 @@ async fn partition_get_records(
         );
     }
 
-    negotiate(content, result, query.data_focus, move |records| Records {
-        span: range.map(Span::from_range),
-        status,
-        records: serialize_records(records),
-    })
+    negotiate(
+        headers
+            .get(ACCEPT)
+            .and_then(|header| header.to_str().ok().map(ToString::to_string)),
+        result,
+        query.data_focus,
+        move |records| Records {
+            span: range.map(Span::from_range),
+            status,
+            records: serialize_records(records),
+        },
+    )
 }
 
 fn serialize_records<I: IntoIterator<Item = Record>>(rs: I) -> Vec<String> {
@@ -435,10 +519,10 @@ fn serialize_records<I: IntoIterator<Item = Record>>(rs: I) -> Vec<String> {
 fn parse_time_range(
     start: String,
     end: Option<String>,
-) -> Result<RangeInclusive<DateTime<Utc>>, Rejection> {
+) -> Result<RangeInclusive<DateTime<Utc>>, ErrorReply> {
     let end = match end {
         Some(end_time) => end_time,
-        None => return Err(warp::reject::custom(ErrorReply::InvalidQuery)),
+        None => return Err(ErrorReply::InvalidQuery),
     };
 
     let start = DateTime::parse_from_rfc3339(&start);
@@ -446,9 +530,39 @@ fn parse_time_range(
     if let (Ok(start), Ok(end)) = (start, end) {
         Ok(start.with_timezone(&Utc)..=end.with_timezone(&Utc))
     } else {
-        Err(warp::reject::custom(ErrorReply::InvalidQuery))
+        Err(ErrorReply::InvalidQuery)
     }
 }
+
+#[derive(OpenApi)]
+#[openapi(
+    paths(
+        healthcheck,
+        get_topics,
+        topic_append,
+        topic_get_partitions,
+        topic_iterate,
+        partition_get_records,
+    ),
+    components(
+        schemas(
+            DataFocus,
+            Inserted,
+            Partitions,
+            // PartitionFilter,
+            plateau_transport::ArrowSchemaChunk,
+            Span,
+            Topic,
+            Topics,
+            TopicIterationOrder,
+            // TopicIterator,
+        )
+    ),
+    tags(
+        (name = "Plateau", description = "Plateau API")
+    )
+)]
+struct ApiDoc;
 
 #[cfg(test)]
 mod test {

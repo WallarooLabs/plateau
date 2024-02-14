@@ -5,6 +5,7 @@ use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::wrappers::SignalStream;
 
+mod axum_util;
 pub mod catalog;
 pub mod chunk;
 pub mod config;

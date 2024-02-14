@@ -519,7 +519,8 @@ async fn max_request_header() -> Result<()> {
 
     let req = client
         .post(append_url(&server, &topic_name, PARTITION_NAME))
-        .header("content-length", max * 10);
+        .header("content-type", "application/json")
+        .body(" ".repeat(max as usize * 10));
     let resp = req.send().await?;
 
     assert_eq!(413, resp.status());

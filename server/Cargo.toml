@@ -11,6 +11,7 @@ test = []
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.6", features = ["headers"] }
 bytesize = { version = "1.1.0", features = ["serde"] }
 config = "0.13"
 futures = "0.3"
@@ -24,7 +25,6 @@ plateau-client = { path = "../client", features = ["replicate"] }
 plateau-transport = { path = "../transport" }
 bytes = "1"
 humantime-serde = "1"
-rweb = { version = "0.15", features = ["openapi"] }
 serde_json = "1"
 serde_qs = { version = "0.10", features = ["warp"] }
 serde = { version = "1", features = ["derive"] }
@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.4", features = ["trace"]}
 sqlx = { version = "0.7", features = [
   "chrono",
   "sqlite",
@@ -42,6 +43,8 @@ sqlx = { version = "0.7", features = [
 ] }
 systemstat = "0.2"
 rand = "0.8"
+utoipa = { version = "3", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "3", features = ["axum"] }
 uuid = "1.4"
 regex = "1.10"
 

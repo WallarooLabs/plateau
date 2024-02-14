@@ -1,24 +1,28 @@
 use crate::arrow2::datatypes::Metadata;
 use crate::arrow2::io::ipc::{read, write};
 use crate::arrow2::io::json as arrow_json;
+use crate::Config;
+use axum::{
+    async_trait,
+    body::{boxed, Full, HttpBody},
+    extract::{
+        rejection::{BytesRejection, FailedToBufferBody, JsonRejection},
+        FromRef, FromRequest, Query,
+    },
+    headers::ContentType,
+    http::{header::CONTENT_TYPE, Request, StatusCode},
+    response::Response,
+    BoxError, Json, RequestExt as _,
+};
+
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use rweb::{
-    body,
-    filters::BoxedFilter,
-    header,
-    http::StatusCode,
-    hyper::{self, body::Body},
-    openapi::{ComponentDescriptor, ComponentOrInlineSchema, Entity},
-    reject, Filter, FromRequest,
-};
-use rweb::{query, Reply};
-use std::borrow::Cow;
+use futures::TryFutureExt as _;
 use std::io::{Cursor, Write};
 
 use plateau_transport::{
-    headers::ITERATION_STATUS_HEADER, ArrowSchema, DataFocus, Insert, InsertQuery, SchemaChunk,
-    SegmentChunk, CONTENT_TYPE_ARROW,
+    headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, Insert, InsertQuery,
+    SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
 };
 
 use crate::{
@@ -31,96 +35,119 @@ const CONTENT_TYPE_PANDAS_RECORD: &str = "application/json; format=pandas-record
 
 pub(crate) struct SchemaChunkRequest(pub(crate) SchemaChunk<Schema>);
 
-impl FromRequest for SchemaChunkRequest {
-    type Filter = BoxedFilter<(SchemaChunkRequest,)>;
+#[async_trait]
+impl<S, B> FromRequest<S, B> for SchemaChunkRequest
+where
+    B: HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<BoxError>,
+    Config: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = ErrorReply;
 
-    fn new() -> Self::Filter {
-        let time = query().and_then(|query: InsertQuery| async move {
-            if let Some(s) = query.time {
-                if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
-                    Ok(time.with_timezone(&Utc))
-                } else {
-                    Err(reject::custom(ErrorReply::InvalidQuery))
+    async fn from_request(mut req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+        let config = Config::from_ref(state);
+        let max_append_bytes = config.http.max_append_bytes;
+
+        let content_type = req
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .ok_or(ErrorReply::CannotAccept(
+                ContentType::octet_stream().to_string(),
+            ))?;
+
+        if content_type.starts_with(CONTENT_TYPE_JSON) {
+            let time = req
+                .extract_parts::<Query<InsertQuery>>()
+                .map_err(|_| ErrorReply::InvalidQuery)
+                .and_then(|query| async move {
+                    if let Some(s) = query.0.time {
+                        if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
+                            Ok(time.with_timezone(&Utc))
+                        } else {
+                            Err(ErrorReply::InvalidQuery)
+                        }
+                    } else {
+                        Ok(Utc::now())
+                    }
+                })
+                .await;
+
+            let insert = match req.with_limited_body() {
+                Ok(req) => req.extract::<Json<Insert>, _>().await,
+                Err(req) => req.extract::<Json<Insert>, _>().await,
+            }
+            .map_err(|e| {
+                if let JsonRejection::BytesRejection(BytesRejection::FailedToBufferBody(
+                    FailedToBufferBody::LengthLimitError(_),
+                )) = e
+                {
+                    return ErrorReply::PayloadTooLarge(max_append_bytes);
                 }
-            } else {
-                Ok(Utc::now())
+
+                ErrorReply::BadEncoding
+            })?;
+
+            let time = time?;
+            let records: Vec<_> = insert
+                .0
+                .records
+                .into_iter()
+                .map(|m| Record {
+                    time,
+                    message: m.into_bytes(),
+                })
+                .collect();
+
+            let json = SchemaChunk::try_from(LegacyRecords(records))
+                .map_err(|_| ErrorReply::BadEncoding)
+                .map(Self)?;
+
+            Ok(json)
+        } else if content_type == CONTENT_TYPE_ARROW {
+            let bytes = match req.with_limited_body() {
+                Ok(req) => req.extract::<Bytes, _>(),
+                Err(req) => req.extract::<Bytes, _>(),
             }
-        });
+            .await
+            .map_err(|e| {
+                if let BytesRejection::FailedToBufferBody(FailedToBufferBody::LengthLimitError(_)) =
+                    e
+                {
+                    return ErrorReply::PayloadTooLarge(max_append_bytes);
+                }
 
-        let json = body::json()
-            .and(time)
-            .and_then(|insert: Insert, time: _| async move {
-                let records: Vec<_> = insert
-                    .records
-                    .into_iter()
-                    .map(|m| Record {
-                        time,
-                        message: m.into_bytes(),
-                    })
-                    .collect();
+                ErrorReply::Arrow(ArrowError::from_external_error(e))
+            })?;
 
-                SchemaChunk::try_from(LegacyRecords(records))
-                    .map_err(|_| reject::custom(ErrorReply::BadEncoding))
-                    .map(SchemaChunkRequest)
-            });
-
-        let content_type = header::<String>("content-type").and_then(|content_type| async move {
-            if content_type == CONTENT_TYPE_ARROW {
-                Ok(())
-            } else {
-                Err(reject::custom(ErrorReply::CannotAccept(content_type)))
-            }
-        });
-
-        let chunk = content_type
-            .and(body::bytes())
-            .and_then(|_, bytes: Bytes| async move { deserialize_request(bytes).await });
-
-        json.or(chunk).unify().boxed()
+            deserialize_request(bytes).await
+        } else {
+            Err(ErrorReply::CannotAccept(content_type.to_string()))
+        }
     }
 }
 
-pub(crate) async fn deserialize_request(
-    bytes: Bytes,
-) -> Result<SchemaChunkRequest, rweb::Rejection> {
+pub(crate) async fn deserialize_request(bytes: Bytes) -> Result<SchemaChunkRequest, ErrorReply> {
     let mut cursor = Cursor::new(bytes);
-    let metadata =
-        read::read_file_metadata(&mut cursor).map_err(|e| reject::custom(ErrorReply::Arrow(e)))?;
+    let metadata = read::read_file_metadata(&mut cursor).map_err(ErrorReply::Arrow)?;
     let schema = metadata.schema.clone();
     let mut reader = read::FileReader::new(cursor, metadata, None, None);
     if let Some(chunk) = reader.next() {
-        let mut chunk = new_schema_chunk(
-            schema.clone(),
-            chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
-        )
-        .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?;
+        let mut chunk = new_schema_chunk(schema.clone(), chunk.map_err(ErrorReply::Arrow)?)
+            .map_err(ErrorReply::Chunk)?;
         for next_chunk in reader {
             chunk
                 .extend(
-                    new_schema_chunk(
-                        schema.clone(),
-                        next_chunk.map_err(|e| reject::custom(ErrorReply::Arrow(e)))?,
-                    )
-                    .map_err(|e| reject::custom(ErrorReply::Chunk(e)))?,
+                    new_schema_chunk(schema.clone(), next_chunk.map_err(ErrorReply::Arrow)?)
+                        .map_err(ErrorReply::Chunk)?,
                 )
-                .map_err(|_| reject::custom(ErrorReply::InvalidSchema))?;
+                .map_err(|_| ErrorReply::InvalidSchema)?;
         }
         Ok(SchemaChunkRequest(chunk))
     } else {
-        Err(reject::custom(ErrorReply::EmptyBody))
-    }
-}
-
-// TODO: this seems unlikely to be correct
-impl Entity for SchemaChunkRequest {
-    fn type_name() -> Cow<'static, str> {
-        Cow::from("SchemaChunk")
-    }
-
-    fn describe(_: &mut ComponentDescriptor) -> ComponentOrInlineSchema {
-        ComponentOrInlineSchema::Component {
-            name: Cow::from("SchemaChunk"),
-        }
+        Err(ErrorReply::EmptyBody)
     }
 }
 
@@ -128,7 +155,7 @@ pub(crate) fn to_reply(
     accept: &str,
     batch: LimitedBatch,
     focus: DataFocus,
-) -> Result<Box<dyn Reply>, ErrorReply> {
+) -> Result<Response, ErrorReply> {
     let mut iter = batch.chunks.into_iter();
     // sigh. this would probably be much easier to implement if/when we
     // refactor SchemaChunk so it holds a Vec of Chunk like LimitedBatch
@@ -166,21 +193,17 @@ pub(crate) fn to_reply(
                 writer.finish().map_err(ErrorReply::Arrow)?;
 
                 let bytes = writer.into_inner().into_inner();
-                Ok(Box::new(
-                    hyper::Response::builder()
-                        .header("Content-Type", CONTENT_TYPE_ARROW)
-                        .status(StatusCode::OK)
-                        .body::<Body>(bytes.into())
-                        .unwrap(),
-                ))
-            }
-            CONTENT_TYPE_PANDAS_RECORD => Ok(Box::new(
-                hyper::Response::builder()
-                    .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
+                Response::builder()
+                    .header("Content-Type", CONTENT_TYPE_ARROW)
                     .status(StatusCode::OK)
-                    .body::<Body>("[]".into())
-                    .unwrap(),
-            )),
+                    .body(boxed(Full::new(Bytes::from(bytes))))
+                    .map_err(|_| ErrorReply::Unknown)
+            }
+            CONTENT_TYPE_PANDAS_RECORD => Response::builder()
+                .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
+                .status(StatusCode::OK)
+                .body(boxed(Full::new(Bytes::from("[]"))))
+                .map_err(|_| ErrorReply::Unknown),
             other => Err(ErrorReply::CannotEmit(other.to_string())),
         };
     };
@@ -215,20 +238,18 @@ pub(crate) fn to_reply(
             writer.finish().map_err(ErrorReply::Arrow)?;
 
             let bytes = writer.into_inner().into_inner();
-            Ok(Box::new(
-                hyper::Response::builder()
-                    .header("Content-Type", CONTENT_TYPE_ARROW)
-                    .status(StatusCode::OK)
-                    .header(
-                        ITERATION_STATUS_HEADER,
-                        focused_schema
-                            .metadata
-                            .get("status")
-                            .unwrap_or(&"{}".to_string()),
-                    )
-                    .body::<Body>(bytes.into())
-                    .unwrap(),
-            ))
+            Response::builder()
+                .header("Content-Type", CONTENT_TYPE_ARROW)
+                .status(StatusCode::OK)
+                .header(
+                    ITERATION_STATUS_HEADER,
+                    focused_schema
+                        .metadata
+                        .get("status")
+                        .unwrap_or(&"{}".to_string()),
+                )
+                .body(boxed(Full::new(Bytes::from(bytes))))
+                .map_err(|_| ErrorReply::Unknown)
         }
         CONTENT_TYPE_PANDAS_RECORD => {
             // ugh. super ugly byte hacking to work around upstream not
@@ -254,20 +275,18 @@ pub(crate) fn to_reply(
             }
             write!(&mut bytes, "]").map_err(|_| ErrorReply::Unknown)?;
 
-            Ok(Box::new(
-                hyper::Response::builder()
-                    .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
-                    .header(
-                        ITERATION_STATUS_HEADER,
-                        focused_schema
-                            .metadata
-                            .get("status")
-                            .unwrap_or(&"{}".to_string()),
-                    )
-                    .status(StatusCode::OK)
-                    .body::<Body>(bytes.into())
-                    .unwrap(),
-            ))
+            Response::builder()
+                .header(CONTENT_TYPE, CONTENT_TYPE_PANDAS_RECORD)
+                .header(
+                    ITERATION_STATUS_HEADER,
+                    focused_schema
+                        .metadata
+                        .get("status")
+                        .unwrap_or(&"{}".to_string()),
+                )
+                .status(StatusCode::OK)
+                .body(boxed(Full::new(Bytes::from(bytes))))
+                .map_err(|_| ErrorReply::Unknown)
         }
         other => Err(ErrorReply::CannotEmit(other.to_string())),
     }
