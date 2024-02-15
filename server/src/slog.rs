@@ -342,8 +342,7 @@ impl Slog {
             return Box::new(std::iter::empty());
         }
 
-        let reader = segment.read_double_ended().unwrap();
-        let schema = reader.schema.clone();
+        let (schema, reader) = segment.iter().unwrap();
         let filter = move |c: Result<SegmentChunk>| {
             c.map_or(None, |chunk| {
                 Some(SchemaChunk {
@@ -353,9 +352,9 @@ impl Slog {
             })
         };
         if order.is_reverse() {
-            Box::new(reader.iter().rev().filter_map(filter))
+            Box::new(reader.rev().filter_map(filter))
         } else {
-            Box::new(reader.iter().filter_map(filter))
+            Box::new(reader.filter_map(filter))
         }
     }
 
