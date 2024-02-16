@@ -12,4 +12,6 @@ fn main() {
         println!("cargo:rustc-cfg=nightly");
         println!("cargo:rustc-cfg=bench");
     }
+
+    println!("cargo:rerun-if-changed=migrations");
 }

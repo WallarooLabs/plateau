@@ -25,7 +25,7 @@
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
 use crate::chunk::{self, Schema, TimeRange};
-use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId};
+use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 #[cfg(test)]
 use crate::segment::Record;
 use crate::segment::{Config as SegmentConfig, Segment, SegmentWriter2};
@@ -437,6 +437,7 @@ impl State {
                 size: 0,
                 records: first..first,
                 time: data_time_range.clone(),
+                version: SEGMENT_FORMAT_VERSION,
             },
             full_chunks: vec![],
             full_chunk_len: 0,
@@ -654,6 +655,7 @@ fn spawn_slog_thread(
                             records: records.clone(),
                             time,
                             size,
+                            version: SEGMENT_FORMAT_VERSION,
                         },
                     };
                     trace!("{}: commit {:?}/{:?} send", name, segment, records.end);

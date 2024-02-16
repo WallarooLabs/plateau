@@ -14,10 +14,11 @@ use futures::stream;
 use futures::stream::StreamExt;
 pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
+use sqlx::migrate::Migrator;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
-use sqlx::{ColumnIndex, Executor, Row};
+use sqlx::{ColumnIndex, Row};
 use std::borrow::Borrow;
 use std::convert::TryFrom;
 use std::ops::{Range, RangeInclusive};
@@ -26,6 +27,8 @@ use std::str::FromStr;
 use tracing::{info, trace};
 
 use crate::slog::{RecordIndex, SegmentIndex};
+
+pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
 #[derive(PartialEq, Clone)]
 pub enum Ordering {
@@ -114,6 +117,7 @@ pub struct SegmentData {
     pub time: RangeInclusive<DateTime<Utc>>,
     pub records: Range<RecordIndex>,
     pub size: usize,
+    pub version: u16,
 }
 
 fn row_to_segment_data(row: SqliteRow) -> SegmentData {
@@ -126,6 +130,7 @@ fn row_to_segment_data(row: SqliteRow) -> SegmentData {
         records: RecordIndex::from_row(&row, "record_start")
             ..RecordIndex::from_row(&row, "record_end"),
         size: usize::try_from(row.get::<i64, _>("size")).unwrap(),
+        version: row.try_get("version").unwrap_or_default(),
     }
 }
 
@@ -184,6 +189,8 @@ fn copy_existing(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+static MIGRATOR: Migrator = sqlx::migrate!();
+
 impl Manifest {
     pub async fn current_prior_attach(current: PathBuf, prior: PathBuf) -> anyhow::Result<Self> {
         if prior.exists() && !current.exists() {
@@ -206,7 +213,6 @@ impl Manifest {
             }
         }
 
-        let prior = Path::new(&path).exists();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .min_connections(1)
@@ -224,30 +230,11 @@ impl Manifest {
                     std::fs::File::create(path.join(".test")).err()
                 );
             });
-        if !prior {
-            pool.execute(
-                "CREATE TABLE segments (
-                        id              INTEGER PRIMARY KEY,
-                        topic           STRING NOT NULL,
-                        partition       STRING NOT NULL,
-                        segment_index   INTEGER NOT NULL,
-                        time_start      DATETIME NOT NULL,
-                        time_end        DATETIME NOT NULL,
-                        record_start    INTEGER NOT NULL,
-                        record_end      INTEGER NOT NULL,
-                        size            INTEGER NOT NULL
-                        )
-                        ",
-            )
-            .await
-            .unwrap();
-            pool.execute("CREATE UNIQUE INDEX segments_segment_index ON segments(topic, partition, segment_index)").await.unwrap();
-            pool.execute("CREATE INDEX segments_start ON segments(topic, partition, record_start)")
-                .await
-                .unwrap();
 
-            pool.execute("CREATE INDEX segments_time_range ON segments(topic, partition, time_start, time_end)").await.unwrap();
-        }
+        MIGRATOR
+            .run(&pool)
+            .await
+            .expect("database migration failed!");
         // TODO clear pending segments (size=NULL)
         Manifest { pool }
     }
@@ -265,8 +252,9 @@ impl Manifest {
                 time_end,
                 record_start,
                 record_end,
-                size
-            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                size,
+                version
+            ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
             ON CONFLICT(topic, partition, segment_index) DO UPDATE SET
                 time_start=excluded.time_start,
                 time_end=excluded.time_end,
@@ -282,6 +270,7 @@ impl Manifest {
         .bind(data.records.start.to_row())
         .bind(data.records.end.to_row())
         .bind(i64::try_from(data.size).unwrap())
+        .bind(SEGMENT_FORMAT_VERSION)
         .execute(&self.pool)
         .await
         .unwrap();
@@ -291,7 +280,7 @@ impl Manifest {
     pub async fn get_segment_data(&self, id: SegmentId<&PartitionId>) -> Option<SegmentData> {
         sqlx::query(
             "
-            SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+            SELECT segment_index, time_start, time_end, record_start, record_end, size, version FROM segments
             WHERE topic = ?1 AND partition = ?2 AND segment_index = ?3
         ",
         )
@@ -381,14 +370,14 @@ impl Manifest {
         let query = match order {
             Ordering::Forward => {
                 "
-                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+                SELECT segment_index, time_start, time_end, record_start, record_end, size, version FROM segments
                 WHERE topic = ?1 AND partition = ?2 AND record_end > ?3
                 ORDER BY segment_index ASC
             "
             }
             Ordering::Reverse => {
                 "
-                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+                SELECT segment_index, time_start, time_end, record_start, record_end, size, version FROM segments
                 WHERE topic = ?1 AND partition = ?2 AND record_start < ?3
                 ORDER BY segment_index DESC
             "
@@ -416,7 +405,7 @@ impl Manifest {
         // where an intersection exists; we don't care what the intersection is
         sqlx::query(
             "
-                SELECT segment_index, time_start, time_end, record_start, record_end, size FROM segments
+                SELECT segment_index, time_start, time_end, record_start, record_end, size, version FROM segments
                 WHERE (
                     topic = ?1 AND partition = ?2
                     AND ?3 <= time_end AND time_start <= ?4
@@ -583,6 +572,7 @@ mod test {
                         time,
                         records: RecordIndex(0)..RecordIndex(ix),
                         size: 10,
+                        version: SEGMENT_FORMAT_VERSION,
                     },
                 )
                 .await
@@ -596,6 +586,7 @@ mod test {
                     time,
                     records: RecordIndex(10)..RecordIndex(20),
                     size: 15,
+                    version: SEGMENT_FORMAT_VERSION,
                 },
             )
             .await;
@@ -642,6 +633,7 @@ mod test {
                         time,
                         records: RecordIndex(0)..RecordIndex(ix),
                         size: 10,
+                        version: SEGMENT_FORMAT_VERSION,
                     },
                 )
                 .await
@@ -655,6 +647,7 @@ mod test {
                     time: time.clone(),
                     records: RecordIndex(10)..RecordIndex(20),
                     size: 25,
+                    version: SEGMENT_FORMAT_VERSION,
                 },
             )
             .await;
@@ -667,6 +660,7 @@ mod test {
                     time,
                     records: RecordIndex(0)..RecordIndex(15),
                     size: 12,
+                    version: SEGMENT_FORMAT_VERSION,
                 },
             )
             .await;
@@ -704,6 +698,7 @@ mod test {
             time: Utc.timestamp_opt(00, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),
             records: RecordIndex(0)..RecordIndex(15),
             size: 10,
+            version: SEGMENT_FORMAT_VERSION,
         };
 
         assert!(state.get_oldest_segment(None).await.is_none());
@@ -764,6 +759,7 @@ mod test {
                         time,
                         records: RecordIndex(0)..RecordIndex(ix),
                         size: 12,
+                        version: SEGMENT_FORMAT_VERSION,
                     },
                 )
                 .await
@@ -778,6 +774,7 @@ mod test {
                     time,
                     records: RecordIndex(10)..RecordIndex(20),
                     size: 13,
+                    version: SEGMENT_FORMAT_VERSION,
                 },
             )
             .await;
@@ -844,6 +841,7 @@ mod test {
                         time,
                         records,
                         size: 12,
+                        version: SEGMENT_FORMAT_VERSION,
                     },
                 )
                 .await
