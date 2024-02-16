@@ -9,8 +9,7 @@ CREATE TABLE IF NOT EXISTS segments (
     time_end        DATETIME NOT NULL,
     record_start    INTEGER NOT NULL,
     record_end      INTEGER NOT NULL,
-    size            INTEGER NOT NULL,
-    version         INTEGER NOT NULL
+    size            INTEGER NOT NULL
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS segments_segment_index ON segments(topic, partition, segment_index);
