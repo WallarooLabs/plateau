@@ -42,6 +42,8 @@ use crate::arrow2::datatypes::Schema;
 pub use crate::chunk::Record;
 use plateau_transport::SegmentChunk;
 
+#[allow(dead_code)]
+mod arrow;
 mod cache;
 mod parquet;
 

@@ -469,6 +469,7 @@ mod test {
             .set_len(len - 4)?;
 
         let (_, mut iter) = s.iter()?;
+        // XXX - this has to be a bug, right? we only write one chunk above...
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk));
         assert!(iter.next().is_none());
