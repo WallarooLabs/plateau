@@ -9,34 +9,22 @@
 //! At that point, the cache is discarded and a new empty active chunk cache is
 //! opened for the next chunk in the file.
 //!
-//! Currently, the only supported segment format is local Parquet files.
+//! `{segment}.arrows` is the file that records the active chunk cache. See
+//! [cache] for more information about the contents of this file.
 //!
-//! For caching and crash recovery, each segment may be accompanied by up to
-//! three other files:
-//!
-//! - `{segment}.arrows`: Active chunk cache. On disk, the file is prefixed with
-//!   a fixed version identifier and the active chunk index. After this index,
-//!   arrow chunks are appended in *streaming* IPC format, not the typical v2
-//!   feather format. The additional footer required by the feather format would
-//!   add overhead and create headaches during crash recovery.
-//! - `{segment}.header`: Recovery "header". Contains a fixed version identifier
-//!   prefix, current offset, and parquet footer.  See `write_checkpoint` for
-//!   internal details of this file, and `recover` for the recovery process.
-//! - `{segment}.header.tmp`: A temporary file that the above data is written
-//!   into before moving to the above file, to avoid issues occurring if we
-//!   crash while writing the recovery header.
+//! For caching and crash recovery, each segment file may have a variety of
+//! other associated files. See [arrow] and [parquet] for details on these
+//! additional files.
 
 use std::convert::TryFrom;
-use std::ffi::OsStr;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::time::Instant;
 use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, warn};
+use tracing::{error, warn};
 
 use crate::arrow2::datatypes::Schema;
 pub use crate::chunk::Record;
@@ -85,6 +73,10 @@ impl Default for Config {
     }
 }
 
+pub trait SegmentIterator: DoubleEndedIterator<Item = Result<SegmentChunk>> {
+    fn schema(&self) -> &Schema;
+}
+
 pub struct Segment {
     path: PathBuf,
 }
@@ -99,6 +91,10 @@ impl Segment {
     }
 
     fn file(&self) -> Result<fs::File> {
+        if self.path.exists() {
+            warn!("truncating extant segment file at {}", self.path.display());
+        }
+
         Ok(fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -107,32 +103,20 @@ impl Segment {
     }
 
     pub(crate) fn create2(&self, schema: Schema, config: Config) -> Result<SegmentWriter2> {
-        let checkpoint = self.checkpoint_path();
-        let mut tmp: PathBuf = self.path.clone();
-        assert!(tmp.extension() != Some(OsStr::new("header")));
-        assert!(tmp.extension() != Some(OsStr::new("header.tmp")));
-        assert!(tmp.set_extension("header.tmp"));
-
         let file = self.file()?;
-        let writer = parquet::Writer::create(file.try_clone()?, &schema)?;
+        let writer = parquet::Writer::create(self.path.clone(), file, &schema, config.clone())?;
 
         Ok(SegmentWriter2 {
             path: self.path.clone(),
-            checkpoint,
-            tmp,
-            file,
             writer,
             schema,
             chunk_ix: 0,
-            cache: cache::RowGroupCache::empty(self.cache_path(), 0),
-            config,
+            cache: cache::ActiveChunk::new(self.cache_path()),
         })
     }
 
     pub(crate) fn destroy(&self) -> Result<()> {
-        if Path::exists(&self.path) {
-            fs::remove_file(&self.path)?;
-        }
+        parquet::Segment::new(self.path.clone())?.destroy()?;
 
         if Path::exists(&self.cache_path()) {
             fs::remove_file(self.cache_path())?;
@@ -151,26 +135,12 @@ impl Segment {
         }
     }
 
-    pub(crate) fn iter(
-        &self,
-    ) -> Result<(
-        Schema,
-        impl DoubleEndedIterator<Item = Result<SegmentChunk>>,
-    )> {
-        let main = parquet::Reader::open(&self.path, self.checkpoint_path())?;
-        let (cache_schema, cache) = cache::RowGroupCache::read(self.cache_path())?;
-
-        if let Some(schema) = main.schema.as_ref().or(cache_schema.as_ref()) {
-            Ok((schema.clone(), main.chain(cache.into_iter().map(Ok))))
-        } else {
-            Err(anyhow::anyhow!("no segment or cache present").context(format!("{:?}", self.path)))
-        }
-    }
-
-    fn checkpoint_path(&self) -> PathBuf {
-        let mut path: PathBuf = self.path.clone();
-        assert!(path.set_extension("header"));
-        path
+    pub(crate) fn iter(&self) -> Result<impl SegmentIterator> {
+        let cache = cache::read(self.cache_path()).unwrap_or_else(|err| {
+            error!("error reading cache at {:?}: {err:?}", self.cache_path());
+            None
+        });
+        parquet::Segment::new(self.path.clone())?.read(cache)
     }
 
     fn cache_path(&self) -> PathBuf {
@@ -182,14 +152,11 @@ impl Segment {
 
 pub struct SegmentWriter2 {
     path: PathBuf,
-    checkpoint: PathBuf,
-    tmp: PathBuf,
-    file: fs::File,
     writer: parquet::Writer,
     schema: Schema,
     chunk_ix: u32,
-    cache: cache::RowGroupCache,
-    config: Config,
+
+    cache: cache::ActiveChunk,
 }
 
 impl SegmentWriter2 {
@@ -204,7 +171,7 @@ impl SegmentWriter2 {
     /// Log a combination of full and active chunks to this segment.
     ///
     /// This operation is append-only. All full chunks are appended as-is onto
-    /// the underlying parquet file.
+    /// the underlying segment file.
     ///
     /// The "active" chunk is also considered append-only. If no full chunks
     /// are present, all rows in the active chunk after the end of cache are
@@ -233,11 +200,11 @@ impl SegmentWriter2 {
 
         if chunk_count > 0 {
             self.chunk_ix += chunk_count as u32;
-            self.cache = cache::RowGroupCache::empty(self.cache.path.clone(), self.chunk_ix);
+            self.cache.clear();
         }
 
         if let Some(active) = active {
-            self.cache.update(&self.schema, active)?;
+            self.cache.update(self.chunk_ix, schema, active)?;
         }
 
         self.write_checkpoint()?;
@@ -246,32 +213,12 @@ impl SegmentWriter2 {
     }
 
     fn write_checkpoint(&self) -> Result<()> {
-        let checkpoint_file = self.writer.write_checkpoint(&self.tmp)?;
+        // First, sync the segment file itself. The cache will not be valid if the
+        // chunks that precede it are missing.
+        self.writer.checkpoint()?;
 
-        // Now, sync all the things
-        if self.config.durable_checkpoints {
-            let now = Instant::now();
-            // first the active chunk cache
-            self.cache.sync()?;
-            // then the header file
-            checkpoint_file.sync_data()?;
-            drop(checkpoint_file);
-            // then the actual file, to ensure the underlying data is on disk
-            self.file.sync_data()?;
-            debug!("fsync elapsed: {:?}", now.elapsed());
-        }
-
-        std::fs::rename(&self.tmp, &self.checkpoint)?;
-
-        // Finally sync the directory metadata, which will capture the rename.
-        if self.config.durable_checkpoints {
-            let now = Instant::now();
-            let mut parent = self.path.clone();
-            parent.pop();
-            let directory = fs::File::open(&parent)?;
-            directory.sync_all()?;
-            debug!("dir sync elapsed: {:?}", now.elapsed());
-        }
+        // Then, we can sync the active chunk cache
+        self.cache.sync()?;
 
         Ok(())
     }
@@ -281,18 +228,14 @@ impl SegmentWriter2 {
     }
 
     pub fn end(&mut self) -> Result<()> {
-        if let Some(chunk) = std::mem::take(&mut self.cache.partial_chunk) {
-            self.write_chunk(chunk)?;
+        if let Some(rows) = self.cache.take() {
+            self.write_chunk(rows.chunk)?;
         }
 
         self.writer.end()?;
-        self.file.sync_data()?;
-        if Path::exists(&self.checkpoint) {
-            std::fs::remove_file(&self.checkpoint)?;
-        }
-        if Path::exists(&self.cache.path) {
-            std::fs::remove_file(&self.cache.path)?;
-        }
+
+        self.cache.destroy()?;
+
         Ok(())
     }
 
@@ -301,7 +244,7 @@ impl SegmentWriter2 {
     /// or final footer (unless this segment has been sealed).
     pub fn size_estimate(&self) -> Result<usize> {
         let main_size = fs::metadata(self.get_path()).map(|p| p.len()).unwrap_or(0);
-        let cache_size = fs::metadata(&self.cache.path).map(|p| p.len()).unwrap_or(0);
+        let cache_size = self.cache.size();
         Ok(usize::try_from(main_size + cache_size)?)
     }
 
@@ -324,7 +267,7 @@ pub mod test {
     use std::borrow::Borrow;
 
     use super::*;
-    use crate::chunk::iter_legacy;
+    use crate::chunk::{iter_legacy, test::inferences_schema_a};
     use chrono::{TimeZone, Utc};
     use plateau_transport::SchemaChunk;
     use sample_arrow2::{
@@ -333,6 +276,7 @@ pub mod test {
         datatypes::{sample_flat, ArbitraryDataType},
     };
     use sample_std::{Chance, Regex};
+    use tempfile::tempdir;
 
     impl Config {
         pub fn nocommit() -> Self {
@@ -352,7 +296,7 @@ pub mod test {
         }
 
         pub fn update_cache(&mut self, active: SegmentChunk) -> Result<()> {
-            self.cache.update(&self.schema, active)
+            self.cache.update(self.chunk_ix, &self.schema, active)
         }
     }
 
@@ -399,5 +343,55 @@ pub mod test {
             data_type,
             array,
         }
+    }
+
+    #[test]
+    fn test_partial_cache_write() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("partial-write.parquet");
+        let s = Segment::at(path.clone());
+
+        let a = inferences_schema_a();
+        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+        drop(w);
+
+        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        f.set_len(f.metadata()?.len() - 15)?;
+
+        let mut r = s.iter()?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cache_updates() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("partial-write.parquet");
+        let s = Segment::at(path.clone());
+
+        let a = inferences_schema_a();
+
+        let all_counts = vec![1, 3, 4, 2, 1];
+        for ix in 1..all_counts.len() {
+            let mut chunk = a.chunk.clone();
+            let mut w = s.create2(a.schema.clone(), Config::default())?;
+
+            for count in &all_counts[0..ix] {
+                let new_parts: Vec<_> = std::iter::once(chunk.clone())
+                    .chain(std::iter::repeat(a.chunk.clone()).take(*count))
+                    .collect();
+                chunk = crate::chunk::concatenate(&new_parts)?;
+                w.update_cache(chunk.clone())?;
+            }
+
+            drop(w);
+
+            let mut r = s.iter()?;
+            assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
+        }
+
+        Ok(())
     }
 }

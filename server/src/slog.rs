@@ -28,7 +28,7 @@ use crate::chunk::{self, Schema, TimeRange};
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 #[cfg(test)]
 use crate::segment::Record;
-use crate::segment::{Config as SegmentConfig, Segment, SegmentWriter2};
+use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, SegmentWriter2};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use metrics::counter;
@@ -342,7 +342,8 @@ impl Slog {
             return Box::new(std::iter::empty());
         }
 
-        let (schema, reader) = segment.iter().unwrap();
+        let reader = segment.iter().unwrap();
+        let schema = reader.schema().clone();
         let filter = move |c: Result<SegmentChunk>| {
             c.map_or(None, |chunk| {
                 Some(SchemaChunk {

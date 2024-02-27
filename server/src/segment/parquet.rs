@@ -1,4 +1,14 @@
-use super::{validate_header, PLATEAU_HEADER};
+//! Parquet segment [Reader] and [Writer].
+//!
+//! Each parquet segment file may be accompanied by up to two other files:
+//!
+//! - `{segment}.header`: Recovery "header". Contains a fixed version identifier
+//!   prefix, current offset, and parquet footer.  See `write_checkpoint` for
+//!   internal details of this file, and `recover` for the recovery process.
+//! - `{segment}.header.tmp`: A temporary file that the above data is written
+//!   into before moving to the above file, to avoid issues occurring if we
+//!   crash while writing the recovery header.
+use super::{cache, validate_header, SegmentIterator, PLATEAU_HEADER};
 use crate::arrow2::{
     datatypes::Schema,
     io::parquet::read::FileReader as FileReader2,
@@ -17,21 +27,94 @@ use parquet2::{
 use parquet_format_safe::thrift::protocol::{TCompactOutputProtocol, TOutputProtocol};
 use plateau_transport::SegmentChunk;
 use std::{
+    ffi::OsStr,
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    iter,
-    path::Path,
+    iter::{self, Chain, Flatten},
+    option,
+    path::{Path, PathBuf},
+    time::Instant,
 };
 use tracing::{debug, error, warn};
 
+fn checkpoint_path(path: impl AsRef<Path>) -> PathBuf {
+    let mut path = PathBuf::from(path.as_ref());
+    assert!(path.set_extension("header"));
+    path
+}
+
+pub struct Segment {
+    path: PathBuf,
+    checkpoint_path: PathBuf,
+    checkpoint_tmp_path: PathBuf,
+}
+
+impl Segment {
+    pub fn new(path: PathBuf) -> Result<Self> {
+        let checkpoint_path = checkpoint_path(&path);
+        let mut checkpoint_tmp_path = path.clone();
+
+        anyhow::ensure!(checkpoint_tmp_path.extension() != Some(OsStr::new("header")));
+        anyhow::ensure!(checkpoint_tmp_path.extension() != Some(OsStr::new("header.tmp")));
+        anyhow::ensure!(checkpoint_tmp_path.set_extension("header.tmp"));
+
+        Ok(Self {
+            path,
+            checkpoint_path,
+            checkpoint_tmp_path,
+        })
+    }
+
+    fn directory(&self) -> Result<fs::File> {
+        let mut parent = self.checkpoint_path.clone();
+        parent.pop();
+        fs::File::open(&parent).map_err(anyhow::Error::from)
+    }
+
+    pub fn read(self, cache: Option<cache::Data>) -> Result<impl SegmentIterator> {
+        Reader::open(self, cache)
+    }
+
+    fn clear_checkpoints(&self) -> Result<()> {
+        if Path::exists(&self.checkpoint_path) {
+            fs::remove_file(&self.checkpoint_path)?;
+        }
+
+        if Path::exists(&self.checkpoint_tmp_path) {
+            fs::remove_file(&self.checkpoint_tmp_path)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn destroy(&self) -> Result<()> {
+        self.clear_checkpoints()?;
+
+        fs::remove_file(&self.path)?;
+
+        Ok(())
+    }
+}
+
 pub(super) struct Writer {
+    segment: Segment,
+    file: fs::File,
+    directory: fs::File,
+    config: super::Config,
+
     pub(super) writer: FileWriter<fs::File>,
     key_value_metadata: Option<Vec<KeyValue>>,
     options: WriteOptions,
 }
 
 impl Writer {
-    pub(super) fn create(file: fs::File, schema: &Schema) -> Result<Self> {
+    pub(super) fn create(
+        path: PathBuf,
+        file: fs::File,
+        schema: &Schema,
+        config: super::Config,
+    ) -> Result<Self> {
+        let segment = Segment::new(path)?;
         let created_by = Some("plateau v0.1.0 segment v1".to_string());
 
         // TODO: ideally we'd use compression, but this currently causes nasty dependency issues
@@ -45,6 +128,7 @@ impl Writer {
 
         let parquet_schema = to_parquet_schema(schema)?;
 
+        let self_file = file.try_clone()?;
         let writer = parquet2::write::FileWriter::new(
             file,
             parquet_schema,
@@ -56,8 +140,14 @@ impl Writer {
         );
 
         let key_value_metadata = add_arrow_schema(schema, None);
+        let directory = segment.directory()?;
 
         Ok(Self {
+            segment,
+            file: self_file,
+            directory,
+            config,
+
             writer,
             key_value_metadata,
             options,
@@ -81,36 +171,65 @@ impl Writer {
         Ok(())
     }
 
-    pub(super) fn write_checkpoint(&self, path: impl AsRef<Path>) -> Result<fs::File> {
+    pub(super) fn checkpoint(&self) -> Result<()> {
         let metadata = self
             .writer
             .compute_metadata(self.key_value_metadata.clone())?;
 
-        let mut file = fs::OpenOptions::new()
+        let mut checkpoint_file = fs::OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(true)
-            .open(path)?;
+            .open(&self.segment.checkpoint_tmp_path)?;
 
         // Write header
-        file.write_all(PLATEAU_HEADER.as_bytes())?;
+        checkpoint_file.write_all(PLATEAU_HEADER.as_bytes())?;
 
         // Write offset
         let offset_bytes = self.writer.offset().to_le_bytes();
-        file.write_all(&offset_bytes)?;
+        checkpoint_file.write_all(&offset_bytes)?;
 
         // Then, write the header
-        let mut protocol = TCompactOutputProtocol::new(&mut file);
+        let mut protocol = TCompactOutputProtocol::new(&mut checkpoint_file);
         let metadata_len = metadata.write_to_out_protocol(&mut protocol)? as i32;
         protocol.flush()?;
         drop(protocol);
-        file.write_all(&metadata_len.to_le_bytes())?;
+        checkpoint_file.write_all(&metadata_len.to_le_bytes())?;
 
-        Ok(file)
+        // Now, sync all the things
+        if self.config.durable_checkpoints {
+            let now = Instant::now();
+            self.file.sync_data()?;
+            // After syncing the data, sync the parquet footer. The data is
+            // useless without the footer telling us how to read it, and the
+            // footer is useless without the corresponding data it describes.
+            checkpoint_file.sync_data()?;
+            drop(checkpoint_file);
+            debug!("file sync elapsed: {:?}", now.elapsed());
+        }
+
+        fs::rename(
+            &self.segment.checkpoint_tmp_path,
+            &self.segment.checkpoint_path,
+        )?;
+
+        if self.config.durable_checkpoints {
+            // Now sync the directory metadata, which will capture the rename of
+            // the checkpoint file
+            let now = Instant::now();
+            self.directory.sync_all()?;
+            debug!("dir sync elapsed: {:?}", now.elapsed());
+        }
+
+        Ok(())
     }
 
     pub(super) fn end(&mut self) -> Result<()> {
         self.writer.end(self.key_value_metadata.clone())?;
+        self.file.sync_data()?;
+
+        self.segment.clear_checkpoints()?;
+
         Ok(())
     }
 }
@@ -147,62 +266,96 @@ fn recover(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<
     read_metadata(&mut f).map_err(anyhow::Error::from)
 }
 
-/// Reads chunks in forward or reverse order, with lazy caching of chunk data
 pub(super) struct Reader {
-    pub(super) schema: Option<Schema>,
-    reader: Option<FileReader2<fs::File>>,
+    schema: Schema,
+    iter: Chain<Flatten<option::IntoIter<CachingReader>>, option::IntoIter<Result<SegmentChunk>>>,
+}
+
+impl Reader {
+    pub(super) fn open(segment: Segment, cache: Option<cache::Data>) -> Result<Self> {
+        match CachingReader::open(segment) {
+            Ok((schema, reader)) => Ok(Self {
+                schema,
+                iter: Some(reader)
+                    .into_iter()
+                    .flatten()
+                    .chain(cache.map(|cache| Ok(cache.rows.chunk))),
+            }),
+            Err(err) => {
+                error!("error opening segment file: {err:?}");
+                cache
+                    .map(|cache| Self {
+                        schema: cache.rows.schema,
+                        iter: None.into_iter().flatten().chain(Some(Ok(cache.rows.chunk))),
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("missing cache and segment"))
+            }
+        }
+    }
+}
+
+impl Iterator for Reader {
+    type Item = Result<SegmentChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
+    }
+}
+
+impl DoubleEndedIterator for Reader {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.iter.next_back()
+    }
+}
+
+impl SegmentIterator for Reader {
+    fn schema(&self) -> &Schema {
+        &self.schema
+    }
+}
+
+pub(super) struct CachingReader {
+    reader: FileReader2<fs::File>,
     next_ix: usize,
     next_back_ix: usize,
     chunks: Vec<SegmentChunk>,
 }
 
-impl Reader {
-    fn empty() -> Self {
-        Self {
-            schema: None,
-            reader: None,
-            next_ix: 0,
-            next_back_ix: 0,
-            chunks: vec![],
-        }
-    }
+impl CachingReader {
+    fn open(segment: Segment) -> Result<(Schema, Self)> {
+        let mut f = fs::File::open(&segment.path)?;
 
-    pub(super) fn open(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<Self> {
-        let mut f = fs::File::open(&path)?;
-        if !path.as_ref().exists() {
-            return Ok(Self::empty());
-        }
-
-        let metadata = match read_metadata(&mut f) {
-            Ok(data) => data,
-            Err(e) => {
-                debug!("error reading checkpoint: {e:?}");
-                drop(f);
-                if checkpoint_path.as_ref().exists() {
-                    recover(&path, &checkpoint_path)?
-                } else {
-                    return Ok(Self::empty());
-                }
-            }
-        };
+        let metadata = read_metadata(&mut f).or_else(|err| {
+            debug!("error reading segment: {err:?}");
+            drop(f);
+            anyhow::ensure!(
+                segment.checkpoint_path.exists(),
+                "no checkpoint to recover from"
+            );
+            recover(&segment.path, segment.checkpoint_path)
+        })?;
 
         let schema = infer_schema(&metadata)?;
-        let file = fs::File::open(&path)?;
+
+        let file = fs::File::open(&segment.path)?;
 
         let len = metadata.row_groups.len();
         let reader = FileReader2::new(file, metadata.row_groups, schema.clone(), None, None, None);
 
-        Ok(Self {
-            schema: Some(schema),
-            reader: Some(reader),
-            next_ix: 0,
-            next_back_ix: len,
-            chunks: vec![],
-        })
+        Ok((
+            schema,
+            Self {
+                reader,
+                next_ix: 0,
+                next_back_ix: len,
+                chunks: vec![],
+            },
+        ))
     }
 }
 
-impl Iterator for Reader {
+/// Reads chunks in forward or reverse order, with lazy caching of chunk data
+impl Iterator for CachingReader {
     type Item = Result<SegmentChunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -212,7 +365,7 @@ impl Iterator for Reader {
             let index = self.next_ix;
             self.next_ix += 1;
             if self.chunks.len() < self.next_ix {
-                match self.reader.as_mut().and_then(|r| r.next()) {
+                match self.reader.next() {
                     Some(Ok(chunk)) => self.chunks.push(chunk),
                     Some(Err(e)) => {
                         error!("failed to read chunk from segment: {e}");
@@ -231,7 +384,7 @@ impl Iterator for Reader {
     }
 }
 
-impl DoubleEndedIterator for Reader {
+impl DoubleEndedIterator for CachingReader {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.next_back_ix <= self.next_ix {
             None
@@ -260,6 +413,7 @@ mod test {
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{legacy_schema, LegacyRecords};
     use crate::segment::test::{build_records, collect_records, deep_chunk};
+    use crate::segment::Segment;
     use crate::segment::*;
 
     #[test]
@@ -279,7 +433,7 @@ mod test {
         }
         let _ = w.close()?;
 
-        let (_, reader) = s.iter()?;
+        let reader = s.iter()?;
 
         assert_eq!(collect_records(schema, reader), records);
         Ok(())
@@ -304,7 +458,7 @@ mod test {
 
         records.reverse();
 
-        let (_, reader) = s.iter()?;
+        let reader = s.iter()?;
         assert_eq!(collect_records(schema, reader.rev()), records);
         Ok(())
     }
@@ -319,8 +473,8 @@ mod test {
                 .map(|ix| (ix, format!("message-{}", ix))),
         );
 
-        let (schema, r) = s.iter()?;
-        assert_eq!(collect_records(schema, r), records);
+        let r = s.iter()?;
+        assert_eq!(collect_records(r.schema().clone(), r), records);
         Ok(())
     }
 
@@ -348,8 +502,8 @@ mod test {
         let size = w.close()?;
         assert!(size > 0);
 
-        let (schema, r) = s.iter()?;
-        assert_eq!(collect_records(schema, r), records);
+        let r = s.iter()?;
+        assert_eq!(collect_records(r.schema().clone(), r), records);
         Ok(())
     }
 
@@ -385,7 +539,7 @@ mod test {
         w.log_arrow(a, None)?;
         w.close()?;
 
-        let (schema, _) = s.iter()?;
+        let schema = s.iter()?.schema().clone();
         assert_eq!(schema.metadata.get("pipeline.name").unwrap(), "pied-piper");
         assert_eq!(schema.metadata.get("pipeline.version").unwrap(), "3.1");
 
@@ -428,8 +582,8 @@ mod test {
         let size = w.close()?;
         assert!(size > 0);
 
-        let (schema, r) = s.iter()?;
-        assert_eq!(collect_records(schema, r), records);
+        let r = s.iter()?;
+        assert_eq!(collect_records(r.schema().clone(), r), records);
 
         Ok(())
     }
@@ -445,7 +599,7 @@ mod test {
         w.log_arrow(a.clone(), None)?;
         drop(w);
 
-        let (_, mut r) = s.iter()?;
+        let mut r = s.iter()?;
         assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
 
         Ok(())
@@ -468,61 +622,11 @@ mod test {
             .open(path)?
             .set_len(len - 4)?;
 
-        let (_, mut iter) = s.iter()?;
+        let mut iter = s.iter()?;
         // XXX - this has to be a bug, right? we only write one chunk above...
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk));
         assert!(iter.next().is_none());
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_partial_cache_write() -> Result<()> {
-        let root = tempdir()?;
-        let path = root.path().join("partial-write.parquet");
-        let s = Segment::at(path.clone());
-
-        let a = inferences_schema_a();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
-        drop(w);
-
-        let f = std::fs::File::options().append(true).open(s.cache_path())?;
-        f.set_len(f.metadata()?.len() - 15)?;
-
-        let (_, mut r) = s.iter()?;
-        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_cache_updates() -> Result<()> {
-        let root = tempdir()?;
-        let path = root.path().join("partial-write.parquet");
-        let s = Segment::at(path.clone());
-
-        let a = inferences_schema_a();
-
-        let all_counts = vec![1, 3, 4, 2, 1];
-        for ix in 1..all_counts.len() {
-            let mut chunk = a.chunk.clone();
-            let mut w = s.create2(a.schema.clone(), Config::default())?;
-
-            for count in &all_counts[0..ix] {
-                let new_parts: Vec<_> = std::iter::once(chunk.clone())
-                    .chain(std::iter::repeat(a.chunk.clone()).take(*count))
-                    .collect();
-                chunk = crate::chunk::concatenate(&new_parts)?;
-                w.update_cache(chunk.clone())?;
-            }
-
-            drop(w);
-
-            let (_, mut r) = s.iter()?;
-            assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
-        }
 
         Ok(())
     }
@@ -559,7 +663,7 @@ mod test {
         w.log_arrow(expected, None).unwrap();
         w.close().unwrap();
 
-        let (_, r) = s.iter().unwrap();
+        let r = s.iter().unwrap();
         let chunks = r.collect::<anyhow::Result<Vec<_>>>().unwrap();
         assert_eq!(chunks, vec![chunk]);
     }
@@ -602,7 +706,7 @@ mod test {
         }
         w.close().unwrap();
 
-        let (_, r) = s.iter().unwrap();
+        let r = s.iter().unwrap();
         let actual_chunks = r.collect::<anyhow::Result<Vec<_>>>().unwrap();
         assert_eq!(actual_chunks, chunks);
     }

@@ -1,136 +1,196 @@
+//! Cache file format for the "active" chunk.
+//!
+//! On disk, the file is prefixed with a fixed version identifier and the active
+//! chunk index. After this index, arrow chunks are appended in *streaming* IPC
+//! format, not the typical v2 feather format. The additional footer required by
+//! the feather format would add overhead and create headaches during crash
+//! recovery.
 use std::{
     fs,
     io::{Read, Write},
+    mem,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use crate::arrow2::{datatypes::Schema, io::ipc};
 use anyhow::Result;
 use plateau_client::ipc::read::StreamState;
-use plateau_transport::SegmentChunk;
-use tracing::{error, warn};
+use plateau_transport::{SchemaChunk, SegmentChunk};
+use tracing::{debug, error, warn};
 
 use super::{validate_header, PLATEAU_HEADER};
 
-pub(super) struct RowGroupCache {
-    chunk_ix: u32,
-    len: usize,
-    pub(super) partial_chunk: Option<SegmentChunk>,
-    pub(super) path: PathBuf,
-    writer: Option<ipc::write::StreamWriter<fs::File>>,
-    file: Option<fs::File>,
+pub struct ActiveChunk {
+    path: PathBuf,
+    writer: Option<Writer>,
 }
 
-impl RowGroupCache {
-    pub(super) fn empty(path: PathBuf, chunk_ix: u32) -> Self {
-        Self {
-            chunk_ix,
-            len: 0,
-            partial_chunk: None,
-            path,
-            writer: None,
-            file: None,
-        }
+impl ActiveChunk {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path, writer: None }
     }
 
-    pub(super) fn read(path: PathBuf) -> Result<(Option<Schema>, Self)> {
-        if Path::exists(&path) {
-            let mut reader = fs::File::open(&path)?;
-            validate_header(&mut reader)?;
+    pub fn clear(&mut self) {
+        self.writer = None;
+    }
 
-            let mut buffer = [0; 4];
-            reader.read_exact(&mut buffer)?;
-            let chunk_ix = u32::from_le_bytes(buffer);
+    pub fn take(&mut self) -> Option<SchemaChunk<Schema>> {
+        mem::take(&mut self.writer).map(|w| w.into_inner())
+    }
 
-            let metadata = ipc::read::read_stream_metadata(&mut reader)?;
-            let schema = metadata.schema.clone();
-            let reader = ipc::read::StreamReader::new(reader, metadata, None);
-
-            let chunks = reader
-                .take_while(|state| matches!(state, Ok(StreamState::Some(..)) | Err(..)))
-                .filter_map(|result| match result {
-                    Ok(StreamState::Some(chunk)) => Some(chunk),
-                    Ok(StreamState::Waiting) => {
-                        warn!("halting on unexpected waiting state");
-                        None
-                    }
-                    Err(e) => {
-                        error!("error reading cache segment: {:?}", e);
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            let len = chunks.iter().map(|chunk| chunk.len()).sum();
-            let partial_chunk = if chunks.is_empty() {
-                None
-            } else {
-                Some(crate::chunk::concatenate(&chunks)?)
-            };
-
-            Ok((
-                Some(schema),
-                Self {
+    pub fn update(&mut self, chunk_ix: u32, schema: &Schema, chunk: SegmentChunk) -> Result<()> {
+        match &mut self.writer {
+            Some(cache) => cache.update(schema, chunk)?,
+            None => {
+                self.writer = Some(Writer::new(
+                    self.path.clone(),
+                    SchemaChunk {
+                        schema: schema.clone(),
+                        chunk,
+                    },
                     chunk_ix,
-                    len,
-                    partial_chunk,
-                    path,
-                    writer: None,
-                    file: None,
-                },
-            ))
-        } else {
-            Ok((None, Self::empty(path, 0)))
+                )?);
+            }
         }
+
+        Ok(())
+    }
+
+    pub fn sync(&self) -> Result<()> {
+        if let Some(writer) = &self.writer {
+            writer.sync()?;
+        }
+
+        Ok(())
+    }
+
+    pub fn destroy(&mut self) -> Result<()> {
+        if Path::exists(&self.path) {
+            std::fs::remove_file(&self.path)?;
+        }
+        self.writer = None;
+
+        Ok(())
+    }
+
+    pub fn size(&self) -> u64 {
+        self.writer.as_ref().map(|w| w.size()).unwrap_or(0)
+    }
+}
+
+pub struct Writer {
+    path: PathBuf,
+    file: fs::File,
+
+    writer: ipc::write::StreamWriter<fs::File>,
+    partial: SchemaChunk<Schema>,
+}
+
+impl Writer {
+    pub fn new(path: PathBuf, initial: SchemaChunk<Schema>, chunk_ix: u32) -> Result<Self> {
+        let mut file = fs::File::create(&path)?;
+        file.write_all(PLATEAU_HEADER.as_bytes())?;
+
+        let buffer = chunk_ix.to_le_bytes();
+        file.write_all(&buffer)?;
+
+        let options = ipc::write::WriteOptions { compression: None };
+        let mut writer = ipc::write::StreamWriter::new(file.try_clone()?, options);
+        writer.start(&initial.schema, None)?;
+        writer.write(&initial.chunk, None)?;
+
+        Ok(Self {
+            path,
+            file,
+            writer,
+            partial: initial,
+        })
+    }
+
+    fn len(&self) -> usize {
+        self.partial.chunk.len()
     }
 
     pub(super) fn update(&mut self, schema: &Schema, chunk: SegmentChunk) -> Result<()> {
-        if self.len == chunk.len() {
+        if self.len() == chunk.len() {
             return Ok(());
         }
 
-        // sigh. can't compose get_or_insert_with and a closure returning a Result
-        if self.writer.is_none() {
-            let mut file = fs::File::create(&self.path)?;
-            file.write_all(PLATEAU_HEADER.as_bytes())?;
+        anyhow::ensure!(schema == &self.partial.schema);
 
-            let buffer = self.chunk_ix.to_le_bytes();
-            file.write_all(&buffer)?;
-            self.file = Some(file.try_clone()?);
-
-            let options = ipc::write::WriteOptions { compression: None };
-            let mut writer = ipc::write::StreamWriter::new(file, options);
-            writer.start(schema, None)?;
-
-            self.writer = Some(writer)
-        };
-
-        // SAFETY: if `self.writer` was None, that was fixed above
-        let writer = self.writer.as_mut().unwrap();
         let new_len = chunk.len();
-        let additional = crate::chunk::slice(chunk.clone(), self.len, new_len - self.len);
-        writer.write(&additional, None)?;
-
-        self.len = new_len;
-        self.partial_chunk = Some(chunk);
+        let additional = crate::chunk::slice(chunk.clone(), self.len(), new_len - self.len());
+        self.writer.write(&additional, None)?;
+        self.partial.chunk = chunk;
 
         Ok(())
     }
 
     pub(super) fn sync(&self) -> Result<()> {
-        if let Some(f) = self.file.as_ref() {
-            f.sync_data()?;
-        }
+        let now = Instant::now();
+        self.file.sync_data()?;
+        debug!("cache sync elapsed: {:?}", now.elapsed());
 
         Ok(())
     }
+
+    pub(super) fn into_inner(self) -> SchemaChunk<Schema> {
+        self.partial
+    }
+
+    pub(super) fn size(&self) -> u64 {
+        fs::metadata(&self.path).map(|p| p.len()).unwrap_or(0)
+    }
 }
 
-impl IntoIterator for RowGroupCache {
-    type Item = SegmentChunk;
-    type IntoIter = std::option::IntoIter<Self::Item>;
+pub struct Data {
+    pub chunk_ix: u32,
+    pub rows: SchemaChunk<Schema>,
+}
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.partial_chunk.into_iter()
+pub fn read(path: PathBuf) -> Result<Option<Data>> {
+    if path.exists() {
+        let mut reader = fs::File::open(&path)?;
+        validate_header(&mut reader)?;
+
+        let mut buffer = [0; 4];
+        reader.read_exact(&mut buffer)?;
+        let chunk_ix = u32::from_le_bytes(buffer);
+
+        let metadata = ipc::read::read_stream_metadata(&mut reader)?;
+        let schema = metadata.schema.clone();
+        let reader = ipc::read::StreamReader::new(reader, metadata, None);
+
+        let chunks = reader
+            .take_while(|state| matches!(state, Ok(StreamState::Some(..)) | Err(..)))
+            .filter_map(|result| match result {
+                Ok(StreamState::Some(chunk)) => Some(chunk),
+                Ok(StreamState::Waiting) => {
+                    warn!("halting on unexpected waiting state");
+                    None
+                }
+                Err(e) => {
+                    error!("error reading cache segment: {:?}", e);
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        let concat = if chunks.is_empty() {
+            return Ok(None);
+        } else {
+            crate::chunk::concatenate(&chunks)?
+        };
+
+        Ok(Some(Data {
+            chunk_ix,
+            rows: SchemaChunk {
+                schema,
+                chunk: concat,
+            },
+        }))
+    } else {
+        Ok(None)
     }
 }
