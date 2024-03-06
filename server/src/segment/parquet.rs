@@ -37,10 +37,19 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
+const PARQUET_HEADER: &str = "PAR1";
+
 fn checkpoint_path(path: impl AsRef<Path>) -> PathBuf {
     let mut path = PathBuf::from(path.as_ref());
     assert!(path.set_extension("header"));
     path
+}
+
+pub fn check_file(f: &mut fs::File) -> Result<bool> {
+    let mut buffer = [0u8; 4];
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut buffer)?;
+    Ok(buffer.into_iter().eq(PARQUET_HEADER.bytes()))
 }
 
 pub struct Segment {
@@ -71,7 +80,7 @@ impl Segment {
         fs::File::open(&parent).map_err(anyhow::Error::from)
     }
 
-    pub fn read(self, cache: Option<cache::Data>) -> Result<impl SegmentIterator> {
+    pub fn read(self, cache: Option<cache::Data>) -> Result<Reader> {
         Reader::open(self, cache)
     }
 
@@ -258,12 +267,16 @@ fn recover(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<
         segment.set_len(offset)?;
         segment.seek(SeekFrom::Start(offset))?;
         segment.write_all(&rest)?;
-        segment.write_all("PAR1".as_bytes())?;
+        segment.write_all(PARQUET_HEADER.as_bytes())?;
         warn!("successfully recovered checkpoint {:?}", checkpoint_path);
     }
 
     let mut f = fs::File::open(path)?;
-    read_metadata(&mut f).map_err(anyhow::Error::from)
+    let metadata = read_metadata(&mut f)?;
+
+    debug!("recovered {} rows", metadata.num_rows);
+
+    Ok(metadata)
 }
 
 pub(super) struct Reader {
@@ -274,13 +287,16 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn open(segment: Segment, cache: Option<cache::Data>) -> Result<Self> {
         match CachingReader::open(segment) {
-            Ok((schema, reader)) => Ok(Self {
-                schema,
-                iter: Some(reader)
-                    .into_iter()
-                    .flatten()
-                    .chain(cache.map(|cache| Ok(cache.rows.chunk))),
-            }),
+            Ok((schema, reader)) => {
+                let cache = cache
+                    .filter(|cache| cache.chunk_ix == reader.len as u32)
+                    .map(|cache| Ok(cache.rows.chunk));
+
+                Ok(Self {
+                    schema,
+                    iter: Some(reader).into_iter().flatten().chain(cache),
+                })
+            }
             Err(err) => {
                 error!("error opening segment file: {err:?}");
                 cache
@@ -316,6 +332,7 @@ impl SegmentIterator for Reader {
 
 pub(super) struct CachingReader {
     reader: FileReader2<fs::File>,
+    len: usize,
     next_ix: usize,
     next_back_ix: usize,
     chunks: Vec<SegmentChunk>,
@@ -346,6 +363,7 @@ impl CachingReader {
             schema,
             Self {
                 reader,
+                len,
                 next_ix: 0,
                 next_back_ix: len,
                 chunks: vec![],
@@ -413,8 +431,31 @@ mod test {
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::chunk::{legacy_schema, LegacyRecords};
     use crate::segment::test::{build_records, collect_records, deep_chunk};
-    use crate::segment::Segment;
-    use crate::segment::*;
+    use crate::segment::{Config, Segment};
+
+    impl Writer {
+        fn from_path(path: PathBuf, schema: &Schema) -> Result<Self> {
+            Writer::create(
+                path.clone(),
+                fs::File::create(&path)?,
+                schema,
+                Config::parquet(),
+            )
+        }
+    }
+
+    #[test]
+    fn check_file_format() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.parquet");
+
+        let a = inferences_schema_a();
+        let mut w = Writer::from_path(path.clone(), &a.schema)?;
+        w.write_chunk(&a.schema, a.chunk)?;
+
+        assert!(check_file(&mut fs::File::open(path)?)?);
+        Ok(())
+    }
 
     #[test]
     fn can_iter_forward_double_ended() -> Result<()> {
@@ -423,7 +464,7 @@ mod test {
         let s = Segment::at(path.clone());
         let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
-        let mut w = s.create2(legacy_schema(), Config::default())?;
+        let mut w = s.create(legacy_schema(), Config::parquet())?;
         let schema = w.schema.clone();
         for record in records.clone() {
             w.log_arrow(
@@ -446,7 +487,7 @@ mod test {
         let s = Segment::at(path.clone());
         let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
 
-        let mut w = s.create2(legacy_schema(), Config::default())?;
+        let mut w = s.create(legacy_schema(), Config::parquet())?;
         let schema = w.schema.clone();
         for record in records.clone() {
             w.log_arrow(
@@ -490,7 +531,7 @@ mod test {
         );
 
         let schema = legacy_schema();
-        let mut w = s.create2(schema.clone(), Config::default())?;
+        let mut w = s.create(schema.clone(), Config::parquet())?;
         w.log_arrow(
             SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?,
             None,
@@ -514,7 +555,7 @@ mod test {
         let s = Segment::at(path);
 
         let a = inferences_schema_a();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        let mut w = s.create(a.schema.clone(), Config::parquet())?;
         w.log_arrow(a, None)?;
         let b = inferences_schema_b();
         assert!(!w.check_schema(&b.schema));
@@ -535,7 +576,7 @@ mod test {
         a.schema
             .metadata
             .insert("pipeline.version".to_string(), "3.1".to_string());
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        let mut w = s.create(a.schema.clone(), Config::parquet())?;
         w.log_arrow(a, None)?;
         w.close()?;
 
@@ -553,7 +594,7 @@ mod test {
         let s = Segment::at(path);
 
         let a = inferences_nested();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        let mut w = s.create(a.schema.clone(), Config::parquet())?;
         w.log_arrow(a, None)?;
         Ok(())
     }
@@ -570,7 +611,7 @@ mod test {
                 .map(|ix| (ix, format!("message-{}-{}", ix, large))),
         );
 
-        let mut w = s.create2(legacy_schema(), Config::default())?;
+        let mut w = s.create(legacy_schema(), Config::parquet())?;
         w.log_arrow(
             SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?,
             None,
@@ -592,12 +633,14 @@ mod test {
     fn test_open_drop_recovery() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("open-drop.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path.clone());
 
         let a = inferences_schema_a();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        let mut w = s.create(a.schema.clone(), Config::parquet())?;
         w.log_arrow(a.clone(), None)?;
         drop(w);
+
+        assert!(check_file(&mut fs::File::open(path)?)?);
 
         let mut r = s.iter()?;
         assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
@@ -609,22 +652,23 @@ mod test {
     fn test_partial_write_recovery() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
-        let s = Segment::at(path.clone());
+        let s = super::Segment::new(path.clone())?;
 
         let a = inferences_schema_a();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
-        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
-        let len = w.writer.writer.offset();
+        let mut w = Writer::from_path(s.path.clone(), &a.schema)?;
+        w.write_chunk(&a.schema, a.chunk.clone())?;
+        w.checkpoint()?;
+        let len = w.writer.offset();
         drop(w);
 
         std::fs::File::options()
             .append(true)
-            .open(path)?
+            .open(&path)?
             .set_len(len - 4)?;
 
-        let mut iter = s.iter()?;
-        // XXX - this has to be a bug, right? we only write one chunk above...
-        assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert!(check_file(&mut fs::File::open(path)?)?);
+
+        let mut iter = s.read(None)?;
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk));
         assert!(iter.next().is_none());
 
@@ -655,7 +699,7 @@ mod test {
                 .collect(),
             metadata: Metadata::default(),
         };
-        let mut w = s.create2(schema.clone(), Config::nocommit()).unwrap();
+        let mut w = s.create(schema.clone(), Config::nocommit()).unwrap();
         let expected = SchemaChunk {
             schema,
             chunk: chunk.clone(),
@@ -695,7 +739,7 @@ mod test {
                 .collect(),
             metadata: Metadata::default(),
         };
-        let mut w = s.create2(schema.clone(), Config::nocommit()).unwrap();
+        let mut w = s.create(schema.clone(), Config::nocommit()).unwrap();
 
         for chunk in &chunks {
             let expected = SchemaChunk {

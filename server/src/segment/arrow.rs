@@ -10,13 +10,13 @@
 use anyhow::Result;
 use plateau_transport::SegmentChunk;
 use std::ffi::OsStr;
-use std::io::Seek;
+use std::io::{Read, Seek, SeekFrom};
 use std::{
     fs,
     ops::Range,
     path::{Path, PathBuf},
 };
-use tracing::{error, warn};
+use tracing::{error, trace, warn};
 
 use crate::arrow2::{
     datatypes::Schema,
@@ -29,7 +29,16 @@ use crate::arrow2::{
     },
 };
 
-use super::cache;
+use super::{cache, SegmentIterator};
+
+const ARROW_HEADER: &str = "ARROW1";
+
+pub fn check_file(f: &mut fs::File) -> Result<bool> {
+    let mut buffer = [0u8; 6];
+    f.seek(SeekFrom::Start(0))?;
+    f.read_exact(&mut buffer)?;
+    Ok(buffer.into_iter().eq(ARROW_HEADER.bytes()))
+}
 
 pub struct Segment {
     path: PathBuf,
@@ -62,6 +71,7 @@ impl Segment {
 
     pub fn read(&self, cache: Option<cache::Data>) -> Result<Reader> {
         if self.recovered_path.exists() {
+            trace!("reading from recovered file at {:?}", self.recovered_path);
             Reader::open(&self.recovered_path)
         } else {
             match Reader::open(&self.path) {
@@ -152,19 +162,27 @@ impl Segment {
         }
 
         // Finally, fold in any valid cached chunk.
+        let mut cache_recovery = "(no cache)";
         if Some(recovered_chunks) == chunk_ix {
             if let Some(chunk) = cache {
                 recovered_chunks += 1;
                 recovered_rows += chunk.len();
                 writer.write(&chunk, None)?;
+                cache_recovery = "(including cache)";
             }
+        } else if let Some(chunk_ix) = chunk_ix {
+            warn!(
+                "gap between chunks in file ({}) and cache index ({})",
+                recovered_chunks, chunk_ix
+            );
+            cache_recovery = "(cache invalid)"
         }
 
         writer.finish()?;
         writer.into_inner().sync_all()?;
         warn!(
-            "recovered {recovered_rows} rows in {recovered_chunks} chunks from {:?}",
-            self.path
+            "recovered {recovered_rows} rows in {recovered_chunks} chunks from {:?} {cache_recovery}",
+            self.path,
         );
 
         // Now, we should be able to read normally from the recovered file.
@@ -196,13 +214,15 @@ impl Segment {
 
 pub struct Writer {
     writer: FileWriter<fs::File>,
+    file: fs::File,
 }
 
 impl Writer {
     pub fn create(file: fs::File, schema: &Schema) -> Result<Self> {
         let options = WriteOptions { compression: None };
         Ok(Self {
-            writer: FileWriter::try_new(file, schema.clone(), None, options)?,
+            writer: FileWriter::try_new(file.try_clone()?, schema.clone(), None, options)?,
+            file,
         })
     }
 
@@ -210,8 +230,15 @@ impl Writer {
         self.writer.write(&chunk, None).map_err(Into::into)
     }
 
-    pub fn end(&mut self) -> Result<()> {
-        self.writer.finish().map_err(Into::into)
+    pub fn checkpoint(&self) -> Result<()> {
+        self.file.sync_data().map_err(Into::into)
+    }
+
+    pub fn end(mut self) -> Result<()> {
+        self.writer.finish()?;
+        self.file.sync_data()?;
+
+        Ok(())
     }
 }
 
@@ -287,6 +314,12 @@ impl DoubleEndedIterator for Reader {
     }
 }
 
+impl SegmentIterator for Reader {
+    fn schema(&self) -> &Schema {
+        &self.metadata.schema
+    }
+}
+
 #[cfg(test)]
 mod test {
     use plateau_transport::SchemaChunk;
@@ -305,6 +338,19 @@ mod test {
         fn create_path(path: impl AsRef<Path>, schema: &Schema) -> Result<Self> {
             Self::create(fs::File::create(path)?, schema)
         }
+    }
+
+    #[test]
+    fn check_file_format() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("testing.arrow");
+
+        let a = inferences_schema_a();
+        let mut w = Writer::create_path(&path, &a.schema)?;
+        w.write_chunk(a.chunk)?;
+
+        assert!(check_file(&mut fs::File::open(path)?)?);
+        Ok(())
     }
 
     #[test]
@@ -408,17 +454,24 @@ mod test {
         Ok(())
     }
 
+    fn open_drop(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
+        let path = root.as_ref().join("open-drop.arrow");
+        let s = Segment::new(path.clone())?;
+
+        let mut w = Writer::create_path(&path, &rows.schema)?;
+        w.write_chunk(rows.chunk)?;
+        drop(w);
+
+        assert!(check_file(&mut fs::File::open(path)?)?);
+
+        Ok(s)
+    }
+
     #[test]
     fn test_open_drop_recovery() -> Result<()> {
         let root = tempdir()?;
-        let path = root.path().join("open-drop.arrow");
-        let s = Segment::new(path.clone())?;
-
         let a = inferences_schema_a();
-
-        let mut w = Writer::create_path(&path, &a.schema)?;
-        w.write_chunk(a.chunk.clone())?;
-        drop(w);
+        let s = open_drop(root.path(), a.clone())?;
 
         let (rows, mut r) = s.recover(None)?;
         assert_eq!(rows, a.chunk.len());
@@ -429,15 +482,30 @@ mod test {
     }
 
     #[test]
-    fn test_partial_write_recovery() -> Result<()> {
+    fn test_open_drop_read_reread() -> Result<()> {
         let root = tempdir()?;
-        let path = root.path().join("partial-write.arrow");
+        let a = inferences_schema_a();
+        let s = open_drop(root.path(), a.clone())?;
+
+        let mut r = s.read(None)?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert!(r.next().is_none());
+
+        // read again to verify read from recovered
+        let mut r = s.read(None)?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
+        assert!(r.next().is_none());
+
+        Ok(())
+    }
+
+    fn partial_write(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
+        let path = root.as_ref().join("partial-write.arrow");
         let s = Segment::new(path.clone())?;
 
-        let a = inferences_schema_a();
-        let mut w = Writer::create_path(&path, &a.schema)?;
-        w.write_chunk(a.chunk.clone())?;
-        w.write_chunk(a.chunk.clone())?;
+        let mut w = Writer::create_path(&path, &rows.schema)?;
+        w.write_chunk(rows.chunk.clone())?;
+        w.write_chunk(rows.chunk.clone())?;
         drop(w);
         let len = fs::File::open(&path)?.metadata()?.len();
 
@@ -446,8 +514,36 @@ mod test {
             .open(&path)?
             .set_len(len - 40)?;
 
+        assert!(check_file(&mut fs::File::open(path)?)?);
+
+        Ok(s)
+    }
+
+    #[test]
+    fn test_partial_write_recovery() -> Result<()> {
+        let root = tempdir()?;
+        let a = inferences_schema_a();
+        let s = partial_write(root.path(), a.clone())?;
+
         let (rows, mut iter) = s.recover(None)?;
         assert_eq!(rows, a.chunk.len());
+        assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert!(iter.next().is_none());
+
+        Ok(())
+    }
+
+    fn test_partial_write_read_reread() -> Result<()> {
+        let root = tempdir()?;
+        let a = inferences_schema_a();
+        let s = partial_write(root.path(), a.clone())?;
+
+        let mut iter = s.read(None)?;
+        assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert!(iter.next().is_none());
+
+        // assert we can re-read from the recovered file
+        let mut iter = s.read(None)?;
         assert_eq!(iter.next().map(|v| v.unwrap()), Some(a.chunk));
         assert!(iter.next().is_none());
 

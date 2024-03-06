@@ -24,7 +24,7 @@ use std::{fs, path::Path, path::PathBuf};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{error, warn};
+use tracing::{error, trace, warn};
 
 use crate::arrow2::datatypes::Schema;
 pub use crate::chunk::Record;
@@ -63,12 +63,14 @@ impl Hash for Record {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     durable_checkpoints: bool,
+    arrow: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             durable_checkpoints: true,
+            arrow: false,
         }
     }
 }
@@ -102,11 +104,20 @@ impl Segment {
             .open(&self.path)?)
     }
 
-    pub(crate) fn create2(&self, schema: Schema, config: Config) -> Result<SegmentWriter2> {
+    pub(crate) fn create(&self, schema: Schema, config: Config) -> Result<Writer> {
         let file = self.file()?;
-        let writer = parquet::Writer::create(self.path.clone(), file, &schema, config.clone())?;
+        let writer = if config.arrow {
+            WriteFormat::Arrow(arrow::Writer::create(file, &schema)?)
+        } else {
+            WriteFormat::Parquet(parquet::Writer::create(
+                self.path.clone(),
+                file,
+                &schema,
+                config.clone(),
+            )?)
+        };
 
-        Ok(SegmentWriter2 {
+        Ok(Writer {
             path: self.path.clone(),
             writer,
             schema,
@@ -140,7 +151,49 @@ impl Segment {
             error!("error reading cache at {:?}: {err:?}", self.cache_path());
             None
         });
-        parquet::Segment::new(self.path.clone())?.read(cache)
+
+        if self.path.exists() {
+            trace!(
+                "found segment file {:?}, cache: {}",
+                self.path,
+                cache.is_some()
+            );
+            let mut file = fs::File::open(&self.path)?;
+
+            // Check for a header
+            let parquet = parquet::check_file(&mut file);
+            let arrow = arrow::check_file(&mut file);
+            if let (Ok(parquet), Ok(arrow)) = (parquet, arrow) {
+                return if parquet {
+                    trace!("{:?} in parquet format", self.path);
+                    let segment = parquet::Segment::new(self.path.clone())?;
+                    Ok(ReadFormat::Parquet(segment.read(cache)?))
+                } else if arrow {
+                    trace!("{:?} in arrow format", self.path);
+                    let segment = arrow::Segment::new(self.path.clone())?;
+                    Ok(ReadFormat::Arrow(segment.read(cache)?))
+                } else {
+                    anyhow::bail!("unable to detect file format for segment {:?}", self.path)
+                };
+            }
+
+            trace!("empty segment file {:?}", self.path);
+        }
+
+        if let Some(data) = cache {
+            trace!("only cache file present");
+            anyhow::ensure!(
+                data.chunk_ix == 0,
+                "cache file requires segment {:?} that is not present",
+                self.path
+            );
+            Ok(ReadFormat::OnlyCache(
+                data.rows.schema,
+                std::iter::once(Ok(data.rows.chunk)),
+            ))
+        } else {
+            anyhow::bail!("no segment file or cache data for {:?}", self.path)
+        }
     }
 
     fn cache_path(&self) -> PathBuf {
@@ -150,22 +203,68 @@ impl Segment {
     }
 }
 
-pub struct SegmentWriter2 {
+enum ReadFormat {
+    Arrow(arrow::Reader),
+    Parquet(parquet::Reader),
+    OnlyCache(Schema, std::iter::Once<Result<SegmentChunk>>),
+}
+
+impl Iterator for ReadFormat {
+    type Item = Result<SegmentChunk>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Arrow(a) => a.next(),
+            Self::Parquet(p) => p.next(),
+            Self::OnlyCache(_, c) => c.next(),
+        }
+    }
+}
+
+impl DoubleEndedIterator for ReadFormat {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Arrow(a) => a.next_back(),
+            Self::Parquet(p) => p.next_back(),
+            Self::OnlyCache(_, c) => c.next_back(),
+        }
+    }
+}
+
+impl SegmentIterator for ReadFormat {
+    fn schema(&self) -> &Schema {
+        match self {
+            Self::Arrow(a) => a.schema(),
+            Self::Parquet(p) => p.schema(),
+            Self::OnlyCache(schema, _) => schema,
+        }
+    }
+}
+
+enum WriteFormat {
+    Arrow(arrow::Writer),
+    Parquet(parquet::Writer),
+}
+
+pub struct Writer {
     path: PathBuf,
-    writer: parquet::Writer,
+    writer: WriteFormat,
     schema: Schema,
     chunk_ix: u32,
 
     cache: cache::ActiveChunk,
 }
 
-impl SegmentWriter2 {
+impl Writer {
     pub fn check_schema(&self, schema: &Schema) -> bool {
         &self.schema == schema
     }
 
     fn write_chunk(&mut self, chunk: SegmentChunk) -> Result<()> {
-        self.writer.write_chunk(&self.schema, chunk)
+        match &mut self.writer {
+            WriteFormat::Parquet(p) => p.write_chunk(&self.schema, chunk),
+            WriteFormat::Arrow(a) => a.write_chunk(chunk),
+        }
     }
 
     /// Log a combination of full and active chunks to this segment.
@@ -215,7 +314,10 @@ impl SegmentWriter2 {
     fn write_checkpoint(&self) -> Result<()> {
         // First, sync the segment file itself. The cache will not be valid if the
         // chunks that precede it are missing.
-        self.writer.checkpoint()?;
+        match &self.writer {
+            WriteFormat::Parquet(p) => p.checkpoint()?,
+            WriteFormat::Arrow(a) => a.checkpoint()?,
+        }
 
         // Then, we can sync the active chunk cache
         self.cache.sync()?;
@@ -227,12 +329,18 @@ impl SegmentWriter2 {
         self.path.as_path()
     }
 
-    pub fn end(&mut self) -> Result<()> {
+    pub fn end(mut self) -> Result<()> {
         if let Some(rows) = self.cache.take() {
             self.write_chunk(rows.chunk)?;
         }
 
-        self.writer.end()?;
+        // NOTE: it is critical that the writer syncs the file as part of the
+        // end operation, otherwise the data in cache may be lost in recovery
+        // scenarios.
+        match self.writer {
+            WriteFormat::Parquet(mut p) => p.end()?,
+            WriteFormat::Arrow(a) => a.end()?,
+        }
 
         self.cache.destroy()?;
 
@@ -248,17 +356,18 @@ impl SegmentWriter2 {
         Ok(usize::try_from(main_size + cache_size)?)
     }
 
-    pub fn close(mut self) -> Result<usize> {
+    pub fn close(self) -> Result<usize> {
+        let mut parent = self.get_path().to_path_buf();
+        let size = self.size_estimate()?;
         self.end()?;
 
         // NOTE: the file data is now synchronized, but the file itself may not appear in the
         // parent directory on crash unless we fsync that too.
-        let mut parent = self.get_path().to_path_buf();
         parent.pop();
         let directory = fs::File::open(&parent)?;
         directory.sync_all()?;
 
-        self.size_estimate()
+        Ok(size)
     }
 }
 
@@ -282,11 +391,26 @@ pub mod test {
         pub fn nocommit() -> Self {
             Config {
                 durable_checkpoints: false,
+                arrow: false,
+            }
+        }
+
+        pub fn parquet() -> Self {
+            Config {
+                arrow: false,
+                ..Self::default()
+            }
+        }
+
+        pub fn arrow() -> Self {
+            Config {
+                arrow: true,
+                ..Self::default()
             }
         }
     }
 
-    impl SegmentWriter2 {
+    impl Writer {
         pub fn log_arrow<S: Borrow<Schema> + Clone + PartialEq>(
             &mut self,
             data: SchemaChunk<S>,
@@ -346,13 +470,13 @@ pub mod test {
     }
 
     #[test]
-    fn test_partial_cache_write() -> Result<()> {
+    fn test_interrupted_cache_write() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
         let s = Segment::at(path.clone());
 
         let a = inferences_schema_a();
-        let mut w = s.create2(a.schema.clone(), Config::default())?;
+        let mut w = s.create(a.schema.clone(), Config::default())?;
         w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
         drop(w);
 
@@ -361,22 +485,167 @@ pub mod test {
 
         let mut r = s.iter()?;
         assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
+        assert_eq!(r.next().map(|v| v.ok()), None);
 
         Ok(())
     }
 
     #[test]
-    fn test_cache_updates() -> Result<()> {
+    fn test_partial_cache_write() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
         let s = Segment::at(path.clone());
 
         let a = inferences_schema_a();
+        let mut w = s.create(a.schema.clone(), Config::default())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
 
-        let all_counts = vec![1, 3, 4, 2, 1];
+        let more = crate::chunk::concatenate(&[a.chunk.clone(), a.chunk.clone()])?;
+        w.log_arrows(&a.schema, vec![], Some(more))?;
+        drop(w);
+
+        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        f.set_len(f.metadata()?.len() - 15)?;
+
+        let mut r = s.iter()?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
+        assert_eq!(r.next().map(|v| v.ok()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_arrow_with_truncated_cache() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("partial-write.arrow");
+        let s = Segment::at(path.clone());
+
+        let a = inferences_schema_a();
+        let mut w = s.create(a.schema.clone(), Config::arrow())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+
+        let more = crate::chunk::concatenate(&[a.chunk.clone(), a.chunk.clone()])?;
+        w.log_arrows(&a.schema, vec![], Some(more))?;
+        drop(w);
+
+        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        f.set_len(f.metadata()?.len() - 15)?;
+
+        let mut r = s.iter()?;
+        // two chunks from file, one from cache (the other will have its frame
+        // interrupted by above corruption)
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.ok()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_arrow_corruption_with_cache_write() -> Result<()> {
+        let root = tempdir()?;
+        let path = root.path().join("partial-write.arrow");
+        let s = Segment::at(path.clone());
+
+        let a = inferences_schema_a();
+        let mut w = s.create(a.schema.clone(), Config::arrow())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+
+        let more = crate::chunk::concatenate(&[a.chunk.clone(), a.chunk.clone()])?;
+        w.log_arrows(&a.schema, vec![], Some(more))?;
+        drop(w);
+
+        let f = std::fs::File::options().append(true).open(s.path())?;
+        f.set_len(f.metadata()?.len() - 15)?;
+
+        let mut r = s.iter()?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        // we need to discard the whole cache because of the gap created above
+        assert_eq!(r.next().map(|v| v.ok()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_dual_format() -> Result<()> {
+        let root = tempdir()?;
+        let parquet = Segment::at(root.path().join("test.parquet"));
+        let arrow = Segment::at(root.path().join("test.arrow"));
+
+        let a = inferences_schema_a();
+
+        let mut w = parquet.create(a.schema.clone(), Config::default())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+        w.end()?;
+
+        let mut w = arrow.create(a.schema.clone(), Config::arrow())?;
+        w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
+        w.end()?;
+
+        // verify we don't need to provide the format here, it's autodetected
+        let mut r = parquet.iter()?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.ok()), None);
+
+        let mut r = arrow.iter()?;
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk.clone()));
+        assert_eq!(r.next().map(|v| v.unwrap()), Some(a.chunk));
+        assert_eq!(r.next().map(|v| v.ok()), None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_parquet_cache_updates() -> Result<()> {
+        let root = tempdir()?;
+
+        let a = inferences_schema_a();
+
+        let all_counts = [1, 3, 4, 2, 1];
         for ix in 1..all_counts.len() {
+            trace!("iter: {ix} counts: 1 + {:?}", &all_counts[0..ix]);
             let mut chunk = a.chunk.clone();
-            let mut w = s.create2(a.schema.clone(), Config::default())?;
+
+            let path = root.path().join(format!("{ix:?}.parquet"));
+            let s = Segment::at(path.clone());
+            let mut w = s.create(a.schema.clone(), Config::parquet())?;
+
+            for count in &all_counts[0..ix] {
+                let new_parts: Vec<_> = std::iter::once(chunk.clone())
+                    .chain(std::iter::repeat(a.chunk.clone()).take(*count))
+                    .collect();
+                chunk = crate::chunk::concatenate(&new_parts)?;
+                w.update_cache(chunk.clone())?;
+            }
+
+            drop(w);
+
+            let mut r = s.iter()?;
+            assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_arrow_cache_updates() -> Result<()> {
+        let root = tempdir()?;
+
+        let a = inferences_schema_a();
+
+        let all_counts = [1, 3, 4, 2, 1];
+        for ix in 1..all_counts.len() {
+            trace!("iter: {ix} counts: 1 + {:?}", &all_counts[0..ix]);
+            let mut chunk = a.chunk.clone();
+
+            let path = root.path().join(format!("{ix:?}.arrow"));
+            let s = Segment::at(path.clone());
+            let mut w = s.create(a.schema.clone(), Config::arrow())?;
 
             for count in &all_counts[0..ix] {
                 let new_parts: Vec<_> = std::iter::once(chunk.clone())

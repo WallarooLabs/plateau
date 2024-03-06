@@ -17,7 +17,7 @@ use crate::arrow2::{datatypes::Schema, io::ipc};
 use anyhow::Result;
 use plateau_client::ipc::read::StreamState;
 use plateau_transport::{SchemaChunk, SegmentChunk};
-use tracing::{debug, error, warn};
+use tracing::{debug, error, trace, warn};
 
 use super::{validate_header, PLATEAU_HEADER};
 
@@ -89,6 +89,7 @@ pub struct Writer {
 
 impl Writer {
     pub fn new(path: PathBuf, initial: SchemaChunk<Schema>, chunk_ix: u32) -> Result<Self> {
+        trace!("start {:?} with {}", path, initial.chunk.len());
         let mut file = fs::File::create(&path)?;
         file.write_all(PLATEAU_HEADER.as_bytes())?;
 
@@ -121,6 +122,7 @@ impl Writer {
 
         let new_len = chunk.len();
         let additional = crate::chunk::slice(chunk.clone(), self.len(), new_len - self.len());
+        trace!("{} => {}", self.len(), chunk.len());
         self.writer.write(&additional, None)?;
         self.partial.chunk = chunk;
 
@@ -178,9 +180,19 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
             .collect::<Vec<_>>();
 
         let concat = if chunks.is_empty() {
+            // This can really only happen if plateau / the system crashes while
+            // writing the first chunk to the stream. That seems unlikely enough
+            // to warn about.
+            warn!("could not read any chunks from cache at {:?}", path);
             return Ok(None);
         } else {
-            crate::chunk::concatenate(&chunks)?
+            let chunk = crate::chunk::concatenate(&chunks)?;
+            trace!(
+                "read {} rows ({} chunks) from cache",
+                chunk.len(),
+                chunks.len()
+            );
+            chunk
         };
 
         Ok(Some(Data {

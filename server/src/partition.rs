@@ -1396,15 +1396,18 @@ pub mod test {
 
         // first, corrupt the last file.
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
+        debug!("corrupting {last:?}");
         let f = std::fs::File::options().write(true).open(segment.path())?;
-        f.set_len(f.metadata().unwrap().len() - 10)?;
+        f.set_len(0)?;
 
         // delete the next data entry from the manifest
         let ix = last.prev().unwrap();
+        debug!("removing manifest entry for {ix:?}");
         manifest.remove_segment(ix.to_id(&spec.1)).await;
 
         // delete the next file entirely
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());
+        debug!("deleting {:?}", ix.prev().unwrap());
         segment.destroy()?;
 
         records.truncate(records.len() - 3 * 3);

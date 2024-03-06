@@ -28,7 +28,7 @@ use crate::chunk::{self, Schema, TimeRange};
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 #[cfg(test)]
 use crate::segment::Record;
-use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, SegmentWriter2};
+use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use metrics::counter;
@@ -584,7 +584,7 @@ fn spawn_slog_thread(
 
     let handle = std::thread::spawn(move || {
         let mut active = true;
-        let mut current: Option<(Schema, SegmentWriter2, SegmentIndex)> = None;
+        let mut current: Option<(Schema, Writer, SegmentIndex)> = None;
         let mut prior_size = 0;
         while active {
             match rx_records.blocking_recv() {
@@ -613,7 +613,7 @@ fn spawn_slog_thread(
                         (
                             schema.clone(),
                             new_segment
-                                .create2(schema, config.clone())
+                                .create(schema, config.clone())
                                 .expect("segment creation"),
                             segment,
                         )
