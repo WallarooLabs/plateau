@@ -683,7 +683,7 @@ mod test {
         let s = Segment::at(path);
 
         use sample_std::Sample;
-        let name = sample_std::Regex::new("[a-z]{4, 8}");
+        let mut name = sample_std::Regex::new("[a-z]{4, 8}");
         let mut g = sample_std::Random::new();
 
         let schema = Schema {
@@ -721,7 +721,7 @@ mod test {
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
 
-        let name = Regex::new("[a-z]{4, 8}");
+        let mut name = Regex::new("[a-z]{4, 8}");
         let mut g = Random::new();
 
         let schema = Schema {

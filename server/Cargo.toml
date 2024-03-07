@@ -55,9 +55,10 @@ reqwest = { version = "0.11", default-features = false, features = [
   "rustls-tls",
 ] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
-sample-test = "0.1"
-sample-std = "0.1"
-sample-arrow2 = "0.17"
+
+sample-test = "0.2.1"
+sample-std = "0.2.1"
+sample-arrow2 = "0.17.2"
 
 [build-dependencies]
 chrono = "0.4"
