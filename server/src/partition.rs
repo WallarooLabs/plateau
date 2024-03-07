@@ -675,6 +675,8 @@ pub mod test {
 
         assert_eq!(["0: m0", "1: m1", "2: m2"], result.as_slice());
 
+        partition.close().await;
+
         Ok(())
     }
 
@@ -700,6 +702,8 @@ pub mod test {
             .collect::<Vec<String>>();
 
         assert_eq!(["7: m7", "8: m8", "9: m9"], result.as_slice());
+
+        partition.close().await;
 
         Ok(())
     }
@@ -727,6 +731,8 @@ pub mod test {
 
         assert_eq!(["2: m2", "1: m1", "0: m0"], result.as_slice());
 
+        partition.close().await;
+
         Ok(())
     }
 
@@ -753,29 +759,7 @@ pub mod test {
 
         assert_eq!(["9: m9", "8: m8", "7: m7"], result.as_slice());
 
-        Ok(())
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_can_trigger_double_panic() -> Result<()> {
-        let id = PartitionId::new("topic", "testing");
-        let dir = tempdir()?;
-        let root = PathBuf::from(dir.path());
-        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let partition = Partition::attach(root, manifest, id, Config::default()).await;
-
-        partition
-            .extend_records(&[Record {
-                time: Utc::now(),
-                message: "foo".to_string().into_bytes(),
-            }])
-            .await?;
-        partition.checkpoint().await;
-
-        drop(dir);
-
-        assert_eq!(1, 2);
+        partition.close().await;
 
         Ok(())
     }
@@ -817,6 +801,8 @@ pub mod test {
         assert_eq!(["9: m4", "8: m3", "7: m2", "6: m1", "5: m0"], r[0..5]);
         assert_eq!(["4: m4", "3: m3", "2: m2", "1: m1", "0: m0"], r[5..10]);
 
+        partition.close().await;
+
         Ok(())
     }
 
@@ -826,7 +812,7 @@ pub mod test {
         let dir = tempdir()?;
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let t = Partition::attach(root, manifest, id, Config::default()).await;
+        let part = Partition::attach(root, manifest, id, Config::default()).await;
 
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
@@ -837,21 +823,23 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            t.extend_records(&[record.clone()]).await?;
+            part.extend_records(&[record.clone()]).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
             assert_eq!(
-                t.get_record_by_index(RecordIndex(ix)).await,
+                part.get_record_by_index(RecordIndex(ix)).await,
                 Some(record.clone()),
                 "mismatch at {}",
                 ix
             );
         }
         assert_eq!(
-            t.get_record_by_index(RecordIndex(records.len())).await,
+            part.get_record_by_index(RecordIndex(records.len())).await,
             None
         );
+
+        part.close().await;
 
         Ok(())
     }
@@ -867,7 +855,7 @@ pub mod test {
     }
 
     async fn test_rolling_get(commit: bool) -> Result<()> {
-        let (_dir, t) = partition(segment_3s()).await?;
+        let (_dir, part) = partition(segment_3s()).await?;
 
         let records: Vec<_> = vec!["abc", "def", "ghi", "jkl", "mno", "p"]
             .into_iter()
@@ -878,21 +866,21 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            t.extend_records(&[record.clone()]).await?;
+            part.extend_records(&[record.clone()]).await?;
         }
 
         if commit {
-            t.commit().await?;
+            part.commit().await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
             assert_eq!(
-                t.get_record_by_index(RecordIndex(ix)).await,
+                part.get_record_by_index(RecordIndex(ix)).await,
                 Some(record.clone())
             );
         }
         assert_eq!(
-            t.get_record_by_index(RecordIndex(records.len())).await,
+            part.get_record_by_index(RecordIndex(records.len())).await,
             None
         );
 
@@ -901,7 +889,7 @@ pub mod test {
             let slice = Vec::from(&records[range.clone()]);
             assert_eq!(
                 deindex(
-                    t.get_records(
+                    part.get_records(
                         RecordIndex(start),
                         RowLimit::records(limit),
                         &Ordering::Forward
@@ -912,6 +900,8 @@ pub mod test {
                 slice
             );
         }
+
+        part.close().await;
         Ok(())
     }
 
@@ -920,20 +910,7 @@ pub mod test {
         test_rolling_get(true).await
     }
 
-    // two threads are necessary because this test intermittently triggers a
-    // sneaky bug:
-    //
-    // - Slog::drop is called in an async task
-    // - this blocks, waiting on the writer thread to quit
-    // - meanwhile, the writer thread receives an append request, and attempts
-    //   to send a checkpoint back to the partition
-    // - BUT the checkpoint writer thread cannot progress because the entire
-    //   executor is blocked waiting on the drop
-    //
-    // we probably want to pull slog shutdown out of the drop method entirely so
-    // we can actually do it async instead of blocking, unless we want to wait
-    // for async drop
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[tokio::test]
     async fn test_rolling_get_cached() -> Result<()> {
         test_rolling_get(false).await
     }
@@ -1398,7 +1375,7 @@ pub mod test {
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
         debug!("corrupting {last:?}");
         let f = std::fs::File::options().write(true).open(segment.path())?;
-        f.set_len(0)?;
+        f.set_len(16)?;
 
         // delete the next data entry from the manifest
         let ix = last.prev().unwrap();

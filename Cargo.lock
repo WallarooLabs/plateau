@@ -740,6 +740,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad291aa74992b9b7a7e88c38acbbf6ad7e107f1d90ee8775b7bc1fc3394f485c"
+dependencies = [
+ "quote",
+ "syn 2.0.48",
+]
+
+[[package]]
 name = "dashmap"
 version = "4.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2422,6 +2432,7 @@ dependencies = [
  "bytesize",
  "chrono",
  "config",
+ "ctor 0.2.7",
  "futures",
  "humantime-serde",
  "itermore",
@@ -3135,7 +3146,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e76a3afdefd0ce2c0363bf3146271e947782240ea617885dd64e56c4de9fb3c9"
 dependencies = [
  "atomic-shim",
- "ctor",
+ "ctor 0.1.26",
  "libc",
  "mach",
  "once_cell",

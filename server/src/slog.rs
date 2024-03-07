@@ -781,8 +781,6 @@ mod test {
 
     #[tokio::test]
     async fn checkpoint_timeouts() -> Result<()> {
-        use tracing_subscriber::{fmt, EnvFilter};
-        fmt().with_env_filter(EnvFilter::from_default_env()).init();
         let root = tempdir().unwrap();
 
         let segment = SegmentIndex(0);

@@ -78,3 +78,13 @@ pub async fn task_from_config(
     end_tx.send(()).ok();
     Catalog::close_arc(catalog).await
 }
+
+#[cfg(test)]
+mod test {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    #[ctor::ctor]
+    fn init_logging() {
+        fmt().with_env_filter(EnvFilter::from_default_env()).init();
+    }
+}

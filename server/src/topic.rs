@@ -381,17 +381,13 @@ impl Topic {
 mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
-    use crate::limit::Retention;
     use crate::partition::test::{assert_limit_unreached, deindex};
-    use bytesize::ByteSize;
     use chrono::{TimeZone, Utc};
     use std::collections::HashSet;
     use std::convert::TryFrom;
     use std::iter::FromIterator;
     use std::str::FromStr;
-    use std::time::Instant;
     use tempfile::{tempdir, TempDir};
-    use tokio::sync::mpsc::channel;
 
     fn dummy_records<I, S>(s: I) -> Vec<Record>
     where
@@ -766,6 +762,8 @@ mod test {
         }
 
         assert_eq!(fetched.len(), records.len() * partitions_to_include.len());
+
+        topic.close().await;
 
         Ok(())
     }
@@ -1207,100 +1205,6 @@ mod test {
         );
 
         Ok(())
-    }
-
-    #[ignore]
-    #[tokio::test]
-    async fn test_bench() {
-        let dir = tempdir().unwrap();
-        let root = PathBuf::from(dir.path());
-        let partitions = 4;
-        let sample = 40 * 1000;
-        let total = sample * 15;
-
-        let mut handles = vec![];
-        let (otx, mut rx) = channel(1024);
-        for part in 0..partitions {
-            let tx = otx.clone();
-            let data = vec!["x"; 128].join("");
-            let thread_root = root.clone();
-            let p = format!("part-{}", part);
-            let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-            let handle = tokio::spawn(async move {
-                let t = Topic::attach(
-                    thread_root,
-                    manifest,
-                    String::from("testing"),
-                    PartitionConfig {
-                        retain: Retention {
-                            max_bytes: ByteSize::mib(50),
-                            ..Retention::default()
-                        },
-                        ..PartitionConfig::default()
-                    },
-                )
-                .await;
-
-                let seed = 0..sample;
-                let records: Vec<_> = seed
-                    .clone()
-                    .map(|message| Record {
-                        time: Utc.timestamp_opt(0, 0).unwrap(),
-                        message: format!("{{ \"data\": \"{}-{}\" }}", data, message).into_bytes(),
-                    })
-                    .collect();
-
-                let mut ix = 0;
-                let mut prev = None;
-                use itermore::IterMore;
-                for rs in records.iter().cycle().take(total).chunks::<10000>() {
-                    let now = Utc.timestamp_opt(0, 0).unwrap();
-                    let rs: Vec<Record> = rs
-                        .iter()
-                        .cloned()
-                        .map(|r| {
-                            let mut c = r.clone();
-                            c.time = now;
-                            c
-                        })
-                        .collect();
-
-                    t.extend_records(&p, &rs).await.unwrap();
-                    if let Some(prev_ix) = prev {
-                        tx.send(ix - prev_ix).await.unwrap();
-                    }
-                    prev = Some(ix);
-                    ix += rs.len();
-                }
-                t.commit().await.unwrap();
-                tx.send(total - prev.unwrap_or(0)).await.unwrap();
-            });
-            handles.push(handle);
-        }
-
-        let start = Instant::now();
-        let mut written = 0;
-        while written < total * partitions {
-            written += rx.recv().await.unwrap();
-            println!(
-                "{}/{} elapsed: {}ms",
-                written,
-                total * partitions,
-                (Instant::now() - start).as_millis()
-            );
-        }
-        let elapsed_ms = (Instant::now() - start).as_millis();
-        println!(
-            "written: {} / elapsed: {}ms ({:.2}kw/s)",
-            written,
-            elapsed_ms,
-            f64::from(i32::try_from(written).unwrap())
-                / f64::from(i32::try_from(elapsed_ms).unwrap())
-        );
-
-        for handle in handles {
-            handle.await.unwrap();
-        }
     }
 }
 
