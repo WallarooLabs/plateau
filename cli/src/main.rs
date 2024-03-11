@@ -95,6 +95,14 @@ enum Command {
         #[structopt(flatten)]
         params: TopicIterationQuery,
     },
+    #[cfg(feature = "polars")]
+    /// Iterate through records with Polars
+    IterateUnlimited {
+        /// Topic name
+        topic_name: String,
+        #[structopt(flatten)]
+        params: TopicIterationQuery,
+    },
     /// Insert a single record
     Insert {
         /// Topic name
@@ -288,6 +296,15 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
                     &Some(HashMap::from([(partition_name, position)])),
                 )
                 .await?;
+            print!("{}", response);
+        }
+        #[cfg(feature = "polars")]
+        Command::IterateUnlimited { topic_name, params } => {
+            let response: polars::frame::DataFrame =
+                client.iterate_topic_unlimited(&topic_name, &params).await?;
+
+            print!("{:?}", response.describe(None));
+            print!("{:#?}", response.schema());
             print!("{}", response);
         }
         Command::Insert {

@@ -474,6 +474,16 @@ impl Iterate<ArrowIterationReply> for Client {
         Ok(ArrowIterationReply { chunks, status })
     }
 }
+/// Trait for iterating through a topic's records, returning all available records in the Output format.
+/// This will consume lots of memory.
+#[async_trait]
+pub trait IterateUnlimited<Output> {
+    async fn iterate_topic_unlimited(
+        &self,
+        topic_name: impl AsRef<str> + Send + std::marker::Copy,
+        params: &TopicIterationQuery,
+    ) -> Result<Output, Error>;
+}
 
 #[async_trait]
 impl Iterate<TopicIterationReply> for Client {
@@ -552,6 +562,72 @@ impl Iterate<polars::frame::DataFrame> for Client {
         .map_err(Error::Server)?;
 
         bytes_into_polars(bytes)
+    }
+}
+
+#[cfg(feature = "polars")]
+#[async_trait]
+impl IterateUnlimited<polars::frame::DataFrame> for Client {
+    /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
+    async fn iterate_topic_unlimited(
+        &self,
+        topic_name: impl AsRef<str> + Send + Copy,
+        params: &TopicIterationQuery,
+    ) -> Result<polars::frame::DataFrame, Error> {
+        let mut cursor = Some(TopicIterator::new());
+        let mut ret_df: Option<polars::frame::DataFrame> = None;
+
+        loop {
+            let response = process_request(
+                self.iteration_request(topic_name, params, &cursor)?
+                    .header("accept", CONTENT_TYPE_ARROW),
+            )
+            .await?;
+
+            tracing::debug!("Iterate Unlimited Response: {:?}", response);
+
+            let headers = response.headers().get("x-iteration-status").cloned();
+
+            let bytes = response.bytes().await.map_err(Error::Server)?;
+
+            let temp_df = bytes_into_polars(bytes)?;
+
+            if temp_df.width() <= 0 {
+                break;
+            }
+
+            if let Some(df) = &ret_df {
+                tracing::debug!(df=?df);
+
+                // Polars 0.32:
+                // Prefer vstack over extend when you want to append many times before doing a query.
+                // For instance when you read in multiple files and when to store them in a single DataFrame.
+                // In the latter case, finish the sequence of append operations with a rechunk.
+                let new_df = df.vstack(&temp_df).map_err(Error::PolarsParse)?;
+                ret_df = Some(new_df);
+            } else {
+                ret_df = Some(temp_df);
+            }
+
+            if let Some(status) = headers {
+                let s: TopicIterationStatus =
+                    serde_json::from_str(status.to_str().unwrap()).unwrap();
+
+                if s.status == RecordStatus::All {
+                    break;
+                } else if s.status == RecordStatus::SchemaChange {
+                    tracing::warn!(
+                        "A schema change was found during (probably assay) Iterate Unlimited calculations"
+                    );
+                    break;
+                }
+                cursor = Some(s.next);
+            } else {
+                break;
+            }
+        }
+
+        ret_df.ok_or(Error::EmptyStream)
     }
 }
 

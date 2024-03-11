@@ -7,7 +7,7 @@ edition = "2021"
 [dependencies]
 plateau-transport = { path = "../transport", features = ["structopt-cli"] }
 plateau-client = { path = "../client" }
-polars = { version = "*", features = ["ipc", "dtype-full"], optional = true }
+polars = { version = "0.32", features = ["ipc", "dtype-full"], optional = true }
 structopt = "0.3"
 url = "2"
 tokio = { version = "1", features = ["full"] }
