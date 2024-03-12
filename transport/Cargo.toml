@@ -28,7 +28,7 @@ strum = { version = "0.24", features = ["derive"] }
 chrono = "0.4"
 thiserror = "1"
 regex = "1.10"
-utoipa = { version = "3", features = ["axum_extras"] }
+utoipa = { version = "4", features = ["axum_extras"] }
 
 [features]
 default = ["rweb"]

@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.4", features = ["trace"]}
+tower-http = { version = "0.4", features = ["trace"] }
 sqlx = { version = "0.7", features = [
   "chrono",
   "sqlite",
@@ -43,8 +43,8 @@ sqlx = { version = "0.7", features = [
 ] }
 systemstat = "0.2"
 rand = "0.8"
-utoipa = { version = "3", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "3", features = ["axum"] }
+utoipa = { version = "4", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "4", features = ["axum"] }
 uuid = "1.4"
 regex = "1.10"
 
