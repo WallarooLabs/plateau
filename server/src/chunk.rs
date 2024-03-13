@@ -10,7 +10,7 @@ use crate::arrow2::{
     datatypes::{DataType, Field, Metadata},
 };
 use crate::manifest::Ordering;
-use chrono::{DateTime, Duration, TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
@@ -39,7 +39,7 @@ pub fn chunk_into_legacy(chunk: SegmentChunk, order: &Ordering) -> Vec<Record> {
 }
 
 pub fn parse_time(tv: i64) -> DateTime<Utc> {
-    Utc.timestamp_opt(0, 0).unwrap() + Duration::milliseconds(tv)
+    Utc.timestamp_millis_opt(tv).unwrap()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
