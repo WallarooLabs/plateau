@@ -34,6 +34,7 @@ pub struct Topic {
     config: PartitionConfig,
 }
 
+#[derive(Debug)]
 pub(crate) struct TopicRecordResponse {
     pub(crate) iter: TopicIterator,
     pub(crate) batch: LimitedBatch,
@@ -762,6 +763,68 @@ mod test {
         }
 
         assert_eq!(fetched.len(), records.len() * partitions_to_include.len());
+
+        topic.close().await;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn select_non_existent_partition() -> Result<()> {
+        let (_tmpdir, topic) = scratch().await;
+        let records_per_part = 103;
+        let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{ix}"))));
+
+        // Create 3 partitions
+        for (_, record) in records.iter().enumerate() {
+            topic
+                .extend_records("partition-0", &[record.clone()])
+                .await?;
+            topic
+                .extend_records("partition-1", &[record.clone()])
+                .await?;
+            topic
+                .extend_records("partition-2", &[record.clone()])
+                .await?;
+        }
+        topic.commit().await?;
+
+        let mut it: TopicIterator = HashMap::new();
+        let mut fetched = vec![];
+        let fetch_count = 1000;
+
+        // The above creates partitions (0..parts), but we want to expicitely ask for non-existent partition
+        let partitions_to_include = [0, 1, 3];
+        let filter: Vec<PartitionSelector> = partitions_to_include
+            .into_iter()
+            .map(|s| PartitionSelector::from_str(&format!("partition-{s}")).unwrap())
+            .collect();
+
+        let expected_data_len = records.len() * 2; // Only two valid partitions
+
+        for _ in 0..records.len() {
+            let result = topic
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    &Ordering::Forward,
+                    Some(filter.clone()),
+                )
+                .await;
+
+            let status = result.batch.status;
+            fetched.extend(result.batch.into_legacy().unwrap());
+
+            if fetched.len() >= expected_data_len {
+                assert_limit_unreached(&status);
+                break;
+            } else {
+                assert_eq!(status, BatchStatus::RecordsExceeded);
+            }
+            it = result.iter;
+        }
+
+        assert_eq!(fetched.len(), expected_data_len);
 
         topic.close().await;
 

@@ -106,6 +106,7 @@ impl BatchStatus {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct LimitedBatch {
     pub(crate) schema: Option<Schema>,
     pub(crate) chunks: Vec<IndexedChunk>,
