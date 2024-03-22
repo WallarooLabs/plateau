@@ -79,6 +79,7 @@ pub trait SegmentIterator: DoubleEndedIterator<Item = Result<SegmentChunk>> {
     fn schema(&self) -> &Schema;
 }
 
+#[derive(Clone, Debug)]
 pub struct Segment {
     path: PathBuf,
 }
@@ -117,19 +118,47 @@ impl Segment {
             )?)
         };
 
+        let cache = cache::ActiveChunk::new(self.cache_path());
         Ok(Writer {
-            path: self.path.clone(),
+            segment: self.clone(),
             writer,
             schema,
             chunk_ix: 0,
-            cache: cache::ActiveChunk::new(self.cache_path()),
+            cache,
         })
     }
 
-    pub(crate) fn destroy(&self) -> Result<()> {
-        parquet::Segment::new(self.path.clone())?.destroy()?;
+    pub(crate) fn parts(&self) -> impl Iterator<Item = PathBuf> {
+        let parquet_parts = parquet::Segment::new(self.path.clone())
+            .map(|s| s.parts())
+            .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
+            .ok();
 
-        if Path::exists(&self.cache_path()) {
+        let arrow_parts = arrow::Segment::new(self.path.clone())
+            .map(|s| s.parts())
+            .inspect_err(|e| error!("error enumerating arrow parts for {:?}, {e:?}", self.path))
+            .ok();
+
+        parquet_parts
+            .into_iter()
+            .flatten()
+            .chain(arrow_parts.into_iter().flatten())
+    }
+
+    pub(crate) fn destroy(&self) -> Result<()> {
+        if self.path.exists() {
+            fs::remove_file(&self.path)?;
+        } else {
+            warn!("main segment file at {:?} missing", self.path);
+        }
+
+        for part in self.parts().filter(|p| p.exists()) {
+            fs::remove_file(&part)
+                .inspect_err(|e| error!("error removing part {part:?}: {e:?}"))
+                .ok();
+        }
+
+        if self.cache_path().exists() {
             fs::remove_file(self.cache_path())?;
         }
 
@@ -201,6 +230,17 @@ impl Segment {
         assert!(path.set_extension("arrows"));
         path
     }
+
+    /// Return an estimate of the on-disk size of the corresponding file(s),
+    /// excluding the active chunk cache.
+    pub fn size_estimate(&self) -> Result<usize> {
+        let main_size = fs::metadata(&self.path).map(|p| p.len()).unwrap_or(0);
+        let part_size: u64 = self
+            .parts()
+            .map(|part| fs::metadata(part).map(|p| p.len()).unwrap_or(0))
+            .sum();
+        Ok(usize::try_from(main_size + part_size)?)
+    }
 }
 
 enum ReadFormat {
@@ -247,7 +287,7 @@ enum WriteFormat {
 }
 
 pub struct Writer {
-    path: PathBuf,
+    segment: Segment,
     writer: WriteFormat,
     schema: Schema,
     chunk_ix: u32,
@@ -326,7 +366,7 @@ impl Writer {
     }
 
     fn get_path(&self) -> &Path {
-        self.path.as_path()
+        &self.segment.path
     }
 
     pub fn end(mut self) -> Result<()> {
@@ -348,12 +388,10 @@ impl Writer {
     }
 
     /// Return an estimate of the on-disk size of the corresponding file(s).
-    /// Note that this will _not_ include the checkpoint, in-flight checkpoint,
-    /// or final footer (unless this segment has been sealed).
     pub fn size_estimate(&self) -> Result<usize> {
-        let main_size = fs::metadata(self.get_path()).map(|p| p.len()).unwrap_or(0);
-        let cache_size = self.cache.size();
-        Ok(usize::try_from(main_size + cache_size)?)
+        let segment_size = self.segment.size_estimate()?;
+        let cache_size = self.cache.size() as usize;
+        Ok(segment_size + cache_size)
     }
 
     pub fn close(self) -> Result<usize> {
@@ -386,6 +424,7 @@ pub mod test {
     };
     use sample_std::{Chance, Regex};
     use tempfile::tempdir;
+    use test::arrow::test::partial_write;
 
     impl Config {
         pub fn nocommit() -> Self {
@@ -659,6 +698,27 @@ pub mod test {
 
             let mut r = s.iter()?;
             assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_partial_write_size_destroy() -> Result<()> {
+        let root = tempdir()?;
+        let a = inferences_schema_a();
+        let arrow_segment = partial_write(root.path(), a.clone())?;
+
+        let paths: Vec<_> = arrow_segment.clone().parts().collect();
+        let segment = Segment::at(arrow_segment.into_path());
+
+        segment.iter()?.count();
+
+        assert!(segment.size_estimate()? > fs::metadata(&segment.path)?.len() as usize);
+        segment.destroy()?;
+
+        for path in paths {
+            assert!(!path.exists());
         }
 
         Ok(())

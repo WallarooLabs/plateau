@@ -52,6 +52,7 @@ pub fn check_file(f: &mut fs::File) -> Result<bool> {
     Ok(buffer.into_iter().eq(PARQUET_HEADER.bytes()))
 }
 
+#[derive(Clone, Debug)]
 pub struct Segment {
     path: PathBuf,
     checkpoint_path: PathBuf,
@@ -84,23 +85,16 @@ impl Segment {
         Reader::open(self, cache)
     }
 
-    fn clear_checkpoints(&self) -> Result<()> {
-        if Path::exists(&self.checkpoint_path) {
-            fs::remove_file(&self.checkpoint_path)?;
-        }
-
-        if Path::exists(&self.checkpoint_tmp_path) {
-            fs::remove_file(&self.checkpoint_tmp_path)?;
-        }
-
-        Ok(())
+    pub fn parts(self) -> impl Iterator<Item = PathBuf> {
+        [self.checkpoint_path, self.checkpoint_tmp_path].into_iter()
     }
 
-    pub fn destroy(&self) -> Result<()> {
-        self.clear_checkpoints()?;
-
-        fs::remove_file(&self.path)?;
-
+    pub fn rm_parts(&self) -> Result<()> {
+        for part in self.clone().parts() {
+            if part.exists() {
+                fs::remove_file(&part)?;
+            }
+        }
         Ok(())
     }
 }
@@ -237,7 +231,7 @@ impl Writer {
         self.writer.end(self.key_value_metadata.clone())?;
         self.file.sync_data()?;
 
-        self.segment.clear_checkpoints()?;
+        self.segment.rm_parts()?;
 
         Ok(())
     }

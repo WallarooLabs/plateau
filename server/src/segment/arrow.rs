@@ -40,6 +40,7 @@ pub fn check_file(f: &mut fs::File) -> Result<bool> {
     Ok(buffer.into_iter().eq(ARROW_HEADER.bytes()))
 }
 
+#[derive(Clone, Debug)]
 pub struct Segment {
     path: PathBuf,
     recovery_path: PathBuf,
@@ -191,24 +192,12 @@ impl Segment {
         Ok((recovered_rows, Reader::open(&self.recovered_path)?))
     }
 
-    fn clear_recovery(&self) -> Result<()> {
-        if Path::exists(&self.recovery_path) {
-            std::fs::remove_file(&self.recovery_path)?;
-        }
-
-        Ok(())
+    pub fn parts(self) -> impl Iterator<Item = PathBuf> {
+        [self.recovery_path, self.recovered_path].into_iter()
     }
 
-    pub fn destroy(&self) -> Result<()> {
-        self.clear_recovery()?;
-
-        if Path::exists(&self.recovered_path) {
-            fs::remove_file(&self.recovered_path)?;
-        }
-
-        fs::remove_file(&self.path)?;
-
-        Ok(())
+    pub fn into_path(self) -> PathBuf {
+        self.path
     }
 }
 
@@ -321,7 +310,7 @@ impl SegmentIterator for Reader {
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use plateau_transport::SchemaChunk;
     use sample_arrow2::chunk::{ChainedChunk, ChainedMultiChunk};
     use sample_std::{Random, Regex, Sample};
@@ -499,7 +488,7 @@ mod test {
         Ok(())
     }
 
-    fn partial_write(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
+    pub fn partial_write(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
         let path = root.as_ref().join("partial-write.arrow");
         let s = Segment::new(path.clone())?;
 
