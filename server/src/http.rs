@@ -33,7 +33,7 @@ use plateau_transport::{
     TopicIterator, Topics,
 };
 
-use crate::axum_util::{query::Query, Response};
+pub use crate::axum_util::{query::Query, Response};
 use crate::catalog::Catalog;
 use crate::http::chunk::SchemaChunkRequest;
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
@@ -44,7 +44,7 @@ use crate::topic::Record;
 mod chunk;
 mod error;
 
-use self::error::ErrorReply;
+pub use self::error::ErrorReply;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -121,7 +121,7 @@ pub async fn serve(
             "/topic/:topic_name/partition/:partition_name",
             post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes as usize)),
         )
-        .route("/topic/:topic_name/records", post(topic_iterate))
+        .route("/topic/:topic_name/records", post(topic_iterate_route))
         .route("/topic/:topic_name", get(topic_get_partitions))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
@@ -369,7 +369,7 @@ where
     ),
     request_body(content = TopicIterator, content_type = "application/json"),
   )]
-async fn topic_iterate(
+async fn topic_iterate_route(
     State(AppState(catalog, config)): State<AppState>,
     Path(topic_name): Path<String>,
     query: Option<Query<TopicIterationQuery>>,
@@ -377,27 +377,23 @@ async fn topic_iterate(
     position: Option<Json<TopicIterator>>,
 ) -> Result<axum::response::Response, ErrorReply> {
     let max_page = config.http.max_page;
-    topic_iterate_internal(
-        topic_name,
-        query.map(|Query(query)| query).unwrap_or_default(),
-        headers
-            .get(ACCEPT)
-            .and_then(|header| header.to_str().ok().map(ToString::to_string)),
-        position.map(|Json(value)| value),
-        catalog,
-        max_page,
-    )
-    .await
+    topic_iterate(topic_name, query, headers, position, catalog, max_page).await
 }
 
-async fn topic_iterate_internal(
+pub async fn topic_iterate(
     topic_name: String,
-    query: TopicIterationQuery,
-    content: Option<String>,
-    position: Option<TopicIterator>,
+    query: Option<Query<TopicIterationQuery>>,
+    headers: HeaderMap,
+    position: Option<Json<TopicIterator>>,
     catalog: Arc<Catalog>,
     max_page: RowLimit,
 ) -> Result<axum::response::Response, ErrorReply> {
+    let query = query.map(|Query(query)| query).unwrap_or_default();
+    let content = headers
+        .get(ACCEPT)
+        .and_then(|header| header.to_str().ok().map(ToString::to_string));
+    let position = position.map(|Json(value)| value);
+
     let topic = catalog.get_topic(&topic_name).await;
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let position = position.unwrap_or_default();
@@ -541,7 +537,7 @@ fn parse_time_range(
         get_topics,
         topic_append,
         topic_get_partitions,
-        topic_iterate,
+        topic_iterate_route,
         partition_get_records,
     ),
     components(

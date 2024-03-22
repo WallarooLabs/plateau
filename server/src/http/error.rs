@@ -3,7 +3,7 @@ use axum::http::StatusCode;
 use plateau_transport::{headers::MAX_REQUEST_SIZE_HEADER, ChunkError, ErrorMessage, PathError};
 
 #[derive(Debug)]
-pub(crate) enum ErrorReply {
+pub enum ErrorReply {
     Arrow(ArrowError),
     Chunk(ChunkError),
     Path(PathError),

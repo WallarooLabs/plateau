@@ -44,7 +44,7 @@ pub fn exit_signal<'a>() -> future::BoxFuture<'a, ()> {
 }
 
 /// Async task that runs the full plateau server stack from a user-provided
-/// [PlateauConfig]
+/// [config::PlateauConfig].
 ///
 /// Attempts a clean shutdown when the provided `stop` signal is received (i.e.
 /// [exit_signal]).
@@ -58,6 +58,19 @@ pub async fn task_from_config(
             .expect("error opening catalog"),
     );
 
+    task_from_catalog_config(catalog, config, stop).await
+}
+
+/// Async task that runs the full plateau server stack from a user-provided
+/// [Catalog] and [config::PlateauConfig]
+///
+/// Attempts a clean shutdown when the provided `stop` signal is received (i.e.
+/// [exit_signal]).
+pub async fn task_from_catalog_config(
+    catalog: Arc<Catalog>,
+    config: config::PlateauConfig,
+    stop: future::BoxFuture<'_, ()>,
+) -> bool {
     let (addr, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
     {
         use futures::future::FutureExt;

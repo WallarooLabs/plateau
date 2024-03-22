@@ -258,15 +258,11 @@ impl Client {
 
     fn iteration_request<'a>(
         &self,
-        topic_name: impl AsRef<str>,
+        path: impl AsRef<str>,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>>,
     ) -> Result<RequestBuilder, Error> {
-        let mut url = self
-            .server_url
-            .try_join("topic/")?
-            .try_join(add_trailing_slash(topic_name))?
-            .try_join("records")?;
+        let mut url = self.server_url.try_join(path)?;
         url.set_query(Some(&serde_qs::to_string(params)?));
 
         let base_request = self.http_client.post(url);
@@ -431,6 +427,15 @@ pub fn bytes_into_polars(bytes: Bytes) -> Result<polars::frame::DataFrame, Error
 ///  `Output` format.
 #[async_trait]
 pub trait Iterate<Output> {
+    /// Iterate from a given URL, returning records in `Output` format. See
+    /// [TopicIterationQuery] for more details on the parameters.
+    async fn iterate_path<'a>(
+        &self,
+        path: impl AsRef<str> + Send,
+        params: &TopicIterationQuery,
+        position: impl Into<Option<&'a TopicIterator>> + Send,
+    ) -> Result<Output, Error>;
+
     /// Iterate over a topic, returning records in `Output` format. See [TopicIterationQuery] for
     /// more details on the parameters.
     async fn iterate_topic<'a>(
@@ -438,7 +443,10 @@ pub trait Iterate<Output> {
         topic_name: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
-    ) -> Result<Output, Error>;
+    ) -> Result<Output, Error> {
+        let path = format!("topic/{}/records", topic_name.as_ref());
+        self.iterate_path(path, params, position).await
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -450,14 +458,14 @@ pub struct ArrowIterationReply {
 #[async_trait]
 impl Iterate<ArrowIterationReply> for Client {
     /// Iterate over a topic, returning records in a full [`ArrowIterationReply`].
-    async fn iterate_topic<'a>(
+    async fn iterate_path<'a>(
         &self,
-        topic_name: impl AsRef<str> + Send,
+        path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<ArrowIterationReply, Error> {
         let response = process_request(
-            self.iteration_request(topic_name, params, position)?
+            self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
         )
         .await?;
@@ -488,14 +496,14 @@ pub trait IterateUnlimited<Output> {
 #[async_trait]
 impl Iterate<TopicIterationReply> for Client {
     /// Iterate over a topic, returning records in [TopicIterationReply] (plaintext) format.
-    async fn iterate_topic<'a>(
+    async fn iterate_path<'a>(
         &self,
-        topic_name: impl AsRef<str> + Send,
+        path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<TopicIterationReply, Error> {
         process_deserialize_request(
-            self.iteration_request(topic_name, params, position)?
+            self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_JSON),
         )
         .await
@@ -506,14 +514,14 @@ impl Iterate<TopicIterationReply> for Client {
 impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
     /// Iterate over a topic, returning records in streaming format. The data stream should be
     /// deserializeable into a [`SchemaChunk<Schema>`] format.
-    async fn iterate_topic<'a>(
+    async fn iterate_path<'a>(
         &self,
-        topic_name: impl AsRef<str> + Send,
+        path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<Pin<Box<dyn ArrowStream>>, Error> {
         process_request_into_stream(
-            self.iteration_request(topic_name, params, position)?
+            self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
         )
         .await
@@ -523,14 +531,14 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
 #[async_trait]
 impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
     /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
-    async fn iterate_topic<'a>(
+    async fn iterate_path<'a>(
         &self,
-        topic_name: impl AsRef<str> + Send,
+        path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
         let bytes = process_request(
-            self.iteration_request(topic_name, params, position)?
+            self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
         )
         .await?
@@ -546,14 +554,14 @@ impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
 #[async_trait]
 impl Iterate<polars::frame::DataFrame> for Client {
     /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
-    async fn iterate_topic<'a>(
+    async fn iterate_path<'a>(
         &self,
-        topic_name: impl AsRef<str> + Send,
+        path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
     ) -> Result<polars::frame::DataFrame, Error> {
         let bytes = process_request(
-            self.iteration_request(topic_name, params, position)?
+            self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
         )
         .await?
