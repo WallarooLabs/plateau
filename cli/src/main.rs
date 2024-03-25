@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Error};
 use futures::StreamExt;
+#[cfg(feature = "polars")]
+use plateau_client::IterateUnlimited;
 use plateau_transport::{
     Insert, InsertQuery, RecordQuery, Records, TopicIterationQuery, TopicIterationReply,
 };
@@ -303,7 +305,6 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
             let response: polars::frame::DataFrame =
                 client.iterate_topic_unlimited(&topic_name, &params).await?;
 
-            print!("{:?}", response.describe(None));
             print!("{:#?}", response.schema());
             print!("{}", response);
         }

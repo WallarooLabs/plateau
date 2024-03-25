@@ -600,7 +600,7 @@ impl IterateUnlimited<polars::frame::DataFrame> for Client {
 
             let temp_df = bytes_into_polars(bytes)?;
 
-            if temp_df.width() <= 0 {
+            if temp_df.width() == 0 {
                 break;
             }
 
