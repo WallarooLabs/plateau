@@ -24,7 +24,7 @@ pub fn start_metrics(config: Config) {
         let socket_addr = SocketAddr::from_str(&bind).unwrap();
 
         builder
-            .listen_address(socket_addr)
+            .with_http_listener(socket_addr)
             .add_global_label("system", "plateau")
             .install()
             .expect("failed to install Prometheus recorder");

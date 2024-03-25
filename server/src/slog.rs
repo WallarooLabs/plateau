@@ -411,7 +411,7 @@ impl Slog {
     }
 
     pub(crate) async fn roll(&self) -> Result<()> {
-        counter!("slog_roll", 1, "name" => self.name.clone());
+        counter!("slog_roll", "name" => self.name.clone()).increment(1);
         self.state.write().await.roll().await
     }
 
@@ -638,9 +638,9 @@ fn spawn_slog_thread(
                     prior_size = size;
                     counter!(
                         "slog_thread_records_written",
-                        u64::try_from(record_len).unwrap(),
                         "name" => name.clone()
-                    );
+                    )
+                    .increment(u64::try_from(record_len).unwrap());
 
                     if seal {
                         prior_size = 0;

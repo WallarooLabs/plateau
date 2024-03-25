@@ -344,10 +344,10 @@ impl Partition {
         let size = self.byte_size().await;
         gauge!(
             "partition_size_bytes",
-            size as f64,
             "topic" => String::from(self.id.topic()),
             "partition" => String::from(self.id.partition())
-        );
+        )
+        .increment(size as f64);
         if size > (retain.max_bytes.as_u64() as usize) {
             info!("over limit {}: current size is {}", self.id, size);
             return true;
@@ -369,10 +369,10 @@ impl Partition {
             let segments = max.0 - min.0 + 1;
             gauge!(
                 "partition_size_segments",
-                segments as f64,
                 "topic" => String::from(self.id.topic()),
                 "partition" => String::from(self.id.partition())
-            );
+            )
+            .increment(segments as f64);
             if segments > count {
                 info!("over limit {}: {:?}..={:?}", self.id, min, max);
                 return true;
@@ -443,9 +443,10 @@ impl State {
         if !self.messages.active_schema_matches(new_schema).await {
             let partition_id = format!("{}", partition.id);
             counter!(
-                "partition_schema_change", 1,
+                "partition_schema_change",
                 "partition" => partition_id,
-            );
+            )
+            .increment(1);
 
             if *self.commits.borrow() != RecordIndex(0) {
                 warn!(
@@ -578,10 +579,10 @@ impl State {
             info!("retain {}: destroyed {:?}", partition.id, ix);
             counter!(
                 "partition_segments_destroyed",
-                1,
                 "topic" => String::from(partition.id.topic()),
                 "partition" => String::from(partition.id.partition())
             )
+            .increment(1);
         }
     }
 
