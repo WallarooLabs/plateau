@@ -193,15 +193,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ae037714f313c1353189ead58ef9eec30a8e8dc101b2622d461418fd59e28a9"
 
 [[package]]
-name = "atomic-shim"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d20fdac7156779a1a30d970e838195558b4810dd06aa69e7c7461bdc518edf9b"
-dependencies = [
- "crossbeam",
-]
-
-[[package]]
 name = "atomic-write-file"
 version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2509,9 +2500,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0f5efe734b6cbe5f97ea769be8360df5324fade396f1f3f5ad7fe9360ca4a23"
 dependencies = [
  "ahash 0.8.11",
- "bytemuck",
- "arrow2",
  "bitflags 2.5.0",
+ "bytemuck",
  "chrono",
  "comfy-table",
  "either",
@@ -2631,8 +2621,8 @@ version = "0.36.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9b7ead073cc3917027d77b59861a9f071db47125de9314f8907db1a0a3e4100"
 dependencies = [
- "crossbeam-channel 0.5.12",
- "crossbeam-queue 0.3.11",
+ "crossbeam-channel",
+ "crossbeam-queue",
  "enum_dispatch",
  "hashbrown 0.14.3",
  "num-traits",
@@ -2728,7 +2718,7 @@ dependencies = [
  "ahash 0.8.11",
  "bytemuck",
  "hashbrown 0.14.3",
- "indexmap 2.2.5",
+ "indexmap 2.2.6",
  "num-traits",
  "once_cell",
  "polars-error",
