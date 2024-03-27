@@ -59,19 +59,19 @@ pub enum Error {
     RequestTooLong(MaxRequestSize),
     #[error("The request failed: {0}")]
     RequestFailed(String),
-    #[error("Error from server: {0}")]
+    #[error("Error from plateau server: {0}")]
     Server(reqwest::Error),
-    #[error("Error deserializing server response: {0}")]
+    #[error("Error deserializing plateau server response: {0}")]
     Deserialize(reqwest::Error),
-    #[error("Error streaming server request: {0}")]
+    #[error("Error streaming plateau server request: {0}")]
     ArrowSerialize(ArrowError),
-    #[error("Error streaming server response: {0}")]
+    #[error("Error streaming plateau server response: {0}")]
     ArrowDeserialize(ArrowError),
     #[error("Error parsing json: {0}")]
     BadJson(#[from] serde_json::Error),
-    #[error("Server unhealthy")]
+    #[error("plateau server unhealthy")]
     Unhealthy,
-    #[error("Empty stream from server")]
+    #[error("Empty stream from plateau server")]
     EmptyStream,
     #[error("Schemas do not match")]
     SchemaMismatch,
