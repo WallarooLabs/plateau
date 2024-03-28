@@ -6,27 +6,25 @@ use axum::{
     async_trait,
     body::{boxed, Full, HttpBody},
     extract::{
-        rejection::{BytesRejection, FailedToBufferBody, JsonRejection},
-        FromRef, FromRequest, Query,
+        rejection::{BytesRejection, FailedToBufferBody},
+        FromRef, FromRequest,
     },
     headers::ContentType,
     http::{header::CONTENT_TYPE, Request, StatusCode},
     response::Response,
-    BoxError, Json, RequestExt as _,
+    BoxError, RequestExt as _,
 };
 
 use bytes::Bytes;
-use chrono::{DateTime, Utc};
-use futures::TryFutureExt as _;
 use std::io::{Cursor, Write};
 
 use plateau_transport::{
-    headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, Insert, InsertQuery,
-    SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
+    headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, SchemaChunk,
+    SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
 };
 
 use crate::{
-    chunk::{new_schema_chunk, LegacyRecords, Record, Schema},
+    chunk::{new_schema_chunk, Schema},
     http::error::ErrorReply,
     limit::LimitedBatch,
 };
@@ -46,7 +44,7 @@ where
 {
     type Rejection = ErrorReply;
 
-    async fn from_request(mut req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
         let config = Config::from_ref(state);
         let max_append_bytes = config.http.max_append_bytes;
 
@@ -58,55 +56,7 @@ where
                 ContentType::octet_stream().to_string(),
             ))?;
 
-        if content_type.starts_with(CONTENT_TYPE_JSON) {
-            let time = req
-                .extract_parts::<Query<InsertQuery>>()
-                .map_err(|_| ErrorReply::InvalidQuery)
-                .and_then(|query| async move {
-                    if let Some(s) = query.0.time {
-                        if let Ok(time) = DateTime::parse_from_rfc3339(&s) {
-                            Ok(time.with_timezone(&Utc))
-                        } else {
-                            Err(ErrorReply::InvalidQuery)
-                        }
-                    } else {
-                        Ok(Utc::now())
-                    }
-                })
-                .await;
-
-            let insert = match req.with_limited_body() {
-                Ok(req) => req.extract::<Json<Insert>, _>().await,
-                Err(req) => req.extract::<Json<Insert>, _>().await,
-            }
-            .map_err(|e| {
-                if let JsonRejection::BytesRejection(BytesRejection::FailedToBufferBody(
-                    FailedToBufferBody::LengthLimitError(_),
-                )) = e
-                {
-                    return ErrorReply::PayloadTooLarge(max_append_bytes);
-                }
-
-                ErrorReply::BadEncoding
-            })?;
-
-            let time = time?;
-            let records: Vec<_> = insert
-                .0
-                .records
-                .into_iter()
-                .map(|m| Record {
-                    time,
-                    message: m.into_bytes(),
-                })
-                .collect();
-
-            let json = SchemaChunk::try_from(LegacyRecords(records))
-                .map_err(|_| ErrorReply::BadEncoding)
-                .map(Self)?;
-
-            Ok(json)
-        } else if content_type == CONTENT_TYPE_ARROW {
+        if content_type == CONTENT_TYPE_ARROW {
             let bytes = match req.with_limited_body() {
                 Ok(req) => req.extract::<Bytes, _>(),
                 Err(req) => req.extract::<Bytes, _>(),
@@ -152,7 +102,7 @@ pub(crate) async fn deserialize_request(bytes: Bytes) -> Result<SchemaChunkReque
 }
 
 pub(crate) fn to_reply(
-    accept: &str,
+    accept: Option<&str>,
     batch: LimitedBatch,
     focus: DataFocus,
 ) -> Result<Response, ErrorReply> {
@@ -178,7 +128,7 @@ pub(crate) fn to_reply(
         (chunk, batch_schema, focused_schema)
     } else {
         return match accept {
-            CONTENT_TYPE_ARROW => {
+            Some(CONTENT_TYPE_ARROW) => {
                 let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
                 let options = write::WriteOptions { compression: None };
 
@@ -199,12 +149,14 @@ pub(crate) fn to_reply(
                     .body(boxed(Full::new(Bytes::from(bytes))))
                     .map_err(|_| ErrorReply::Unknown)
             }
-            CONTENT_TYPE_PANDAS_RECORD => Response::builder()
-                .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
-                .status(StatusCode::OK)
-                .body(boxed(Full::new(Bytes::from("[]"))))
-                .map_err(|_| ErrorReply::Unknown),
-            other => Err(ErrorReply::CannotEmit(other.to_string())),
+            None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
+                Response::builder()
+                    .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
+                    .status(StatusCode::OK)
+                    .body(boxed(Full::new(Bytes::from("[]"))))
+                    .map_err(|_| ErrorReply::Unknown)
+            }
+            Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),
         };
     };
 
@@ -225,7 +177,7 @@ pub(crate) fn to_reply(
     }));
 
     match accept {
-        CONTENT_TYPE_ARROW => {
+        Some(CONTENT_TYPE_ARROW) => {
             let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
             let options = write::WriteOptions { compression: None };
 
@@ -251,7 +203,7 @@ pub(crate) fn to_reply(
                 .body(boxed(Full::new(Bytes::from(bytes))))
                 .map_err(|_| ErrorReply::Unknown)
         }
-        CONTENT_TYPE_PANDAS_RECORD => {
+        None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
             // ugh. super ugly byte hacking to work around upstream not
             // supporting multiple chunks.
             let mut bytes = vec![];
@@ -288,6 +240,6 @@ pub(crate) fn to_reply(
                 .body(boxed(Full::new(Bytes::from(bytes))))
                 .map_err(|_| ErrorReply::Unknown)
         }
-        other => Err(ErrorReply::CannotEmit(other.to_string())),
+        Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),
     }
 }

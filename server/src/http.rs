@@ -9,7 +9,6 @@ use axum::{
     body::Body,
     extract::{DefaultBodyLimit, FromRef, Path, State},
     http::{header::ACCEPT, HeaderMap, Request},
-    response::IntoResponse,
     routing::{get, post},
     Json, Router, Server,
 };
@@ -28,18 +27,16 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::PlateauConfig;
 use plateau_transport::{
-    DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Records, Span, Topic,
-    TopicIterationOrder, TopicIterationQuery, TopicIterationReply, TopicIterationStatus,
-    TopicIterator, Topics,
+    DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Span, Topic, TopicIterationOrder,
+    TopicIterationQuery, TopicIterationStatus, TopicIterator, Topics,
 };
 
 pub use crate::axum_util::{query::Query, Response};
 use crate::catalog::Catalog;
 use crate::http::chunk::SchemaChunkRequest;
-use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
+use crate::limit::{BatchStatus, RowLimit};
 use crate::manifest::Ordering;
 use crate::slog::{RecordIndex, SlogError};
-use crate::topic::Record;
 
 mod chunk;
 mod error;
@@ -334,28 +331,6 @@ async fn topic_get_partitions(
     }))
 }
 
-fn negotiate<F, J>(
-    content: Option<String>,
-    batch: LimitedBatch,
-    focus: DataFocus,
-    to_json: F,
-) -> Result<axum::response::Response, ErrorReply>
-where
-    F: FnOnce(Vec<Record>) -> J,
-    J: Serialize + Send,
-{
-    match content.as_deref() {
-        None | Some("*/*") | Some("application/json") => {
-            if let Ok(records) = batch.into_legacy() {
-                Ok(Json(to_json(records)).into_response())
-            } else {
-                Err(ErrorReply::InvalidSchema)
-            }
-        }
-        Some(accept) => chunk::to_reply(accept, batch, focus),
-    }
-}
-
 #[utoipa::path(
     post,
     operation_id = "topic.iterate",
@@ -389,9 +364,7 @@ pub async fn topic_iterate(
     max_page: RowLimit,
 ) -> Result<axum::response::Response, ErrorReply> {
     let query = query.map(|Query(query)| query).unwrap_or_default();
-    let content = headers
-        .get(ACCEPT)
-        .and_then(|header| header.to_str().ok().map(ToString::to_string));
+    let content = headers.get(ACCEPT).and_then(|header| header.to_str().ok());
     let position = position.map(|Json(value)| value);
 
     let topic = catalog.get_topic(&topic_name).await;
@@ -426,12 +399,7 @@ pub async fn topic_iterate(
         );
     }
 
-    negotiate(content, result.batch, query.data_focus, move |records| {
-        TopicIterationReply {
-            records: serialize_records(records),
-            status,
-        }
-    })
+    chunk::to_reply(content, result.batch, query.data_focus)
 }
 
 #[utoipa::path(
@@ -492,24 +460,11 @@ async fn partition_get_records(
         );
     }
 
-    negotiate(
-        headers
-            .get(ACCEPT)
-            .and_then(|header| header.to_str().ok().map(ToString::to_string)),
+    chunk::to_reply(
+        headers.get(ACCEPT).and_then(|header| header.to_str().ok()),
         result,
         query.data_focus,
-        move |records| Records {
-            span: range.map(Span::from_range),
-            status,
-            records: serialize_records(records),
-        },
     )
-}
-
-fn serialize_records<I: IntoIterator<Item = Record>>(rs: I) -> Vec<String> {
-    rs.into_iter()
-        .map(|r| String::from_utf8(r.message).unwrap())
-        .collect()
 }
 
 fn parse_time_range(

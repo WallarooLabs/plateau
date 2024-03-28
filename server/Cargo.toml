@@ -62,5 +62,7 @@ sample-test = "0.2.1"
 sample-std = "0.2.1"
 sample-arrow2 = "0.17.2"
 
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
+
 [build-dependencies]
 chrono = "0.4"

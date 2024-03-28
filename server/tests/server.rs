@@ -18,9 +18,10 @@ use plateau_transport::{
     arrow2,
     headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
 };
-use reqwest::Client;
+use reqwest::{Client, Response};
 use serde_json::json;
 use std::fs::File;
+use tracing::trace;
 use tracing_subscriber::{fmt, EnvFilter};
 
 use plateau_transport::{DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
@@ -167,21 +168,24 @@ pub(crate) fn inferences_large() -> SchemaChunk<Schema> {
 }
 
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
-    let records: Vec<_> = vec![body.to_string()]
-        .iter()
-        .cycle()
-        .take(count)
-        .cloned()
-        .collect();
-    let message = json!({ "records": records });
-    client
-        .post(url)
-        .json(&message)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
+    let time = PrimitiveArray::<i64>::from_values(std::iter::repeat(0).take(count));
+    let records =
+        Utf8Array::<i32>::from_trusted_len_values_iter(std::iter::repeat(body).take(count));
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("records", records.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    let chunk = SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![time.boxed(), records.boxed()]).unwrap(),
+    };
+
+    chunk_append(client, url, chunk).await.unwrap()
 }
 
 async fn chunk_append(client: &Client, url: &str, data: SchemaChunk<Schema>) -> Result<()> {
@@ -228,14 +232,22 @@ async fn read_next_chunks(
         response = response.json(&it);
     }
 
-    response = response.header("Accept", CONTENT_TYPE_ARROW);
-    let bytes = response.send().await?.error_for_status()?.bytes().await?;
+    let arrow = response
+        .try_clone()
+        .unwrap()
+        .header("Accept", CONTENT_TYPE_ARROW);
+    let bytes = arrow.send().await?.error_for_status()?.bytes().await?;
 
     let mut cursor = Cursor::new(bytes);
     let metadata = read::read_file_metadata(&mut cursor)?;
     let schema = metadata.schema.clone();
     let reader = read::FileReader::new(cursor, metadata, None, None);
     let chunks = reader.collect::<Result<Vec<_>, _>>()?;
+
+    // verify we also get pandas records of the same length with the same
+    // request and no accept-able specified
+    let records: Vec<serde_json::Value> = response.send().await?.error_for_status()?.json().await?;
+    assert_eq!(records.len(), chunks.iter().map(|c| c.len()).sum::<usize>());
 
     Ok((schema, chunks))
 }
@@ -249,45 +261,30 @@ fn schema_field_names(schema: &Schema) -> Vec<String> {
     schema.fields.iter().map(|f| f.name.to_string()).collect()
 }
 
-async fn fetch_topic_records(
+async fn fetch_topic_response(
     client: &Client,
     url: &str,
     limit: impl Into<Option<usize>>,
-) -> serde_json::Value {
+) -> Response {
     let mut response = client.post(url).json(&json!({}));
     if let Some(limit) = limit.into() {
         response = response.query(&[("page_size", limit)]);
     }
-    let result: serde_json::Value = response
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    result
+
+    response.send().await.unwrap().error_for_status().unwrap()
 }
 
-async fn fetch_partition_records(
+async fn fetch_partition_response(
     client: &Client,
     url: &str,
     limit: impl Into<Option<usize>>,
-) -> serde_json::Value {
+) -> Response {
     let mut response = client.get(url).json(&json!({})).query(&[("start", 0)]);
     if let Some(limit) = limit.into() {
         response = response.query(&[("page_size", limit)]);
     }
     let result = response.send().await;
-    let result: serde_json::Value = result
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    result
+    result.unwrap().error_for_status().unwrap()
 }
 
 async fn get_topics(client: &Client, url: &str) -> Result<serde_json::Value> {
@@ -329,8 +326,11 @@ fn partition_records_url(
     )
 }
 
-fn assert_status(json_response: &serde_json::Value, expected: &str) {
-    let status = json_response
+fn assert_status(response: &Response, expected: &str) {
+    let header = response.headers().get(ITERATION_STATUS_HEADER).unwrap();
+    trace!("{header:?}");
+    let status: serde_json::Value = serde_json::from_str(header.to_str().unwrap()).unwrap();
+    let status = status
         .as_object()
         .expect("expected object in JSON response")
         .get("status")
@@ -340,14 +340,17 @@ fn assert_status(json_response: &serde_json::Value, expected: &str) {
     assert_eq!(status, expected);
 }
 
-fn assert_response_length(json_response: &serde_json::Value, expected: usize) {
+fn assert_partition_status(response: &Response, expected: &str) {
+    let header = response.headers().get(ITERATION_STATUS_HEADER).unwrap();
+    trace!("{header:?}");
+    assert_eq!(header.to_str().unwrap(), format!("{expected:?}"));
+}
+
+async fn assert_response_length(response: Response, expected: usize) {
+    let json_response: serde_json::Value = response.json().await.unwrap();
     let records = json_response
-        .as_object()
-        .expect("expected object in JSON response")
-        .get("records")
-        .expect("expected 'records' key in JSON response")
         .as_array()
-        .expect("expected 'records' value to be array");
+        .expect("expected pandas records formatted array");
     assert_eq!(records.len(), expected);
 }
 
@@ -381,7 +384,7 @@ async fn setup_with_config(config: http::Config) -> (Client, String, http::TestS
     )
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_status_all() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -407,19 +410,20 @@ async fn topic_status_all() -> Result<()> {
     );
 
     // test unlimited request, should get all records
-    let json_response = fetch_topic_records(
+    let response = fetch_topic_response(
         &client,
         topic_records_url(&server, &topic_name).as_str(),
         None,
     )
     .await;
-    assert_status(&json_response, "All");
-    assert_response_length(&json_response, 10);
+
+    assert_status(&response, "All");
+    assert_response_length(response, 10).await;
 
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_status_record_limited() {
     let (client, topic_name, server) = setup().await;
 
@@ -432,13 +436,13 @@ async fn topic_status_record_limited() {
     .await;
 
     // test record-limited request, should get 'RecordLimited' response and fewer results
-    let json_response =
-        fetch_topic_records(&client, topic_records_url(&server, &topic_name).as_str(), 5).await;
-    assert_status(&json_response, "RecordLimited");
-    assert_response_length(&json_response, 5);
+    let response =
+        fetch_topic_response(&client, topic_records_url(&server, &topic_name).as_str(), 5).await;
+    assert_status(&response, "RecordLimited");
+    assert_response_length(response, 5).await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
@@ -454,19 +458,19 @@ async fn topic_status_byte_limited() {
         message_limit + 1,
     )
     .await;
-    let json_response = fetch_topic_records(
+    let response = fetch_topic_response(
         &client,
         topic_records_url(&server, &topic_name).as_str(),
         None,
     )
     .await;
-    assert_status(&json_response, "ByteLimited");
+    assert_status(&response, "ByteLimited");
     // plateau always finishes the current record when we hit the byte limit, so we expect to have
     // one more than the actual hard limit caculated above
-    assert_response_length(&json_response, message_limit + 1);
+    assert_response_length(response, message_limit + 1).await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn stored_schema_metadata() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -507,7 +511,7 @@ async fn stored_schema_metadata() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn max_request_header() -> Result<()> {
     let max = 1234;
 
@@ -519,20 +523,23 @@ async fn max_request_header() -> Result<()> {
 
     let req = client
         .post(append_url(&server, &topic_name, PARTITION_NAME))
-        .header("content-type", "application/json")
+        .header("content-type", CONTENT_TYPE_ARROW)
         .body(" ".repeat(max as usize * 10));
     let resp = req.send().await?;
 
-    assert_eq!(413, resp.status());
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    trace!("{status}, {:?}", resp.text().await);
+    assert_eq!(413, status);
     assert_eq!(
         &max.to_string(),
-        resp.headers().get(MAX_REQUEST_SIZE_HEADER).unwrap()
+        headers.get(MAX_REQUEST_SIZE_HEADER).unwrap()
     );
 
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn large_append() -> Result<()> {
     let large = inferences_large();
 
@@ -584,7 +591,7 @@ async fn large_append() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_iterate_schema_change() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -690,7 +697,7 @@ async fn topic_iterate_schema_change() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_iterate_data_focus() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -734,7 +741,7 @@ async fn topic_iterate_data_focus() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_time_query() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -774,7 +781,7 @@ async fn topic_time_query() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn topic_iterate_pandas_records() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
@@ -860,7 +867,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn partition_status_all() {
     let (client, topic_name, server) = setup().await;
 
@@ -872,17 +879,17 @@ async fn partition_status_all() {
     )
     .await;
 
-    let json_response = fetch_partition_records(
+    let response = fetch_partition_response(
         &client,
         partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         None,
     )
     .await;
-    assert_status(&json_response, "All");
-    assert_response_length(&json_response, 10);
+    assert_partition_status(&response, "All");
+    assert_response_length(response, 10).await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn partition_status_record_limited() {
     let (client, topic_name, server) = setup().await;
 
@@ -895,17 +902,17 @@ async fn partition_status_record_limited() {
     .await;
 
     // test record-limited request, should get 'RecordLimited' response and fewer results
-    let json_response = fetch_partition_records(
+    let response = fetch_partition_response(
         &client,
         partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         5,
     )
     .await;
-    assert_status(&json_response, "RecordLimited");
-    assert_response_length(&json_response, 5);
+    assert_partition_status(&response, "RecordLimited");
+    assert_response_length(response, 5).await;
 }
 
-#[tokio::test]
+#[test_log::test(tokio::test)]
 async fn partition_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
@@ -921,14 +928,14 @@ async fn partition_status_byte_limited() {
         message_limit + 1,
     )
     .await;
-    let json_response = fetch_partition_records(
+    let response = fetch_partition_response(
         &client,
         partition_records_url(&server, &topic_name, PARTITION_NAME).as_str(),
         None,
     )
     .await;
-    assert_status(&json_response, "ByteLimited");
+    assert_partition_status(&response, "ByteLimited");
     // plateau always finishes the current record when we hit the byte limit, so we expect to have
     // one more than the actual hard limit caculated above
-    assert_response_length(&json_response, message_limit + 1);
+    assert_response_length(response, message_limit + 1).await;
 }

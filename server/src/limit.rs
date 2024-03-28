@@ -1,10 +1,10 @@
-use crate::chunk::{iter_legacy, IndexedChunk, Record, Schema};
+use crate::chunk::{IndexedChunk, Schema};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
-use plateau_transport::{estimate_size, SegmentChunk};
+use plateau_transport::estimate_size;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -148,26 +148,6 @@ impl LimitedBatch {
             };
         }
     }
-
-    pub fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
-        if self.chunks.is_empty() {
-            return Ok(vec![]);
-        }
-
-        if let Some(schema) = self.schema {
-            use itertools::Itertools;
-            iter_legacy(
-                schema,
-                self.chunks
-                    .into_iter()
-                    .map(|chunk| Ok(SegmentChunk::from(chunk))),
-            )
-            .flatten_ok()
-            .collect()
-        } else {
-            Ok(vec![])
-        }
-    }
 }
 
 impl Extend<IndexedChunk> for LimitedBatch {
@@ -190,5 +170,36 @@ impl IntoIterator for LimitedBatch {
 
     fn into_iter(self) -> Self::IntoIter {
         self.chunks.into_iter()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use plateau_transport::SegmentChunk;
+
+    use crate::{chunk::iter_legacy, topic::Record};
+
+    use super::*;
+
+    impl LimitedBatch {
+        pub fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
+            if self.chunks.is_empty() {
+                return Ok(vec![]);
+            }
+
+            if let Some(schema) = self.schema {
+                use itertools::Itertools;
+                iter_legacy(
+                    schema,
+                    self.chunks
+                        .into_iter()
+                        .map(|chunk| Ok(SegmentChunk::from(chunk))),
+                )
+                .flatten_ok()
+                .collect()
+            } else {
+                Ok(vec![])
+            }
+        }
     }
 }
