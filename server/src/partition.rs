@@ -347,7 +347,7 @@ impl Partition {
             "topic" => String::from(self.id.topic()),
             "partition" => String::from(self.id.partition())
         )
-        .increment(size as f64);
+        .set(size as f64);
         if size > (retain.max_bytes.as_u64() as usize) {
             info!("over limit {}: current size is {}", self.id, size);
             return true;
@@ -372,7 +372,7 @@ impl Partition {
                 "topic" => String::from(self.id.topic()),
                 "partition" => String::from(self.id.partition())
             )
-            .increment(segments as f64);
+            .set(segments as f64);
             if segments > count {
                 info!("over limit {}: {:?}..={:?}", self.id, min, max);
                 return true;

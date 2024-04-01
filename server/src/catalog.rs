@@ -134,7 +134,7 @@ impl Catalog {
             } else {
                 trace!("finished full catalog checkpoint in {:?}", duration);
             }
-            gauge!("catalog_checkpoint_ms",).increment((duration.as_micros() as f64) / 1000.0);
+            gauge!("catalog_checkpoint_ms",).set((duration.as_micros() as f64) / 1000.0);
         } else {
             warn!("finished full catalog checkpoint; time skew");
         }
@@ -200,7 +200,7 @@ impl Catalog {
 
         let size = self.byte_size().await;
         debug!("catalog size: {}", size);
-        gauge!("stored_size_bytes").increment(size.as_u64() as f64);
+        gauge!("stored_size_bytes").set(size.as_u64() as f64);
         let over = size > retain.max_bytes;
 
         if over {
