@@ -670,7 +670,7 @@ mod test {
     }
 
     #[sample_test]
-    fn arbitrary_chunk(#[sample(deep_chunk(3, 100).sample_one())] chunk: ChainedChunk) {
+    fn arbitrary_chunk(#[sample(deep_chunk(3, 100, false).sample_one())] chunk: ChainedChunk) {
         let chunk = chunk.value;
         let root = tempdir().unwrap();
         let path = root.path().join("testing.parquet");
@@ -708,7 +708,7 @@ mod test {
 
     #[sample_test]
     fn arbitrary_many_chunk(
-        #[sample(deep_chunk(5, 100).sample_many(2..10))] chunk: ChainedMultiChunk,
+        #[sample(deep_chunk(5, 100, false).sample_many(2..10))] chunk: ChainedMultiChunk,
     ) {
         let chunks = chunk.value;
         let root = tempdir().unwrap();

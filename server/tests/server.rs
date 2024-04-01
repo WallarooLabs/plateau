@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use arrow2::array::{
-    Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray, TryExtend,
-    Utf8Array,
+    Array, FixedSizeListArray, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray,
+    StructArray, TryExtend, Utf8Array,
 };
 use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
@@ -14,12 +14,13 @@ use plateau::chunk::Schema;
 use plateau::config::PlateauConfig;
 use plateau::http;
 use plateau::http::TestServer;
+use plateau_client::arrow2::bitmap::Bitmap;
 use plateau_transport::{
     arrow2,
     headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
 };
 use reqwest::{Client, Response};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::fs::File;
 use tracing::trace;
 use tracing_subscriber::{fmt, EnvFilter};
@@ -30,14 +31,12 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
     let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
+
     let inner = PrimitiveArray::<f64>::from_values(vec![
         2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
     ]);
 
-    // TODO: we need fixed size list array support, which currently is not
-    // in arrow2's parquet io module.
-    /*
-    let outputs = FixedSizeListArray::new(
+    let fixed = FixedSizeListArray::new(
         DataType::FixedSizeList(
             Box::new(Field::new("inner", inner.data_type().clone(), false)),
             2,
@@ -45,7 +44,7 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
         inner.to_boxed(),
         None,
     );
-    */
+
     let offsets = vec![0, 2, 2, 4, 6, 8];
     let tensor = ListArray::new(
         DataType::List(Box::new(Field::new(
@@ -53,17 +52,37 @@ pub(crate) fn inferences_schema_a() -> SchemaChunk<Schema> {
             inner.data_type().clone(),
             false,
         ))),
+        offsets.clone().try_into().unwrap(),
+        inner.clone().boxed(),
+        None,
+    );
+
+    let nulls = ListArray::new(
+        DataType::List(Box::new(Field::new(
+            "inner",
+            inner.data_type().clone(),
+            false,
+        ))),
         offsets.try_into().unwrap(),
         inner.boxed(),
-        None,
+        Some(Bitmap::from_trusted_len_iter(
+            vec![true, true, false, true, true].into_iter(),
+        )),
     );
 
     let outputs = StructArray::new(
         DataType::Struct(vec![
             Field::new("mul", mul.data_type().clone(), false),
             Field::new("tensor", tensor.data_type().clone(), false),
+            Field::new("fixed", fixed.data_type().clone(), false),
+            Field::new("null", nulls.data_type().clone(), false),
         ]),
-        vec![mul.clone().boxed(), tensor.clone().boxed()],
+        vec![
+            mul.clone().boxed(),
+            tensor.clone().boxed(),
+            fixed.clone().boxed(),
+            nulls.clone().boxed(),
+        ],
         None,
     );
 
@@ -822,9 +841,27 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     assert_eq!(
         json,
         json!([
-            {"inputs": 1.0, "outputs.mul": 2.0, "outputs.tensor": [2.0, 2.0]},
-            {"inputs": 2.0, "outputs.mul": 2.0, "outputs.tensor": []},
-            {"inputs": 3.0, "outputs.mul": 2.0, "outputs.tensor": [4.0, 4.0]},
+            {
+                "inputs": 1.0,
+                "outputs.mul": 2.0,
+                "outputs.tensor": [2.0, 2.0],
+                "outputs.fixed": [2.0, 2.0],
+                "outputs.null": [2.0, 2.0]
+            },
+            {
+                "inputs": 2.0,
+                "outputs.mul": 2.0,
+                "outputs.tensor": [],
+                "outputs.fixed": [4.0, 4.0],
+                "outputs.null": []
+            },
+            {
+                "inputs": 3.0,
+                "outputs.mul": 2.0,
+                "outputs.tensor": [4.0, 4.0],
+                "outputs.fixed": [6.0, 6.0],
+                "outputs.null": Value::Null
+            },
         ])
     );
 
@@ -859,10 +896,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let json = result.json::<serde_json::Value>().await?;
     assert_eq!(json, json!([]));
 
-    // this is a horrible hack that resolves a race condition where the slog threads are still
-    // writing but the tempdir is deleted, resulting in intermittent test failures.
-    //TODO: graceful shutdown of test server
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    server.close().await;
 
     Ok(())
 }

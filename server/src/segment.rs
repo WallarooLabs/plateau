@@ -70,7 +70,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             durable_checkpoints: true,
-            arrow: false,
+            arrow: true,
         }
     }
 }
@@ -478,14 +478,13 @@ pub mod test {
         iter_legacy(schema, iter).flat_map(Result::unwrap).collect()
     }
 
-    pub fn deep_chunk(depth: usize, len: usize) -> ArbitraryChunk<Regex, Chance> {
+    // nulls=true breaks arrow2's parquet support, but is fine for feather
+    pub fn deep_chunk(depth: usize, len: usize, nulls: bool) -> ArbitraryChunk<Regex, Chance> {
         let names = Regex::new("[a-z]{4,8}");
         let data_type = ArbitraryDataType {
             struct_branch: 1..3,
             names: names.clone(),
-            // this appears to break arrow2's parquet support
-            // nullable: Chance(0.5),
-            nullable: Chance(0.0),
+            nullable: if nulls { Chance(0.5) } else { Chance(0.0) },
             flat: sample_flat,
         }
         .sample_depth(depth);
