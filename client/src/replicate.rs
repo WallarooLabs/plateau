@@ -88,9 +88,10 @@ impl ReplicatePartitionJob {
         if !next_page.is_empty() {
             // this contains iteration information that would result in a schema
             // change per request.
-            for data in next_page.iter_mut() {
-                data.schema.metadata.remove("span");
-            }
+            next_page.iter_mut().for_each(|chunk| {
+                chunk.schema.metadata.remove("span");
+                chunk.schema.metadata.remove("status");
+            });
 
             let insert = self
                 .target

@@ -392,6 +392,7 @@ pub async fn topic_iterate(
         status: RecordStatus::from(result.batch.status),
     };
 
+    // WARNING !!!  DO NOT ADD MORE ITEMS TO THE METADATA.
     if let Some(schema) = result.batch.schema.as_mut() {
         schema.metadata.insert(
             "status".to_string(),
@@ -448,6 +449,7 @@ async fn partition_get_records(
         .and_then(|i| i.end().map(|ix| ix + 1));
     let range = start.zip(end).map(|(start, end)| start..end);
 
+    // WARNING !!!  DO NOT ADD MORE ITEMS TO THE METADATA.
     let status = RecordStatus::from(result.status);
     if let Some(schema) = result.schema.as_mut() {
         schema.metadata.insert(

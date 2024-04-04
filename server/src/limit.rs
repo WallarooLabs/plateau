@@ -1,10 +1,12 @@
-use crate::chunk::{IndexedChunk, Schema};
+use std::time::Duration;
+
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
-use std::time::Duration;
-
 use plateau_transport::estimate_size;
+
+use crate::chunk::{IndexedChunk, Schema};
+use crate::compatible::Compatible;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -104,6 +106,10 @@ impl BatchStatus {
     pub(crate) fn is_open(&self) -> bool {
         matches!(self, BatchStatus::Open { .. })
     }
+
+    pub(crate) fn is_schema_changed(&self) -> bool {
+        matches!(self, Self::SchemaChanged)
+    }
 }
 
 #[derive(Debug)]
@@ -126,8 +132,8 @@ impl LimitedBatch {
         self.schema
             .as_ref()
             .zip(other.schema.as_ref())
-            .map(|(a, b)| a != b)
-            != Some(true)
+            .map(|(a, b)| a.compatible(b))
+            .unwrap_or(true)
     }
 
     pub fn extend_one(&mut self, mut indexed: IndexedChunk) {
@@ -139,7 +145,7 @@ impl LimitedBatch {
             let schema = self
                 .schema
                 .get_or_insert_with(|| indexed.inner_schema.clone());
-            self.status = if schema != &indexed.inner_schema {
+            self.status = if !schema.compatible(&indexed.inner_schema) {
                 BatchStatus::SchemaChanged
             } else {
                 let status = remaining.after(&mut indexed);
@@ -155,8 +161,11 @@ impl Extend<IndexedChunk> for LimitedBatch {
     where
         I: IntoIterator<Item = IndexedChunk>,
     {
-        for chunk in i.into_iter() {
+        for chunk in i {
             self.extend_one(chunk);
+            if self.status.is_schema_changed() {
+                tracing::debug!("SchemaChanged status detected");
+            }
             if !self.status.is_open() {
                 return;
             }

@@ -8,6 +8,7 @@ use tokio_stream::wrappers::SignalStream;
 mod axum_util;
 pub mod catalog;
 pub mod chunk;
+mod compatible;
 pub mod config;
 pub mod http;
 mod limit;

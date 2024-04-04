@@ -545,11 +545,10 @@ impl State {
                 })
                 .scan(&mut batch, move |batch, indexed| {
                     batch.extend_one(indexed);
-                    future::ready(if batch.status.is_open() {
-                        Some(true)
-                    } else {
-                        None
-                    })
+                    if batch.status.is_schema_changed() {
+                        tracing::debug!("SchemaChanged status detected");
+                    }
+                    future::ready(batch.status.is_open().then_some(true))
                 }),
         );
 
