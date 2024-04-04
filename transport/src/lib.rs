@@ -884,9 +884,9 @@ impl std::fmt::Display for PartitionId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow2::array::PrimitiveArray;
-    use arrow2::datatypes::{DataType, Field, Metadata, Schema};
+    use arrow2::datatypes::Schema;
 
+    #[allow(clippy::type_complexity)]
     fn nested_chunk() -> (
         SchemaChunk<ArrowSchema>,
         (

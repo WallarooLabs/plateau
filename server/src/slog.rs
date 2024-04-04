@@ -35,7 +35,6 @@ use metrics::counter;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
 use std::cmp::{max, min};
-use std::convert::TryFrom;
 use std::ops::{Add, AddAssign, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
@@ -684,11 +683,11 @@ fn spawn_slog_thread(
 
 #[cfg(test)]
 mod test {
+    use super::*;
+
     use crate::chunk::LegacyRecords;
 
-    use super::*;
-    use chrono::{TimeZone, Utc};
-    use std::path::PathBuf;
+    use chrono::TimeZone;
     use tempfile::tempdir;
 
     #[tokio::test]

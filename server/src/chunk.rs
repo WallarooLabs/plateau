@@ -224,7 +224,7 @@ impl IndexedChunk {
     /// prefixed with the chunk index. If the record is not a [LegacyRecord]
     /// or col 1 is not Utf8, returns an empty Vec.
     pub fn display_vec(&self) -> Vec<String> {
-        let l = self.inner_schema.fields.len() as usize; // index is stored in an "unlisted" extra column
+        let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
         if self.inner_schema.fields[1].data_type == DataType::Utf8 {
             let idx = (*self.chunk.arrays()[l])
                 .as_any()
@@ -349,10 +349,7 @@ pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
 #[cfg(any(test, bench, feature = "test"))]
 pub mod test {
     use super::*;
-    use crate::arrow2::{
-        array::{ListArray, MutableListArray, PrimitiveArray, StructArray, TryExtend},
-        datatypes::{Field, Metadata},
-    };
+    use crate::arrow2::array::{ListArray, MutableListArray, StructArray, TryExtend};
     use plateau_transport::estimate_size;
 
     pub fn inferences_schema_a() -> SchemaChunk<Schema> {

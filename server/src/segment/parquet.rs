@@ -456,7 +456,7 @@ mod test {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path.clone());
-        let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+        let records = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let mut w = s.create(legacy_schema(), Config::parquet())?;
         let schema = w.schema.clone();
@@ -479,7 +479,7 @@ mod test {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path.clone());
-        let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+        let mut records = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let mut w = s.create(legacy_schema(), Config::parquet())?;
         let schema = w.schema.clone();
@@ -502,11 +502,7 @@ mod test {
     fn round_trip1_2() -> Result<()> {
         let path = PathBuf::from("tests/data/v1.parquet");
         let s = Segment::at(path);
-        let records: Vec<_> = build_records(
-            (0..20)
-                .into_iter()
-                .map(|ix| (ix, format!("message-{}", ix))),
-        );
+        let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}"))));
 
         let r = s.iter()?;
         assert_eq!(collect_records(r.schema().clone(), r), records);
@@ -518,11 +514,7 @@ mod test {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
-        let records: Vec<_> = build_records(
-            (0..20)
-                .into_iter()
-                .map(|ix| (ix, format!("message-{}", ix))),
-        );
+        let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}"))));
 
         let schema = legacy_schema();
         let mut w = s.create(schema.clone(), Config::parquet())?;
@@ -599,11 +591,7 @@ mod test {
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
         let large: String = (0..100 * 1024).map(|_| "x").collect();
-        let records: Vec<_> = build_records(
-            (0..20)
-                .into_iter()
-                .map(|ix| (ix, format!("message-{}-{}", ix, large))),
-        );
+        let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}-{large}"))));
 
         let mut w = s.create(legacy_schema(), Config::parquet())?;
         w.log_arrow(

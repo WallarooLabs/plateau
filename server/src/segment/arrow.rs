@@ -346,14 +346,14 @@ pub mod test {
     fn can_iter_forward_double_ended() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+        let records: Vec<_> = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let schema = legacy_schema();
         let mut w = Writer::create_path(&path, &schema)?;
         for record in records.clone() {
             w.write_chunk(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?.chunk)?;
         }
-        let _ = w.end()?;
+        w.end()?;
 
         let reader = Reader::open(&path)?;
 
@@ -366,14 +366,14 @@ pub mod test {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
-        let mut records: Vec<_> = build_records((0..10).into_iter().map(|i| (i, format!("m{i}"))));
+        let mut records: Vec<_> = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let schema = legacy_schema();
         let mut w = Writer::create_path(&path, &schema)?;
         for record in records.clone() {
             w.write_chunk(SchemaChunk::try_from(LegacyRecords([record].to_vec()))?.chunk)?;
         }
-        let _ = w.end()?;
+        w.end()?;
 
         records.reverse();
 
@@ -412,7 +412,7 @@ pub mod test {
         let path = root.path().join("testing.arrow");
 
         let a = inferences_nested();
-        let mut w = Writer::create_path(&path, &a.schema)?;
+        let mut w = Writer::create_path(path, &a.schema)?;
         w.write_chunk(a.chunk)?;
         Ok(())
     }
@@ -423,11 +423,8 @@ pub mod test {
         let path = root.path().join("testing.arrow");
 
         let large: String = (0..100 * 1024).map(|_| "x").collect();
-        let records: Vec<_> = build_records(
-            (0..20)
-                .into_iter()
-                .map(|ix| (ix, format!("message-{}-{}", ix, large))),
-        );
+        let records: Vec<_> =
+            build_records((0..20).map(|ix| (ix, format!("message-{}-{}", ix, large))));
 
         let mut w = Writer::create_path(&path, &legacy_schema())?;
         w.write_chunk(SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?.chunk)?;

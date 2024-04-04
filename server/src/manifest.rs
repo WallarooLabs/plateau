@@ -9,22 +9,24 @@
 //! The only supported manifest type currently is SQLite. sqlx should
 //! theoretically allow us to support somewhat arbitrary SQL databases, but
 //! minor query modifications will be necessary.
+
+use std::borrow::Borrow;
+use std::ops::{Range, RangeInclusive};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
-pub use plateau_transport::PartitionId;
 use plateau_transport::TopicIterationOrder;
 use sqlx::migrate::Migrator;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{ColumnIndex, Row};
-use std::borrow::Borrow;
-use std::convert::TryFrom;
-use std::ops::{Range, RangeInclusive};
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use tracing::{info, trace};
+
+pub use plateau_transport::PartitionId;
 
 use crate::slog::{RecordIndex, SegmentIndex};
 
@@ -703,7 +705,7 @@ mod test {
 
         assert!(state.get_oldest_segment(None).await.is_none());
 
-        for (p, time) in vec![
+        for (p, time) in [
             (
                 &a,
                 Utc.timestamp_opt(10, 0).unwrap()..=Utc.timestamp_opt(20, 0).unwrap(),

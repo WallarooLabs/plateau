@@ -344,6 +344,7 @@ mod tests {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum WidgetType {
         Bib,
+        #[allow(dead_code)]
         Bob,
     }
 
@@ -435,7 +436,7 @@ mod tests {
             if self.sent.lock().len() >= self.expected {
                 Poll::Ready(self.sent.lock().clone())
             } else {
-                drop(self.waker.lock().insert(cx.waker().clone()));
+                *self.waker.lock() = Some(cx.waker().clone());
                 Poll::Pending
             }
         }

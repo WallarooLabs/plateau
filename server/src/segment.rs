@@ -16,7 +16,6 @@
 //! other associated files. See [arrow] and [parquet] for details on these
 //! additional files.
 
-use std::convert::TryFrom;
 #[cfg(test)]
 use std::hash::{Hash, Hasher};
 use std::io::Read;
@@ -49,7 +48,7 @@ fn validate_header(mut reader: impl Read) -> Result<()> {
 
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
-#[allow(clippy::derive_hash_xor_eq)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for Record {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.time.hash(state);

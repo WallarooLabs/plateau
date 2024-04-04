@@ -616,9 +616,8 @@ pub mod test {
     use crate::chunk::{legacy_schema, LegacyRecords};
     use crate::limit::BatchStatus;
     use crate::segment::test::build_records;
-    use chrono::{TimeZone, Utc};
+    use chrono::TimeZone;
     use plateau_transport::SegmentChunk;
-    use std::convert::TryInto;
     use tempfile::{tempdir, TempDir};
 
     pub(crate) fn deindex(is: Vec<IndexedChunk>) -> Vec<Record> {
@@ -669,8 +668,7 @@ pub mod test {
             .await
             .chunks
             .iter()
-            .map(|c| c.display_vec())
-            .flatten()
+            .flat_map(|c| c.display_vec())
             .collect::<Vec<String>>();
 
         assert_eq!(["0: m0", "1: m1", "2: m2"], result.as_slice());
@@ -697,8 +695,7 @@ pub mod test {
             .await
             .chunks
             .iter()
-            .map(|c| c.display_vec())
-            .flatten()
+            .flat_map(|c| c.display_vec())
             .collect::<Vec<String>>();
 
         assert_eq!(["7: m7", "8: m8", "9: m9"], result.as_slice());
@@ -725,8 +722,7 @@ pub mod test {
             .await
             .chunks
             .iter()
-            .map(|c| c.display_vec())
-            .flatten()
+            .flat_map(|c| c.display_vec())
             .collect::<Vec<String>>();
 
         assert_eq!(["2: m2", "1: m1", "0: m0"], result.as_slice());
@@ -753,8 +749,7 @@ pub mod test {
             .await
             .chunks
             .iter()
-            .map(|c| c.display_vec())
-            .flatten()
+            .flat_map(|c| c.display_vec())
             .collect::<Vec<String>>();
 
         assert_eq!(["9: m9", "8: m8", "7: m7"], result.as_slice());
@@ -793,8 +788,7 @@ pub mod test {
         let r = result
             .chunks
             .iter()
-            .map(|c| c.display_vec())
-            .flatten()
+            .flat_map(|c| c.display_vec())
             .collect::<Vec<String>>();
 
         assert_eq!(10, r.len());
@@ -949,7 +943,6 @@ pub mod test {
 
     async fn test_durability(config: Config) -> Result<()> {
         let records: Vec<_> = (0..(3 * 10))
-            .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
@@ -1061,7 +1054,6 @@ pub mod test {
 
     async fn _test_schema_change() -> Result<()> {
         let records: Vec<_> = (0..(3 * 10))
-            .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
@@ -1158,7 +1150,6 @@ pub mod test {
     async fn test_chunk_indexing() -> Result<()> {
         let (_dir, part) = partition(Config::default()).await?;
         let records = (0..6)
-            .into_iter()
             .map(|i| Record {
                 time: Utc::now(),
                 message: format!("m{i}").into_bytes(),
@@ -1192,7 +1183,6 @@ pub mod test {
     async fn test_chunk_indexing_rev() -> Result<()> {
         let (_dir, part) = partition(Config::default()).await?;
         let records = (0..6)
-            .into_iter()
             .map(|i| Record {
                 time: Utc::now(),
                 message: format!("m{i}").into_bytes(),
@@ -1225,7 +1215,6 @@ pub mod test {
     #[tokio::test]
     async fn test_schema_change_rev() -> Result<()> {
         let records: Vec<_> = (0..30)
-            .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
@@ -1348,7 +1337,6 @@ pub mod test {
     #[tokio::test]
     async fn test_recovery() -> Result<()> {
         let mut records: Vec<_> = (0..(3 * 10))
-            .into_iter()
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
                 message: format!("record-{}", ix).into_bytes(),
@@ -1547,8 +1535,8 @@ pub mod test {
         )
         .await;
 
-        let messages = vec!["abc", "def", "ghi", "jkl", "mno", "p", "q", "r"];
-        let times = vec![5, 6, 0, 10, 4, 3, 12, 2];
+        let messages = ["abc", "def", "ghi", "jkl", "mno", "p", "q", "r"];
+        let times = [5, 6, 0, 10, 4, 3, 12, 2];
         let records: Vec<_> = messages
             .iter()
             .zip(times.iter())

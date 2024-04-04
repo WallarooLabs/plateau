@@ -25,8 +25,6 @@ tokio = { version = "1", features = ["full"] }
 plateau = { path = "../" }
 plateau-client = { path = "../../client", features = ["health"] }
 
-[profile.bench]
-debug = true
 
 [[bin]]
 name = "cv"

@@ -383,10 +383,7 @@ mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
     use crate::partition::test::{assert_limit_unreached, deindex};
-    use chrono::{TimeZone, Utc};
-    use std::collections::HashSet;
-    use std::convert::TryFrom;
-    use std::iter::FromIterator;
+    use chrono::TimeZone;
     use std::str::FromStr;
     use tempfile::{tempdir, TempDir};
 
@@ -496,7 +493,7 @@ mod test {
             (15, "p"),
         ]);
 
-        let mut part_records = vec![vec![], vec![], vec![]];
+        let mut part_records = [vec![], vec![], vec![]];
         let names: Vec<_> = (0..=3).map(|ix| format!("partition-{}", ix % 3)).collect();
         for (ix, record) in records.iter().enumerate() {
             part_records[ix % 3].push(record.clone());
@@ -716,7 +713,7 @@ mod test {
         let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{}", ix))));
 
         // Create 3 partitions
-        for (_, record) in records.iter().enumerate() {
+        for record in &records {
             topic
                 .extend_records("partition-0", &[record.clone()])
                 .await?;
@@ -776,7 +773,7 @@ mod test {
         let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{ix}"))));
 
         // Create 3 partitions
-        for (_, record) in records.iter().enumerate() {
+        for record in &records {
             topic
                 .extend_records("partition-0", &[record.clone()])
                 .await?;
@@ -1275,7 +1272,6 @@ mod test {
 mod benches {
     extern crate test;
     use super::*;
-    use crate::topic::Topic;
     use tempfile::{tempdir, TempDir};
     use test::Bencher;
 
@@ -1286,7 +1282,7 @@ mod benches {
 
     const N_TOTAL_RECORDS: usize = 100;
     const N_PAGE_SIZE: usize = 1;
-    const PARTITION_NAME: &'static str = "test";
+    const PARTITION_NAME: &str = "test";
 
     fn run_async<F: core::future::Future>(func: F) -> F::Output {
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1324,12 +1320,12 @@ mod benches {
             String::from("testing"),
             PartitionConfig::default(),
         ));
-        let mut rng = rand::rngs::OsRng::default();
+        let mut rng = rand::rngs::OsRng;
 
         b.iter(|| {
             let offset = rng.next_u32() as usize % N_TOTAL_RECORDS;
-            let mut i = HashMap::from([(PARTITION_NAME.to_string(), offset)]);
-            let r = rt.block_on(topic.get_records(i, RowLimit::records(N_PAGE_SIZE), order));
+            let i = HashMap::from([(PARTITION_NAME.to_string(), offset)]);
+            rt.block_on(topic.get_records(i, RowLimit::records(N_PAGE_SIZE), order, None));
         });
     }
 
@@ -1342,7 +1338,7 @@ mod benches {
 
         let s = SchemaChunk {
             schema: a.schema.clone(),
-            chunk: arrow2::chunk::Chunk::new(a.chunk[..500]),
+            chunk: crate::arrow2::chunk::Chunk::new(a.chunk[..500].to_vec()),
         };
 
         b.iter(|| {
@@ -1351,20 +1347,18 @@ mod benches {
     }
 
     #[bench]
-    fn forward_iteration_bench(b: &mut Bencher) -> () {
+    fn forward_iteration_bench(b: &mut Bencher) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = rt.block_on(prep_dataset());
 
-        let mut i = 0;
         attach_and_iterate(b, &rt, &dir, &Ordering::Forward);
     }
 
     #[bench]
-    fn reverse_iteration_bench(b: &mut Bencher) -> () {
+    fn reverse_iteration_bench(b: &mut Bencher) {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let dir = rt.block_on(prep_dataset());
 
-        let mut i = 0;
         attach_and_iterate(b, &rt, &dir, &Ordering::Reverse);
     }
 }
