@@ -515,7 +515,6 @@ mod tests {
     use tracing_subscriber::{fmt, EnvFilter};
 
     use super::*;
-    use crate::Client;
     use plateau::{config::PlateauConfig, http};
     use plateau_transport::{
         arrow2::{
@@ -526,7 +525,7 @@ mod tests {
             chunk::Chunk,
             datatypes::{Field, Metadata, Schema},
         },
-        SchemaChunk, Span,
+        Span,
     };
 
     pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {

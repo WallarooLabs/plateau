@@ -6,7 +6,7 @@ use std::time::Instant;
 use anyhow::Result;
 use async_trait::async_trait;
 use plateau_client::{Error, InsertQuery, MultiChunk};
-use reqwest::{self, StatusCode};
+use reqwest::StatusCode;
 use sample_std::{arbitrary, Random, Sample};
 use serde::Deserialize;
 use tokio::sync::mpsc;

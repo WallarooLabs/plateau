@@ -492,7 +492,7 @@ impl State {
         &'a self,
         limit: RowLimit,
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
-        indices: impl Stream<Item = SegmentData> + 'a + Send + StreamExt,
+        indices: impl StreamExt<Item = SegmentData> + Send + 'a,
         order: &Ordering,
     ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
