@@ -16,8 +16,6 @@ use regex::Regex;
 #[cfg(feature = "rweb")]
 use rweb::{openapi::Entity, Schema};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "structopt-cli")]
-use structopt::StructOpt;
 
 use arrow2::array::{FixedSizeListArray, ListArray, PrimitiveArray, Utf8Array};
 use arrow2::compute::take::take;
@@ -134,11 +132,11 @@ pub fn is_variable_len(data_type: &DataType) -> bool {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct InsertQuery {
     /// RFC3339 timestamp associated with inserted records
-    #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
+    #[cfg_attr(feature = "clap", arg(short, long))]
     pub time: Option<String>,
 }
 
@@ -181,23 +179,23 @@ pub struct Records {
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize, IntoParams, ToSchema)]
-#[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct DataFocus {
     /// Data sets to return for this query.
     #[serde(default)]
-    #[cfg_attr(feature = "structopt-cli", structopt(default_value = "*", long))]
+    #[cfg_attr(feature = "clap", arg(default_value = "*", long))]
     pub dataset: Vec<String>,
 
     /// List of datasets to exclude.
     #[serde(default, rename = "dataset.exclude")]
-    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    #[cfg_attr(feature = "clap", arg(skip))]
     pub exclude: Vec<String>,
 
     /// When specified, flattens the output data sets into a single table. Uses
     /// the given separator to join nested keys.
     #[serde(default, rename = "dataset.separator")]
-    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    #[cfg_attr(feature = "clap", arg(skip))]
     pub dataset_separator: Option<String>,
 }
 
@@ -208,13 +206,13 @@ impl DataFocus {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, IntoParams)]
-#[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct RecordQuery {
     /// Start position
     pub start: usize,
     /// Number of records to return (defaults to 1000, maximum of 10000)
-    #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
+    #[cfg_attr(feature = "clap", arg(short, long))]
     pub page_size: Option<usize>,
     /// RFC3339 start time for records (defaults to earliest record)
     #[serde(rename = "time.start")]
@@ -223,10 +221,10 @@ pub struct RecordQuery {
     #[serde(rename = "time.end")]
     pub end_time: Option<String>,
     #[serde(flatten)]
-    #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
+    #[cfg_attr(feature = "clap", command(flatten))]
     pub data_focus: DataFocus,
     #[serde(default)]
-    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    #[cfg_attr(feature = "clap", arg(skip))]
     pub partition_filter: PartitionFilter,
 }
 
@@ -266,14 +264,14 @@ pub enum TopicIterationOrder {
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, IntoParams)]
-#[cfg_attr(feature = "structopt-cli", derive(StructOpt))]
+#[cfg_attr(feature = "clap", derive(clap::Args))]
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
-    #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
+    #[cfg_attr(feature = "clap", arg(short, long))]
     pub page_size: Option<usize>,
     /// Use reverse iteration to work backwards through the topic
-    #[cfg_attr(feature = "structopt-cli", structopt(short, long))]
+    #[cfg_attr(feature = "clap", arg(short, long))]
     pub order: Option<TopicIterationOrder>,
     /// RFC3339 start time for records (defaults to earliest record)
     #[serde(default, rename = "time.start")]
@@ -282,10 +280,10 @@ pub struct TopicIterationQuery {
     #[serde(default, rename = "time.end")]
     pub end_time: Option<String>,
     #[serde(flatten)]
-    #[cfg_attr(feature = "structopt-cli", structopt(flatten))]
+    #[cfg_attr(feature = "clap", clap(flatten))]
     pub data_focus: DataFocus,
     #[serde(default)]
-    #[cfg_attr(feature = "structopt-cli", structopt(skip))]
+    #[cfg_attr(feature = "clap", clap(skip))]
     pub partition_filter: PartitionFilter,
 }
 

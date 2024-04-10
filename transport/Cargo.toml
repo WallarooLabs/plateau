@@ -10,7 +10,7 @@ rust-version = "1.60"
 anyhow = "1"
 serde = "1"
 rweb = { version = "0.15", features = ["openapi"], optional = true }
-structopt = { version = "0.3", optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
 arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/match-polars", features = [
   "compute_aggregate",
   "compute_cast",
@@ -34,4 +34,4 @@ utoipa = { version = "4", features = ["axum_extras"] }
 [features]
 default = ["rweb"]
 rweb = ["dep:rweb"]
-structopt-cli = ["dep:rweb", "dep:structopt"]
+clap = ["dep:clap"]

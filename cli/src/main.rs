@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Error};
+use clap::{Parser, Subcommand};
 use futures::StreamExt;
 #[cfg(feature = "polars")]
 use plateau_client::IterateUnlimited;
@@ -6,7 +7,6 @@ use plateau_transport::{
     Insert, InsertQuery, RecordQuery, Records, TopicIterationQuery, TopicIterationReply,
 };
 use std::{collections::HashMap, fmt::Display, path::PathBuf, pin::Pin, str::FromStr};
-use structopt::StructOpt;
 use tokio::{fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
@@ -39,21 +39,21 @@ impl FromStr for Url {
     }
 }
 
-#[derive(Debug, StructOpt)]
-#[structopt(
+#[derive(Debug, Parser)]
+#[command(
     name = "plateau-cli",
-    about = "Command-line interfact to a plateau server."
+    about = "Command-line interface to a plateau server."
 )]
 struct Cli {
     /// Host URL
-    #[structopt(short, long, parse(try_from_str), default_value)]
-    host: Url,
+    #[arg(long, default_value_t = localhost())]
+    host: url::Url,
 
-    #[structopt(subcommand)]
+    #[command(subcommand)]
     cmd: Command,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Retrieve list of all topics
     Topics,
@@ -69,9 +69,10 @@ enum Command {
         /// Partition name
         partition_name: String,
         /// Desired output format
-        #[structopt(short, long, default_value)]
+        // #[arg(short, long, value_parser = clap::value_parser!(OutputFormat), default_value_t)]
+        #[arg(short, long, default_value_t)]
         format: OutputFormat,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: RecordQuery,
     },
     /// Iterate through records
@@ -82,7 +83,7 @@ enum Command {
         partition_name: String,
         /// Iterator position
         position: usize,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: TopicIterationQuery,
     },
     #[cfg(feature = "polars")]
@@ -94,7 +95,7 @@ enum Command {
         partition_name: String,
         /// Iterator position
         position: usize,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: TopicIterationQuery,
     },
     #[cfg(feature = "polars")]
@@ -102,7 +103,7 @@ enum Command {
     IterateUnlimited {
         /// Topic name
         topic_name: String,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: TopicIterationQuery,
     },
     /// Insert a single record
@@ -111,9 +112,9 @@ enum Command {
         topic_name: String,
         /// Partition name
         partition_name: String,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: InsertQuery,
-        #[structopt(flatten)]
+        #[command(flatten)]
         record: InsertSingle,
     },
     // Append a set of records in arrow format
@@ -122,27 +123,26 @@ enum Command {
         topic_name: String,
         /// Partition name
         partition_name: String,
-        #[structopt(flatten)]
+        #[command(flatten)]
         params: InsertQuery,
-        #[structopt(flatten)]
+        #[command(flatten)]
         records: InsertArrow,
     },
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Parser)]
 pub struct InsertSingle {
     /// Record to insert
     pub record: String,
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, Parser)]
 pub struct InsertArrow {
     /// Filename containing arrow data chunk in IPC format
-    #[structopt(parse(from_os_str))]
     pub records_path: PathBuf,
 }
 
-#[derive(Debug, StructOpt, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum OutputFormat {
     Arrow {
         path: PathBuf,
@@ -357,14 +357,14 @@ async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
     Ok(())
 }
 
+impl Cli {
+    async fn execute(self) -> anyhow::Result<()> {
+        let client = self.host.into();
+        make_request(&client, self.cmd).await
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Error> {
-    let matches = Cli::clap().get_matches();
-    let Cli { host, cmd } = Cli::from_clap(&matches);
-
-    let client: Client = host.0.into();
-
-    make_request(&client, cmd).await?;
-
-    Ok(())
+    Cli::parse().execute().await
 }
