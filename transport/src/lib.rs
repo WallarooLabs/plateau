@@ -1,7 +1,4 @@
-use std::convert::Infallible;
-use std::fmt::Formatter;
 use std::ops::Range;
-use std::str::FromStr;
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
@@ -18,7 +15,7 @@ use arrow2::{
 use regex::Regex;
 #[cfg(feature = "rweb")]
 use rweb::{openapi::Entity, Schema};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "structopt-cli")]
 use structopt::StructOpt;
 
@@ -247,41 +244,25 @@ pub enum RecordStatus {
     ByteLimited,
 }
 
-#[derive(Default, Debug, Clone, Serialize, PartialEq, ToSchema)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    PartialEq,
+    serde::Serialize,
+    serde::Deserialize,
+    strum::Display,
+    strum::EnumString,
+    utoipa::ToSchema,
+)]
 #[cfg_attr(feature = "rweb", derive(Schema))]
+#[serde(rename_all = "lowercase", try_from = "&str")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 pub enum TopicIterationOrder {
     #[default]
     Asc,
     Desc,
-}
-impl<'de> Deserialize<'de> for TopicIterationOrder {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        TopicIterationOrder::from_str(String::deserialize(deserializer)?.as_str())
-            .map_err(serde::de::Error::custom)
-    }
-}
-impl FromStr for TopicIterationOrder {
-    type Err = &'static str;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let r = match s.trim().to_ascii_lowercase().as_str() {
-            "asc" => Ok(TopicIterationOrder::Asc),
-            "desc" => Ok(TopicIterationOrder::Desc),
-            _ => Err("Order must be one of 'asc' or 'desc'"),
-        };
-        r
-    }
-}
-impl std::fmt::Display for TopicIterationOrder {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TopicIterationOrder::Asc => f.write_str("asc"),
-            TopicIterationOrder::Desc => f.write_str("desc"),
-        }
-    }
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize, IntoParams)]
@@ -314,11 +295,14 @@ pub struct TopicIterationQuery {
 /// begin with "regex:" to signify that any partition matching the following string can be converted.
 pub type PartitionFilter = Option<Vec<PartitionSelector>>;
 
-#[derive(Debug, Clone, ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema, strum::Display)]
+#[serde(from = "String", into = "String")]
 pub enum PartitionSelector {
     /// The exact name of a partition.
+    #[strum(to_string = "{.0}")]
     String(String),
     /// A string beginning with `regex:`. The suffix will be matched against partition names.
+    #[strum(to_string = "regex:{.0}")]
     Regex(Regex),
 }
 
@@ -338,59 +322,28 @@ impl Entity for PartitionSelector {
         })
     }
 }
-struct StrVisitor;
 
-impl<'de> serde::de::Visitor<'de> for StrVisitor {
-    type Value = PartitionSelector;
-
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("an integer between -2^31 and 2^31")
-    }
-
-    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
-        PartitionSelector::from_str(value).map_err(|e| serde::de::Error::custom(e))
+impl From<PartitionSelector> for String {
+    fn from(value: PartitionSelector) -> Self {
+        value.to_string()
     }
 }
 
-impl Serialize for PartitionSelector {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        match self {
-            PartitionSelector::String(s) => serializer.serialize_str(s),
-            PartitionSelector::Regex(r) => {
-                serializer.serialize_str(&format!("regex:{}", r.as_str()))
-            }
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PartitionSelector {
-    fn deserialize<D>(deserializer: D) -> Result<PartitionSelector, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        deserializer.deserialize_str(StrVisitor)
-    }
-}
-
-impl FromStr for PartitionSelector {
-    type Err = Infallible;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Ok(if let Some(suffix) = value.strip_prefix("regex:") {
-            if let Ok(reg) = regex::RegexBuilder::new(suffix).size_limit(2 << 12).build() {
-                Self::Regex(reg)
-            } else {
-                Self::String(value.to_string())
-            }
-        } else {
-            Self::String(value.to_string())
-        })
+impl<T> From<T> for PartitionSelector
+where
+    T: AsRef<str>,
+{
+    fn from(text: T) -> Self {
+        let build_regex = |pattern| {
+            regex::RegexBuilder::new(pattern)
+                .size_limit(2 << 12)
+                .build()
+                .ok()
+        };
+        text.as_ref()
+            .strip_prefix("regex:")
+            .and_then(build_regex)
+            .map_or_else(|| Self::String(text.as_ref().to_string()), Self::Regex)
     }
 }
 
@@ -1200,5 +1153,25 @@ mod tests {
                 vec!["child".to_string(), "grandchild".to_string()]
             ]
         );
+    }
+
+    #[test]
+    fn partition_selector_string() {
+        let ps = PartitionSelector::from("blah");
+        assert!(matches!(ps, PartitionSelector::String(text) if text == "blah"));
+    }
+
+    #[test]
+    fn partition_selector_regex() {
+        let ps = PartitionSelector::from("regex:partition-.*");
+        assert!(
+            matches!(ps, PartitionSelector::Regex(regex) if regex.to_string() == "partition-.*")
+        );
+    }
+
+    #[test]
+    fn partition_selector_invalid_regex() {
+        let ps = PartitionSelector::from(r"regex:\p{Unknown}");
+        assert!(matches!(ps, PartitionSelector::String(text) if text == r"regex:\p{Unknown}"));
     }
 }

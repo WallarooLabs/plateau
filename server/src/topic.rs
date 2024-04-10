@@ -384,7 +384,6 @@ mod test {
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
     use crate::partition::test::{assert_limit_unreached, deindex};
     use chrono::TimeZone;
-    use std::str::FromStr;
     use tempfile::{tempdir, TempDir};
 
     fn dummy_records<I, S>(s: I) -> Vec<Record>
@@ -734,7 +733,7 @@ mod test {
         let partitions_to_include = [0, 1];
         let filter: Vec<PartitionSelector> = partitions_to_include
             .into_iter()
-            .map(|s| PartitionSelector::from_str(&format!("partition-{s}")).unwrap())
+            .map(|s| PartitionSelector::from(format!("partition-{s}")))
             .collect();
 
         for _ in 0..records.len() {
@@ -794,7 +793,7 @@ mod test {
         let partitions_to_include = [0, 1, 3];
         let filter: Vec<PartitionSelector> = partitions_to_include
             .into_iter()
-            .map(|s| PartitionSelector::from_str(&format!("partition-{s}")).unwrap())
+            .map(|s| PartitionSelector::from(format!("partition-{s}")))
             .collect();
 
         let expected_data_len = records.len() * 2; // Only two valid partitions
@@ -853,7 +852,7 @@ mod test {
         let partitions_to_include = [0, 1, 2, 3, 4, 5, 6, 7];
         let filter: Vec<PartitionSelector> = partitions_to_include
             .into_iter()
-            .map(|s| PartitionSelector::from_str(&names[s]).unwrap())
+            .map(|s| PartitionSelector::from(&names[s]))
             .collect();
 
         for _ in 0..records.len() {
@@ -916,9 +915,7 @@ mod test {
                     it,
                     RowLimit::records(fetch_count),
                     &Ordering::Forward,
-                    Some(vec![
-                        PartitionSelector::from_str("regex:partition-.*").unwrap()
-                    ]),
+                    Some(vec![PartitionSelector::from("regex:partition-.*")]),
                 )
                 .await;
 
@@ -1333,7 +1330,7 @@ mod benches {
     fn chunk_sizing_bench(b: &mut Bencher) {
         let mut a = inferences_schema_a();
         for _ in 1..1000 {
-            a.extend(inferences_schema_a());
+            a.extend(inferences_schema_a()).unwrap();
         }
 
         let s = SchemaChunk {
