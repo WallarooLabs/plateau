@@ -738,7 +738,7 @@ impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, io::Cursor};
+    use std::collections::HashMap;
 
     use httptest::{
         all_of,
@@ -752,13 +752,11 @@ mod tests {
             chunk::Chunk,
             datatypes::{Field, Metadata},
         },
-        ArrowSchema, DataFocus, Insert, InsertQuery, Inserted, Partitions, RecordQuery,
-        RecordStatus, Records, SchemaChunk, Span, Topic, TopicIterationOrder, TopicIterationQuery,
-        TopicIterationReply, TopicIterationStatus, Topics, CONTENT_TYPE_ARROW,
+        Topic,
     };
     use tokio_util::io::ReaderStream;
 
-    use crate::{Client, Iterate, IterateUnlimited, Retrieve, SizedArrowStream};
+    use super::*;
 
     fn example_chunk() -> SchemaChunk<ArrowSchema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
@@ -1147,103 +1145,107 @@ mod tests {
         assert_eq!(response.span.end, 5);
     }
 
-    // TODO: This is copied from the server, refactor to share amongst other tests.
-    use plateau::chunk::Schema;
-    pub fn inferences_schema_a() -> SchemaChunk<Schema> {
-        use crate::arrow2::array::ListArray;
-        use crate::arrow2::array::StructArray;
-        use crate::arrow2::datatypes::DataType;
-        use plateau_transport::arrow2::array::Array;
-
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-        let inner = PrimitiveArray::<f64>::from_values(vec![
-            2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
-        ]);
-
-        let offsets = vec![0, 2, 2, 4, 6, 8];
-        let tensor = ListArray::new(
-            DataType::List(Box::new(Field::new(
-                "inner",
-                inner.data_type().clone(),
-                false,
-            ))),
-            offsets.try_into().unwrap(),
-            inner.boxed(),
-            None,
-        );
-
-        let outputs = StructArray::new(
-            DataType::Struct(vec![
-                Field::new("mul", mul.data_type().clone(), false),
-                Field::new("tensor", tensor.data_type().clone(), false),
-            ]),
-            vec![mul.clone().boxed(), tensor.clone().boxed()],
-            None,
-        );
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("tensor", tensor.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        SchemaChunk {
-            schema,
-            chunk: Chunk::try_new(vec![
-                time.boxed(),
-                tensor.boxed(),
-                inputs.boxed(),
-                outputs.boxed(),
-            ])
-            .unwrap(),
-        }
-    }
-
     #[cfg(feature = "polars")]
-    #[tokio::test]
-    async fn iterate_unlimited_polars_simple() {
-        use httptest::responders::status_code;
+    mod polars {
+        use super::*;
 
-        let server = Server::run();
+        // TODO: This is copied from the server, refactor to share amongst other tests.
+        use plateau::chunk::Schema;
+        pub fn inferences_schema_a() -> SchemaChunk<Schema> {
+            use crate::arrow2::array::ListArray;
+            use crate::arrow2::array::StructArray;
+            use crate::arrow2::datatypes::DataType;
+            use plateau_transport::arrow2::array::Array;
 
-        let responder = status_code(200).body(bytes::Bytes::from(
-            inferences_schema_a().to_bytes().unwrap(),
-        ));
+            let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+            let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+            let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
+            let inner = PrimitiveArray::<f64>::from_values(vec![
+                2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
+            ]);
 
-        server.expect(
-            Expectation::matching(all_of![
-                request::method("POST"),
-                request::path("/topic/topic-1/records"),
-            ])
-            .respond_with(responder),
-        );
+            let offsets = vec![0, 2, 2, 4, 6, 8];
+            let tensor = ListArray::new(
+                DataType::List(Box::new(Field::new(
+                    "inner",
+                    inner.data_type().clone(),
+                    false,
+                ))),
+                offsets.try_into().unwrap(),
+                inner.boxed(),
+                None,
+            );
 
-        let client: Client = test_client(&server);
+            let outputs = StructArray::new(
+                DataType::Struct(vec![
+                    Field::new("mul", mul.data_type().clone(), false),
+                    Field::new("tensor", tensor.data_type().clone(), false),
+                ]),
+                vec![mul.clone().boxed(), tensor.clone().boxed()],
+                None,
+            );
 
-        let response1 = client
-            .iterate_topic_unlimited(
-                "topic-1",
-                &TopicIterationQuery {
-                    page_size: None,
-                    start_time: None,
-                    end_time: None,
-                    order: Some(TopicIterationOrder::Asc),
-                    data_focus: DataFocus::default(),
-                    partition_filter: None,
-                },
-            )
-            .await
-            .expect("failure iterating records");
+            let schema = Schema {
+                fields: vec![
+                    Field::new("time", time.data_type().clone(), false),
+                    Field::new("tensor", tensor.data_type().clone(), false),
+                    Field::new("inputs", inputs.data_type().clone(), false),
+                    Field::new("outputs", outputs.data_type().clone(), false),
+                ],
+                metadata: Metadata::default(),
+            };
 
-        assert_eq!(response1.iter().len(), 4);
-        response1
-            .columns(["inputs", "outputs", "tensor", "time"])
-            .expect("Could not parse columns from dataframe");
+            SchemaChunk {
+                schema,
+                chunk: Chunk::try_new(vec![
+                    time.boxed(),
+                    tensor.boxed(),
+                    inputs.boxed(),
+                    outputs.boxed(),
+                ])
+                .unwrap(),
+            }
+        }
+
+        #[tokio::test]
+        async fn iterate_unlimited_polars_simple() {
+            use httptest::responders::status_code;
+
+            let server = Server::run();
+
+            let responder = status_code(200).body(bytes::Bytes::from(
+                inferences_schema_a().to_bytes().unwrap(),
+            ));
+
+            server.expect(
+                Expectation::matching(all_of![
+                    request::method("POST"),
+                    request::path("/topic/topic-1/records"),
+                ])
+                .respond_with(responder),
+            );
+
+            let client: Client = test_client(&server);
+
+            let response1 = client
+                .iterate_topic_unlimited(
+                    "topic-1",
+                    &TopicIterationQuery {
+                        page_size: None,
+                        start_time: None,
+                        end_time: None,
+                        order: Some(TopicIterationOrder::Asc),
+                        data_focus: DataFocus::default(),
+                        partition_filter: None,
+                    },
+                )
+                .await
+                .expect("failure iterating records");
+
+            assert_eq!(response1.iter().len(), 4);
+            response1
+                .columns(["inputs", "outputs", "tensor", "time"])
+                .expect("Could not parse columns from dataframe");
+        }
     }
 }
