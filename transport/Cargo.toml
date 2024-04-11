@@ -32,6 +32,5 @@ utoipa = { version = "4", features = ["axum_extras"] }
 
 
 [features]
-default = ["rweb"]
 rweb = ["dep:rweb"]
 clap = ["dep:clap"]
