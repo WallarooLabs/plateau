@@ -1,3 +1,4 @@
+use std::fmt;
 use std::ops::Range;
 use std::{
     borrow::Borrow,
@@ -293,14 +294,12 @@ pub struct TopicIterationQuery {
 /// begin with "regex:" to signify that any partition matching the following string can be converted.
 pub type PartitionFilter = Option<Vec<PartitionSelector>>;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema, strum::Display)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 #[serde(from = "String", into = "String")]
 pub enum PartitionSelector {
     /// The exact name of a partition.
-    #[strum(to_string = "{.0}")]
     String(String),
     /// A string beginning with `regex:`. The suffix will be matched against partition names.
-    #[strum(to_string = "regex:{.0}")]
     Regex(Regex),
 }
 
@@ -318,6 +317,15 @@ impl Entity for PartitionSelector {
             nullable: Some(true),
             ..Default::default()
         })
+    }
+}
+
+impl fmt::Display for PartitionSelector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::String(text) => text.fmt(f),
+            Self::Regex(regex) => format_args!("regex:{regex}").fmt(f),
+        }
     }
 }
 
@@ -1171,5 +1179,19 @@ mod tests {
     fn partition_selector_invalid_regex() {
         let ps = PartitionSelector::from(r"regex:\p{Unknown}");
         assert!(matches!(ps, PartitionSelector::String(text) if text == r"regex:\p{Unknown}"));
+    }
+
+    #[test]
+    fn partition_selector_string_display() {
+        let ps = PartitionSelector::from("blah");
+        assert!(matches!(ps, PartitionSelector::String(_)));
+        assert_eq!(ps.to_string(), "blah");
+    }
+
+    #[test]
+    fn partition_selector_regex_display() {
+        let ps = PartitionSelector::from(r"regex:\p{Greek}");
+        assert!(matches!(ps, PartitionSelector::Regex(_)));
+        assert_eq!(ps.to_string(), r"regex:\p{Greek}");
     }
 }
