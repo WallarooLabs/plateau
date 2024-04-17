@@ -4,6 +4,7 @@ authors = ["Wallaroo Labs"]
 version = "0.1.0"
 edition = "2021"
 
+
 [dependencies]
 backoff = { version = "0.4", features = ["tokio"], optional = true }
 humantime-serde = { version = "1", optional = true }
@@ -29,6 +30,7 @@ polars = { version = "0.36.2", optional = true, features = [
   "ipc",
   "dtype-full",
 ] }
+
 
 [dev-dependencies]
 anyhow = "1"

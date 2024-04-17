@@ -28,13 +28,13 @@ use crate::arrow2::array::BooleanArray;
 use crate::arrow2::compute::comparison::eq_scalar;
 use crate::arrow2::compute::comparison::gt_eq_scalar;
 use crate::arrow2::scalar::PrimitiveScalar;
+#[cfg(test)]
+use crate::chunk::Record;
 use crate::chunk::{parse_time, IndexedChunk, Schema};
 use crate::limit::{LimitedBatch, Retention, Rolling, RowLimit};
 use crate::manifest::{Manifest, Ordering};
-pub use crate::manifest::{PartitionId, Scope, SegmentData};
-#[cfg(test)]
-pub use crate::segment::Record;
-pub use crate::slog::RecordIndex;
+use crate::manifest::{PartitionId, Scope, SegmentData};
+use crate::slog::RecordIndex;
 use crate::slog::{self, SegmentIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -87,7 +87,7 @@ impl Partition {
         manifest: Manifest,
         id: PartitionId,
         config: Config,
-    ) -> Partition {
+    ) -> Self {
         if !Path::exists(&root) {
             fs::create_dir(&root).unwrap();
         }
@@ -127,7 +127,7 @@ impl Partition {
             fin: fin_rx,
         };
 
-        Partition {
+        Self {
             manifest,
             state: RwLock::new(state),
             id,

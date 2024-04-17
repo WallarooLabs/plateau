@@ -130,7 +130,7 @@ impl CliDisplay for SchemaChunk<ArrowSchema> {
     }
 }
 
-pub struct CliOutput<T> {
+struct CliOutput<T> {
     inner: T,
 }
 
@@ -141,7 +141,7 @@ impl<T: CliDisplay> Display for CliOutput<T> {
 }
 
 impl<T: CliDisplay> From<T> for CliOutput<T> {
-    fn from(orig: T) -> CliOutput<T> {
-        CliOutput { inner: orig }
+    fn from(orig: T) -> Self {
+        Self { inner: orig }
     }
 }

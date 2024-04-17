@@ -36,8 +36,8 @@ struct ClientPartition {
 }
 
 impl fmt::Display for ClientPartition {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.host_id, self.id)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_args!("{}/{}", self.host_id, self.id).fmt(f)
     }
 }
 
@@ -61,8 +61,7 @@ impl ReplicatePartitionJob {
         let record_ix = map
             .partitions
             .get(target.id.partition())
-            .map(|span| span.end)
-            .unwrap_or(0);
+            .map_or(0, |span| span.end);
 
         Ok(Self {
             source,
@@ -144,8 +143,8 @@ impl ClientTopic {
 }
 
 impl fmt::Display for ClientTopic {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}/{}", self.host_id, self.topic)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_args!("{}/{}", self.host_id, self.topic).fmt(f)
     }
 }
 
@@ -199,11 +198,7 @@ impl ReplicateTopicJob {
                         source: self.source.to_client_partition(&partition),
                         target: self.target.to_client_partition(&partition),
                         page_size: self.page_size,
-                        record_ix: target
-                            .partitions
-                            .get(&partition)
-                            .map(|s| s.end)
-                            .unwrap_or(0),
+                        record_ix: target.partitions.get(&partition).map_or(0, |s| s.end),
                     },
                 );
                 new_partition = true;
@@ -279,7 +274,7 @@ impl ReplicationWorker {
             info!("{} url: {}", id, url);
         }
 
-        Ok(ReplicationWorker {
+        Ok(Self {
             config: replicate.config,
             hosts,
             topics,

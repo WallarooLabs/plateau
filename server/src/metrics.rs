@@ -12,7 +12,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             prometheus: Some("0.0.0.0:9000".to_string()),
         }
     }

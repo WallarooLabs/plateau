@@ -27,7 +27,7 @@ impl Compatible for Schema {
 }
 
 impl Compatible for Field {
-    fn compatible(&self, other: &Field) -> bool {
+    fn compatible(&self, other: &Self) -> bool {
         if self.name != other.name {
             tracing::trace!("Field objects have different names");
             return false;

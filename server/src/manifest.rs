@@ -11,6 +11,7 @@
 //! minor query modifications will be necessary.
 
 use std::borrow::Borrow;
+use std::fmt;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -40,20 +41,20 @@ pub enum Ordering {
 impl Ordering {
     fn to_sql_order(&self) -> &'static str {
         match self {
-            Ordering::Forward => "ASC",
-            Ordering::Reverse => "DESC",
+            Self::Forward => "ASC",
+            Self::Reverse => "DESC",
         }
     }
 
     pub(crate) fn is_reverse(&self) -> bool {
-        self == &Ordering::Reverse
+        self == &Self::Reverse
     }
 }
 impl From<TopicIterationOrder> for Ordering {
     fn from(value: TopicIterationOrder) -> Self {
         match value {
-            TopicIterationOrder::Asc => Ordering::Forward,
-            TopicIterationOrder::Desc => Ordering::Reverse,
+            TopicIterationOrder::Asc => Self::Forward,
+            TopicIterationOrder::Desc => Self::Reverse,
         }
     }
 }
@@ -87,14 +88,10 @@ impl SegmentId<PartitionId> {
     }
 }
 
-impl<P: Borrow<PartitionId>> std::fmt::Display for SegmentId<P> {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(
-            f,
-            "{}/{}",
-            self.partition_id.borrow().topic,
-            self.partition_id.borrow().partition
-        )
+impl<P: Borrow<PartitionId>> fmt::Display for SegmentId<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let id = self.partition_id.borrow();
+        format_args!("{}/{}", id.topic, id.partition).fmt(f)
     }
 }
 
@@ -155,7 +152,7 @@ impl SegmentIndex {
     where
         I: ColumnIndex<SqliteRow>,
     {
-        SegmentIndex(usize::try_from(row.get::<i64, _>(index)).unwrap())
+        Self(usize::try_from(row.get::<i64, _>(index)).unwrap())
     }
 }
 
@@ -168,7 +165,7 @@ impl RecordIndex {
     where
         I: ColumnIndex<SqliteRow>,
     {
-        RecordIndex(usize::try_from(row.get::<i64, _>(index)).unwrap())
+        Self(usize::try_from(row.get::<i64, _>(index)).unwrap())
     }
 }
 
@@ -238,7 +235,7 @@ impl Manifest {
             .await
             .expect("database migration failed!");
         // TODO clear pending segments (size=NULL)
-        Manifest { pool }
+        Self { pool }
     }
 
     /// Upserts data for a segment with the given identifier.

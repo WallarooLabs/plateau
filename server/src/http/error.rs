@@ -24,43 +24,43 @@ pub enum ErrorReply {
 impl axum::response::IntoResponse for ErrorReply {
     fn into_response(self) -> axum::response::Response {
         let (code, message) = match self {
-            ErrorReply::EmptyBody => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
-            ErrorReply::Arrow(e) => (StatusCode::BAD_REQUEST, format!("arrow error: {}", e)),
-            ErrorReply::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {}", e)),
-            ErrorReply::Path(e) => (StatusCode::BAD_REQUEST, format!("invalid path: {}", e)),
-            ErrorReply::InvalidQuery => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
-            ErrorReply::InvalidSchema => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
-            ErrorReply::NullTypes => (
+            Self::EmptyBody => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
+            Self::Arrow(e) => (StatusCode::BAD_REQUEST, format!("arrow error: {}", e)),
+            Self::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {}", e)),
+            Self::Path(e) => (StatusCode::BAD_REQUEST, format!("invalid path: {}", e)),
+            Self::InvalidQuery => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
+            Self::InvalidSchema => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
+            Self::NullTypes => (
                 StatusCode::BAD_REQUEST,
                 "schema includes null datatypes".to_string(),
             ),
-            ErrorReply::WriterBusy => (StatusCode::TOO_MANY_REQUESTS, "writer busy".to_string()),
-            ErrorReply::BadEncoding => (
+            Self::WriterBusy => (StatusCode::TOO_MANY_REQUESTS, "writer busy".to_string()),
+            Self::BadEncoding => (
                 StatusCode::BAD_REQUEST,
                 "could not decode message as utf-8".to_string(),
             ),
-            ErrorReply::CannotAccept(content) => (
+            Self::CannotAccept(content) => (
                 StatusCode::BAD_REQUEST,
                 format!("cannot parse Content-Type '{}'", content),
             ),
-            ErrorReply::CannotEmit(content) => (
+            Self::CannotEmit(content) => (
                 StatusCode::BAD_REQUEST,
                 format!("cannot emit requested '{}' Accept format", content),
             ),
-            ErrorReply::NoHeartbeat => (
+            Self::NoHeartbeat => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "no heartbeat".to_string(),
             ),
-            ErrorReply::InsufficientDiskSpace => (
+            Self::InsufficientDiskSpace => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "insufficient disk space".to_string(),
             ),
-            ErrorReply::Unknown => (
+            Self::Unknown => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "unknown error".to_string(),
             ),
             kind => {
-                if let ErrorReply::PayloadTooLarge(max_append_bytes) = kind {
+                if let Self::PayloadTooLarge(max_append_bytes) = kind {
                     return (
                         StatusCode::PAYLOAD_TOO_LARGE,
                         [(MAX_REQUEST_SIZE_HEADER, format!("{max_append_bytes}"))],

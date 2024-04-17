@@ -53,7 +53,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             bind: SocketAddr::from(([0, 0, 0, 0], 3030)),
             max_append_bytes: 10240000,
             max_page: RowLimit::default(),
@@ -67,7 +67,7 @@ trait FromRange {
 
 impl FromRange for Span {
     fn from_range(r: Range<RecordIndex>) -> Self {
-        Span {
+        Self {
             start: r.start.0,
             end: r.end.0,
         }
@@ -77,10 +77,10 @@ impl FromRange for Span {
 impl From<BatchStatus> for RecordStatus {
     fn from(orig: BatchStatus) -> Self {
         match orig {
-            BatchStatus::Open { .. } => RecordStatus::All,
-            BatchStatus::SchemaChanged => RecordStatus::SchemaChange,
-            BatchStatus::BytesExceeded => RecordStatus::ByteLimited,
-            BatchStatus::RecordsExceeded => RecordStatus::RecordLimited,
+            BatchStatus::Open { .. } => Self::All,
+            BatchStatus::SchemaChanged => Self::SchemaChange,
+            BatchStatus::BytesExceeded => Self::ByteLimited,
+            BatchStatus::RecordsExceeded => Self::RecordLimited,
         }
     }
 }
@@ -89,7 +89,7 @@ impl From<BatchStatus> for RecordStatus {
 struct AppState(Arc<Catalog>, Arc<PlateauConfig>);
 
 impl FromRef<AppState> for PlateauConfig {
-    fn from_ref(state: &AppState) -> PlateauConfig {
+    fn from_ref(state: &AppState) -> Self {
         state.1.deref().clone()
     }
 }
@@ -187,7 +187,7 @@ impl TestServer {
             tokio::spawn(crate::replication::run(replication, addr));
         }
 
-        Ok(TestServer {
+        Ok(Self {
             addr,
             end_tx,
             catalog,

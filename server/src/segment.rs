@@ -16,8 +16,6 @@
 //! other associated files. See [arrow] and [parquet] for details on these
 //! additional files.
 
-#[cfg(test)]
-use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::{fs, path::Path, path::PathBuf};
 
@@ -26,8 +24,10 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, trace, warn};
 
 use crate::arrow2::datatypes::Schema;
-pub use crate::chunk::Record;
 use plateau_transport::SegmentChunk;
+
+#[cfg(test)]
+use crate::chunk::Record;
 
 #[allow(dead_code)]
 mod arrow;
@@ -49,8 +49,8 @@ fn validate_header(mut reader: impl Read) -> Result<()> {
 // these are incomplete; they are currently only used in testing
 #[cfg(test)]
 #[allow(clippy::derived_hash_with_manual_eq)]
-impl Hash for Record {
-    fn hash<H: Hasher>(&self, state: &mut H) {
+impl std::hash::Hash for Record {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.time.hash(state);
         let data_string = String::from_utf8(self.message.clone()).unwrap();
         data_string.hash(state);
@@ -79,13 +79,13 @@ pub trait SegmentIterator: DoubleEndedIterator<Item = Result<SegmentChunk>> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Segment {
+pub(crate) struct Segment {
     path: PathBuf,
 }
 
 impl Segment {
-    pub(crate) fn at(path: PathBuf) -> Segment {
-        Segment { path }
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path }
     }
 
     pub(crate) fn path(&self) -> &PathBuf {
@@ -427,21 +427,21 @@ pub mod test {
 
     impl Config {
         pub fn nocommit() -> Self {
-            Config {
+            Self {
                 durable_checkpoints: false,
                 arrow: false,
             }
         }
 
         pub fn parquet() -> Self {
-            Config {
+            Self {
                 arrow: false,
                 ..Self::default()
             }
         }
 
         pub fn arrow() -> Self {
-            Config {
+            Self {
                 arrow: true,
                 ..Self::default()
             }

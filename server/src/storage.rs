@@ -22,7 +22,7 @@ const MIN_AVAILABLE: ByteSize = ByteSize::gb(1);
 /// and switches its state between read-only and writable
 /// based on configured thresholds.
 #[derive(Clone, Debug)]
-pub struct DiskMonitor {
+pub(crate) struct DiskMonitor {
     readonly: Arc<AtomicBool>,
     write_count: Arc<AtomicUsize>,
     last_write: Arc<AtomicU64>,
@@ -37,7 +37,7 @@ impl Default for DiskMonitor {
 
 impl DiskMonitor {
     /// Returns a newly initialized instance.
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let readonly = AtomicBool::new(false);
         let write_count = AtomicUsize::new(0);
         let last_write = AtomicU64::new(0);
@@ -51,19 +51,19 @@ impl DiskMonitor {
     }
 
     /// Returns true if the disk status is currently read-only.
-    pub fn is_readonly(&self) -> bool {
+    pub(crate) fn is_readonly(&self) -> bool {
         self.readonly.load(Ordering::SeqCst)
     }
 
     /// Records a single log write operation.
-    pub fn record_write(&self) {
+    pub(crate) fn record_write(&self) {
         self.write_count.fetch_add(1, Ordering::SeqCst);
         let now = self.epoch.elapsed().as_secs();
         self.last_write.store(now, Ordering::SeqCst);
     }
 
     /// Loops indefinitely while checking for available disk space on the configured path.
-    pub async fn run(&self, root: impl AsRef<Path>, config: &Config) -> anyhow::Result<()> {
+    pub(crate) async fn run(&self, root: impl AsRef<Path>, config: &Config) -> anyhow::Result<()> {
         let root = root.as_ref();
 
         let path = root.to_path_buf();
@@ -155,7 +155,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             monitor: MONITOR,
             max_writes: MAX_WRITES,
             max_duration: MAX_DURATION,

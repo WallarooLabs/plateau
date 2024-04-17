@@ -1,8 +1,9 @@
 //! General-use client library for accessing plateau.
-use std::fmt::Formatter;
+use std::fmt;
+use std::io;
 #[cfg(feature = "health")]
 use std::time::{Duration, Instant};
-use std::{io::Cursor, pin::Pin, str::FromStr};
+use std::{pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,11 +34,12 @@ pub mod replicate;
 
 #[derive(Debug)]
 pub struct MaxRequestSize(pub Option<usize>);
-impl std::fmt::Display for MaxRequestSize {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+
+impl fmt::Display for MaxRequestSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
-            Some(s) => f.write_str(s.to_string().as_str()),
-            None => f.write_str("Unknown"),
+            Some(s) => format_args!("{s}").fmt(f),
+            None => "Unknown".fmt(f),
         }
     }
 }
@@ -105,8 +107,8 @@ pub fn localhost() -> Url {
 }
 
 impl Default for Client {
-    fn default() -> Client {
-        Client {
+    fn default() -> Self {
+        Self {
             server_url: localhost(),
             http_client: reqwest::Client::new(),
         }
@@ -114,8 +116,8 @@ impl Default for Client {
 }
 
 impl From<Url> for Client {
-    fn from(orig: Url) -> Client {
-        Client {
+    fn from(orig: Url) -> Self {
+        Self {
             server_url: orig,
             http_client: reqwest::Client::new(),
         }
@@ -126,7 +128,7 @@ impl FromStr for Client {
     type Err = url::ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Client {
+        Ok(Self {
             server_url: s.parse()?,
             http_client: reqwest::Client::new(),
         })
@@ -164,9 +166,12 @@ where
 async fn process_request_into_stream(
     r: RequestBuilder,
 ) -> Result<Pin<Box<dyn ArrowStream>>, Error> {
-    Ok(Box::pin(process_request(r).await?.bytes_stream().map_err(
-        |e| std::io::Error::new(std::io::ErrorKind::Other, e),
-    )))
+    Ok(Box::pin(
+        process_request(r)
+            .await?
+            .bytes_stream()
+            .map_err(io::Error::other),
+    ))
 }
 
 fn add_trailing_slash(s: impl AsRef<str>) -> String {
@@ -179,7 +184,7 @@ trait TryJoin {
         Self: Sized;
 }
 impl TryJoin for Url {
-    fn try_join(&self, s: impl AsRef<str>) -> Result<Url, Error> {
+    fn try_join(&self, s: impl AsRef<str>) -> Result<Self, Error> {
         self.join(s.as_ref())
             .map_err(|e| Error::UrlJoin(e, self.clone(), s.as_ref().to_owned()))
     }
@@ -296,17 +301,11 @@ impl Client {
 }
 
 pub trait ArrowStream:
-    TryStream<Ok = Bytes, Error = std::io::Error, Item = Result<Bytes, std::io::Error>>
-    + Send
-    + Sync
-    + 'static
+    TryStream<Ok = Bytes, Error = io::Error, Item = io::Result<Bytes>> + Send + Sync + 'static
 {
 }
 impl<T> ArrowStream for T where
-    T: TryStream<Ok = Bytes, Error = std::io::Error, Item = Result<Bytes, std::io::Error>>
-        + Send
-        + Sync
-        + 'static
+    T: TryStream<Ok = Bytes, Error = io::Error, Item = io::Result<Bytes>> + Send + Sync + 'static
 {
 }
 
@@ -331,7 +330,7 @@ impl Insertion for SchemaChunk<ArrowSchema> {
 
 impl Insertion for MultiChunk {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let bytes = io::Cursor::new(vec![]);
         let options = ipc::write::WriteOptions { compression: None };
 
         let mut writer = ipc::write::FileWriter::new(bytes, self.schema.clone(), None, options);
@@ -351,7 +350,7 @@ impl Insertion for MultiChunk {
 
 impl Insertion for Vec<SchemaChunk<ArrowSchema>> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+        let bytes = io::Cursor::new(vec![]);
         let options = ipc::write::WriteOptions { compression: None };
 
         let schema = self.first().map(|d| &d.schema).ok_or_else(|| {
@@ -396,7 +395,7 @@ impl Insertion for SizedArrowStream {
 }
 
 pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
-    let mut cursor = Cursor::new(bytes);
+    let mut cursor = io::Cursor::new(bytes);
     let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
     let schema = metadata.schema.clone();
     let reader = ipc::read::FileReader::new(cursor, metadata, None, None);
@@ -417,7 +416,7 @@ pub fn bytes_into_schemachunks(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSche
 pub fn bytes_into_polars(bytes: Bytes) -> Result<polars::frame::DataFrame, Error> {
     use polars::prelude::SerReader;
 
-    let cursor = Cursor::new(bytes);
+    let cursor = io::Cursor::new(bytes);
     let reader = polars::io::ipc::IpcReader::new(cursor);
     let df = reader.finish();
     df.map_err(Error::PolarsParse)
@@ -1104,7 +1103,7 @@ mod tests {
     async fn append_stream() {
         let server = Server::run();
         let chunk = example_chunk();
-        let stream_reader = ReaderStream::new(Cursor::new(
+        let stream_reader = ReaderStream::new(io::Cursor::new(
             chunk
                 .to_bytes()
                 .expect("failed to convert schemachunk to bytes"),
@@ -1151,7 +1150,8 @@ mod tests {
 
         // TODO: This is copied from the server, refactor to share amongst other tests.
         use plateau::chunk::Schema;
-        pub fn inferences_schema_a() -> SchemaChunk<Schema> {
+
+        fn inferences_schema_a() -> SchemaChunk<Schema> {
             use crate::arrow2::array::ListArray;
             use crate::arrow2::array::StructArray;
             use crate::arrow2::datatypes::DataType;

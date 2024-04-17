@@ -6,12 +6,11 @@ use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
-use crate::chunk::{LegacyRecords, Schema};
+use crate::chunk::{LegacyRecords, Record, Schema};
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
-use crate::manifest::{Manifest, Ordering};
-pub use crate::partition::Config as PartitionConfig;
-use crate::partition::{Partition, PartitionId};
-pub use crate::segment::Record;
+use crate::manifest::{Manifest, Ordering, PartitionId};
+use crate::partition::Config as PartitionConfig;
+use crate::partition::Partition;
 use crate::slog::RecordIndex;
 
 use anyhow::Result;
@@ -53,7 +52,7 @@ impl Topic {
 
         let partitions = HashMap::new();
 
-        Topic {
+        Self {
             root,
             manifest,
             name,
@@ -132,7 +131,7 @@ impl Topic {
             let mut partitions = self.partitions.write().await;
             let id = PartitionId::new(&self.name, partition_name);
             let part = Partition::attach(
-                Topic::partition_root(&self.root, &self.name),
+                Self::partition_root(&self.root, &self.name),
                 self.manifest.clone(),
                 id,
                 self.config.clone(),

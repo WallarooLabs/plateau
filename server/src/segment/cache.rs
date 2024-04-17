@@ -75,7 +75,7 @@ impl ActiveChunk {
     }
 
     pub fn size(&self) -> u64 {
-        self.writer.as_ref().map(|w| w.size()).unwrap_or(0)
+        self.writer.as_ref().map_or(0, |w| w.size())
     }
 }
 

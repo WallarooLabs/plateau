@@ -45,7 +45,7 @@ fn checkpoint_path(path: impl AsRef<Path>) -> PathBuf {
     path
 }
 
-pub fn check_file(f: &mut fs::File) -> Result<bool> {
+pub(crate) fn check_file(f: &mut fs::File) -> Result<bool> {
     let mut buffer = [0u8; 4];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut buffer)?;
@@ -53,14 +53,14 @@ pub fn check_file(f: &mut fs::File) -> Result<bool> {
 }
 
 #[derive(Clone, Debug)]
-pub struct Segment {
+pub(crate) struct Segment {
     path: PathBuf,
     checkpoint_path: PathBuf,
     checkpoint_tmp_path: PathBuf,
 }
 
 impl Segment {
-    pub fn new(path: PathBuf) -> Result<Self> {
+    pub(crate) fn new(path: PathBuf) -> Result<Self> {
         let checkpoint_path = checkpoint_path(&path);
         let mut checkpoint_tmp_path = path.clone();
 
@@ -81,15 +81,15 @@ impl Segment {
         fs::File::open(&parent).map_err(anyhow::Error::from)
     }
 
-    pub fn read(self, cache: Option<cache::Data>) -> Result<Reader> {
+    pub(crate) fn read(self, cache: Option<cache::Data>) -> Result<Reader> {
         Reader::open(self, cache)
     }
 
-    pub fn parts(self) -> impl Iterator<Item = PathBuf> {
+    pub(crate) fn parts(self) -> impl Iterator<Item = PathBuf> {
         [self.checkpoint_path, self.checkpoint_tmp_path].into_iter()
     }
 
-    pub fn rm_parts(&self) -> Result<()> {
+    pub(crate) fn rm_parts(&self) -> Result<()> {
         for part in self.clone().parts() {
             if part.exists() {
                 fs::remove_file(&part)?;
@@ -429,7 +429,7 @@ mod test {
 
     impl Writer {
         fn from_path(path: PathBuf, schema: &Schema) -> Result<Self> {
-            Writer::create(
+            Self::create(
                 path.clone(),
                 fs::File::create(&path)?,
                 schema,

@@ -70,7 +70,7 @@ impl<S: Borrow<Schema> + Clone + PartialEq> TryFrom<SchemaChunk<S>> for LegacyRe
                     })
             })?;
 
-        Ok(LegacyRecords(
+        Ok(Self(
             time.values_iter()
                 .zip(message.values_iter())
                 .map(|(tv, m)| Record {
@@ -157,7 +157,7 @@ impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
             ));
         }
 
-        Ok(SchemaChunk {
+        Ok(Self {
             schema: legacy_schema(),
             chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
                 .map_err(|_| ChunkError::LengthMismatch)?,
@@ -199,11 +199,7 @@ pub(crate) struct IndexedChunk {
     pub(crate) chunk: SegmentChunk,
 }
 impl IndexedChunk {
-    pub(crate) fn from_start(
-        ix: RecordIndex,
-        data: SchemaChunk<Schema>,
-        order: &Ordering,
-    ) -> IndexedChunk {
+    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>, order: &Ordering) -> Self {
         assert!(!data.chunk.arrays().is_empty());
         let start = ix.0 as i32;
         let size = data.chunk.len() as i32;
@@ -213,7 +209,7 @@ impl IndexedChunk {
             Ordering::Reverse => PrimitiveArray::from_values(((start - size)..start).rev()),
         };
         arrays.push(indices.boxed());
-        IndexedChunk {
+        Self {
             inner_schema: data.schema,
             chunk: SegmentChunk::new(arrays),
         }
@@ -223,7 +219,7 @@ impl IndexedChunk {
     /// Formats each message within an [IndexedChunk] as a series of Strings,
     /// prefixed with the chunk index. If the record is not a [LegacyRecord]
     /// or col 1 is not Utf8, returns an empty Vec.
-    pub fn display_vec(&self) -> Vec<String> {
+    pub(crate) fn display_vec(&self) -> Vec<String> {
         let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
         if self.inner_schema.fields[1].data_type == DataType::Utf8 {
             let idx = (*self.chunk.arrays()[l])
@@ -293,8 +289,8 @@ impl IndexedChunk {
     pub(crate) fn filter(
         &self,
         filter: &BooleanArray,
-    ) -> Result<IndexedChunk, crate::arrow2::error::Error> {
-        Ok(IndexedChunk {
+    ) -> Result<Self, crate::arrow2::error::Error> {
+        Ok(Self {
             inner_schema: self.inner_schema.clone(),
             chunk: filter_chunk(&self.chunk, filter)?,
         })
@@ -307,7 +303,7 @@ impl IndexedChunk {
 }
 
 impl From<IndexedChunk> for SegmentChunk {
-    fn from(indexed: IndexedChunk) -> SegmentChunk {
+    fn from(indexed: IndexedChunk) -> Self {
         let mut arrays = indexed.chunk.into_arrays();
         arrays.truncate(arrays.len() - 1);
         SegmentChunk::new(arrays)

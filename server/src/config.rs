@@ -36,7 +36,7 @@ impl PlateauConfig {
 
 impl Default for PlateauConfig {
     fn default() -> Self {
-        PlateauConfig {
+        Self {
             data_path: PathBuf::from("./data"),
 
             http: http::Config::default(),

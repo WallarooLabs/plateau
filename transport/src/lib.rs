@@ -356,8 +356,8 @@ where
 impl PartitionSelector {
     pub fn matches(&self, name: &str) -> bool {
         match self {
-            PartitionSelector::String(s) => s == name,
-            PartitionSelector::Regex(r) => r.is_match(name),
+            Self::String(s) => s == name,
+            Self::Regex(r) => r.is_match(name),
         }
     }
 }
@@ -520,15 +520,15 @@ impl SchemaChunk<ArrowSchema> {
         let schema = metadata.schema.clone();
         let mut reader = read::FileReader::new(cursor, metadata, None, None);
 
-        Ok(SchemaChunk {
+        Ok(Self {
             chunk: reader.next().unwrap()?,
             schema,
         })
     }
 
     /// Convert a [StructArray] into a [SchemaChunk]
-    pub fn from_struct(s: &StructArray) -> SchemaChunk<ArrowSchema> {
-        SchemaChunk {
+    pub fn from_struct(s: &StructArray) -> Self {
+        Self {
             chunk: Chunk::new(s.values().to_vec()),
             schema: ArrowSchema {
                 fields: s.fields().to_vec(),
@@ -567,11 +567,10 @@ impl SchemaChunk<ArrowSchema> {
         let exclude: HashSet<&String> = focus.exclude.iter().collect();
 
         for path in paths {
-            let split = focus
-                .dataset_separator
-                .as_ref()
-                .map(|s| path.split(s.as_str()).collect::<Vec<_>>())
-                .unwrap_or_else(|| vec![path.as_str()]);
+            let split = focus.dataset_separator.as_ref().map_or_else(
+                || vec![path.as_str()],
+                |s| path.split(s.as_str()).collect::<Vec<_>>(),
+            );
             let arr = self.get_array(split)?;
 
             if !exclude.contains(path) {
@@ -593,7 +592,7 @@ impl SchemaChunk<ArrowSchema> {
             }
         }
 
-        Ok(SchemaChunk {
+        Ok(Self {
             chunk: Chunk::new(arrays),
             schema: ArrowSchema {
                 fields,
@@ -615,11 +614,11 @@ impl SchemaChunk<ArrowSchema> {
     pub fn get_table<'a>(
         &self,
         path: impl IntoIterator<Item = &'a str>,
-    ) -> Result<SchemaChunk<ArrowSchema>, PathError> {
+    ) -> Result<Self, PathError> {
         let (key, arr) = self.get_key_array(path)?;
 
         match arr.as_any().downcast_ref::<StructArray>() {
-            Some(arr) => Ok(SchemaChunk {
+            Some(arr) => Ok(Self {
                 chunk: Chunk::new(arr.values().to_vec()),
                 schema: ArrowSchema {
                     fields: arr.fields().to_vec(),
@@ -819,7 +818,7 @@ pub struct PartitionId {
 
 impl PartitionId {
     pub fn new(topic: &str, partition: &str) -> Self {
-        PartitionId {
+        Self {
             topic: String::from(topic),
             partition: String::from(partition),
         }
@@ -834,9 +833,9 @@ impl PartitionId {
     }
 }
 
-impl std::fmt::Display for PartitionId {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{}/{}", self.topic, self.partition)
+impl fmt::Display for PartitionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_args!("{}/{}", self.topic, self.partition).fmt(f)
     }
 }
 

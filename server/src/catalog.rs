@@ -38,7 +38,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             checkpoint_interval: Duration::from_millis(1000),
             retain: Default::default(),
             partition: Default::default(),
@@ -72,7 +72,7 @@ impl Catalog {
         if !topic_root.exists() {
             std::fs::create_dir(&topic_root)?;
         }
-        Catalog::migrate_topics(&manifest, &root, &topic_root).await?;
+        Self::migrate_topics(&manifest, &root, &topic_root).await?;
 
         Ok(Self::attach_v0(manifest, root, topic_root, config).await)
     }
@@ -84,7 +84,7 @@ impl Catalog {
         config: Config,
     ) -> Self {
         let disk_monitor = DiskMonitor::new();
-        Catalog {
+        Self {
             config,
             manifest,
             root,
@@ -141,7 +141,7 @@ impl Catalog {
         *self.last_checkpoint.write().await = end;
     }
 
-    pub async fn checkpoints(catalog: Arc<Catalog>) {
+    pub async fn checkpoints(catalog: Arc<Self>) {
         use futures::stream::StreamExt;
 
         let mut checkpoints = time::interval(catalog.config.checkpoint_interval);
@@ -330,9 +330,9 @@ impl Catalog {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::partition::RecordIndex;
+    use crate::chunk::Record;
     use crate::segment::test::build_records;
-    use crate::segment::Record;
+    use crate::slog::RecordIndex;
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
     use tempfile::{tempdir, TempDir};

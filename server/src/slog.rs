@@ -24,28 +24,32 @@
 //! Load is shed by failing any roll or checkpoint operation while an existing
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
-use crate::chunk::{self, Schema, TimeRange};
-use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
-#[cfg(test)]
-use crate::segment::Record;
-use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
-use anyhow::Result;
-use chrono::{DateTime, Utc};
-use metrics::counter;
-use plateau_transport::{SchemaChunk, SegmentChunk};
-use serde::{Deserialize, Serialize};
+
 use std::cmp::{max, min};
 use std::ops::{Add, AddAssign, Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use metrics::counter;
+use plateau_transport::{SchemaChunk, SegmentChunk};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
+use crate::chunk::{self, Schema, TimeRange};
+use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
+use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
+
+#[cfg(test)]
+use crate::chunk::Record;
+
 #[derive(Error, Debug)]
-pub enum SlogError {
+pub(crate) enum SlogError {
     #[error("writer thread busy")]
     WriterThreadBusy,
 }
@@ -62,7 +66,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config {
+        Self {
             write_queue_timeout: Duration::from_millis(100),
             write_queue_size: 1,
             min_full_chunk_len: 1000,
@@ -77,12 +81,12 @@ pub struct SegmentIndex(pub usize);
 
 impl SegmentIndex {
     pub fn next(&self) -> Self {
-        SegmentIndex(self.0 + 1)
+        Self(self.0 + 1)
     }
 
     pub fn prev(&self) -> Option<Self> {
         if self.0 > 0 {
-            Some(SegmentIndex(self.0 - 1))
+            Some(Self(self.0 - 1))
         } else {
             None
         }
@@ -107,10 +111,10 @@ pub(crate) struct Checkpoint {
 pub struct RecordIndex(pub usize);
 
 impl Add<usize> for RecordIndex {
-    type Output = RecordIndex;
+    type Output = Self;
 
     fn add(self, span: usize) -> Self {
-        RecordIndex(self.0 + span)
+        Self(self.0 + span)
     }
 }
 
@@ -208,7 +212,7 @@ impl MemorySegment {
     }
 }
 
-pub struct State {
+struct State {
     active: Option<MemorySegment>,
     active_checkpoint: Checkpoint,
     active_first_record_ix: RecordIndex,
@@ -243,7 +247,7 @@ impl Slog {
     /// Because a slog is stateless, whatever attaches it is responsible for processing
     /// commit events. The channel is bounded to a size of one; if it is not consumed,
     /// the writer thread will immediately stall.
-    pub fn attach(
+    pub(crate) fn attach(
         root: PathBuf,
         name: String,
         active_segment: SegmentIndex,
@@ -269,7 +273,7 @@ impl Slog {
             config,
         };
 
-        let slog = Slog {
+        let slog = Self {
             root,
             name,
             state: RwLock::new(state),
@@ -284,11 +288,11 @@ impl Slog {
     }
 
     pub(crate) fn segment_from_name(root: &Path, name: &str, segment_ix: SegmentIndex) -> Segment {
-        Segment::at(Slog::segment_path(root, name, segment_ix))
+        Segment::at(Self::segment_path(root, name, segment_ix))
     }
 
     pub(crate) fn get_segment(&self, segment_ix: SegmentIndex) -> Segment {
-        Slog::segment_from_name(&self.root, &self.name, segment_ix)
+        Self::segment_from_name(&self.root, &self.name, segment_ix)
     }
 
     #[cfg(test)]
@@ -375,15 +379,14 @@ impl Slog {
         let active_size = state
             .active
             .as_ref()
-            .map(|d| d.metadata.records.end.0 - d.metadata.records.start.0)
-            .unwrap_or(0);
+            .map_or(0, |d| d.metadata.records.end.0 - d.metadata.records.start.0);
         state.active_first_record_ix + active_size
     }
 
     pub(crate) async fn active_schema_matches(&self, other: &Schema) -> bool {
         let active = &self.state.read().await.active;
 
-        let matches = active.as_ref().map(|s| &s.schema == other).unwrap_or(true);
+        let matches = active.as_ref().map_or(true, |s| &s.schema == other);
         if !matches {
             trace!("{:?} != {:?}", active.as_ref().map(|s| &s.schema), other);
         }

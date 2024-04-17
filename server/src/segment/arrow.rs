@@ -85,7 +85,7 @@ impl Segment {
         }
     }
 
-    pub fn recover(&self, cache: Option<cache::Data>) -> Result<(usize, Reader)> {
+    fn recover(&self, cache: Option<cache::Data>) -> Result<(usize, Reader)> {
         warn!("beginning recovery of {:?}", self.path);
 
         // Combine all readable data from a damaged (partially written) segment with
@@ -97,7 +97,7 @@ impl Segment {
         let (reader, schema) = fs::File::open(&self.path)
             .map_err(anyhow::Error::from)
             .and_then(|mut damaged| {
-                damaged.seek(std::io::SeekFrom::Start(8))?;
+                damaged.seek(SeekFrom::Start(8))?;
                 let metadata = read_stream_metadata(&mut damaged)?;
                 let schema = metadata.schema.clone();
                 let reader = StreamReader::new(damaged, metadata, None);

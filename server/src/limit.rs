@@ -17,7 +17,7 @@ pub struct Retention {
 
 impl Default for Retention {
     fn default() -> Self {
-        Retention {
+        Self {
             max_segment_count: Some(10000),
             max_bytes: ByteSize::gib(1),
         }
@@ -34,7 +34,7 @@ pub struct Rolling {
 
 impl Default for Rolling {
     fn default() -> Self {
-        Rolling {
+        Self {
             max_segment_size: ByteSize::mib(100),
             max_segment_index: 100000,
             max_segment_duration: None,
@@ -51,7 +51,7 @@ pub struct RowLimit {
 
 impl Default for RowLimit {
     fn default() -> Self {
-        RowLimit {
+        Self {
             max_records: 10000,
             max_bytes: 100 * 1024,
         }
@@ -60,9 +60,9 @@ impl Default for RowLimit {
 
 impl RowLimit {
     pub fn records(max_records: usize) -> Self {
-        RowLimit {
+        Self {
             max_records,
-            ..RowLimit::default()
+            ..Self::default()
         }
     }
 
@@ -78,7 +78,7 @@ impl RowLimit {
             BatchStatus::BytesExceeded
         } else {
             BatchStatus::Open {
-                remaining: RowLimit {
+                remaining: Self {
                     max_records: self.max_records - count,
                     max_bytes: self.max_bytes - bytes,
                 },
@@ -86,8 +86,8 @@ impl RowLimit {
         }
     }
 
-    pub fn min(self, other: RowLimit) -> Self {
-        RowLimit {
+    pub fn min(self, other: Self) -> Self {
+        Self {
             max_records: std::cmp::min(self.max_records, other.max_records),
             max_bytes: std::cmp::min(self.max_bytes, other.max_bytes),
         }
@@ -104,7 +104,7 @@ pub(crate) enum BatchStatus {
 
 impl BatchStatus {
     pub(crate) fn is_open(&self) -> bool {
-        matches!(self, BatchStatus::Open { .. })
+        matches!(self, Self::Open { .. })
     }
 
     pub(crate) fn is_schema_changed(&self) -> bool {
@@ -120,23 +120,22 @@ pub(crate) struct LimitedBatch {
 }
 
 impl LimitedBatch {
-    pub fn open(limit: RowLimit) -> Self {
-        LimitedBatch {
+    pub(crate) fn open(limit: RowLimit) -> Self {
+        Self {
             schema: None,
             chunks: vec![],
             status: BatchStatus::Open { remaining: limit },
         }
     }
 
-    pub fn compatible_with(&self, other: &LimitedBatch) -> bool {
+    pub(crate) fn compatible_with(&self, other: &Self) -> bool {
         self.schema
             .as_ref()
             .zip(other.schema.as_ref())
-            .map(|(a, b)| a.compatible(b))
-            .unwrap_or(true)
+            .map_or(true, |(a, b)| a.compatible(b))
     }
 
-    pub fn extend_one(&mut self, mut indexed: IndexedChunk) {
+    pub(crate) fn extend_one(&mut self, mut indexed: IndexedChunk) {
         if indexed.chunk.is_empty() {
             return;
         }
@@ -186,12 +185,12 @@ impl IntoIterator for LimitedBatch {
 mod test {
     use plateau_transport::SegmentChunk;
 
-    use crate::{chunk::iter_legacy, topic::Record};
+    use crate::{chunk::iter_legacy, chunk::Record};
 
     use super::*;
 
     impl LimitedBatch {
-        pub fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
+        pub(crate) fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
             if self.chunks.is_empty() {
                 return Ok(vec![]);
             }

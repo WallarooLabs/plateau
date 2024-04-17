@@ -6,11 +6,12 @@
 //! - [BatchSender] for the mechanism used to transmit a [Batch] of data.
 
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use lazy_static::lazy_static;
+use thiserror::Error;
 use tokio::{
     runtime::Handle,
     sync::mpsc::{channel, Receiver, Sender},
@@ -18,10 +19,9 @@ use tokio::{
 };
 use tracing::{error, warn};
 
-use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
-use lazy_static::lazy_static;
 use plateau_transport::InsertQuery;
-use thiserror::Error;
+
+use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 
 lazy_static! {
     pub static ref DEFAULT_MAX_BATCH_BYTES: Arc<std::sync::Mutex<usize>> =
@@ -59,7 +59,7 @@ pub struct BatchClient {
 }
 impl BatchClient {
     pub fn new(base_url: &str) -> Result<Self, ClientError> {
-        Ok(BatchClient {
+        Ok(Self {
             client: Client::new(base_url)?,
             max_batch_bytes: get_default_max_batch_bytes(),
         })
@@ -173,15 +173,15 @@ struct WorkerPool<T, C> {
     sender: C,
 }
 impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T, C> {
-    pub fn new(client: C) -> WorkerPool<T, C> {
-        WorkerPool {
+    fn new(client: C) -> Self {
+        Self {
             pool: HashMap::new(),
             sender: client,
         }
     }
 
     /// Queue a batch with a send worker
-    pub async fn send_work(&mut self, batch: T) {
+    async fn send_work(&mut self, batch: T) {
         // get or start a worker
         let key = batch.key().to_owned();
         let worker = if let Some(w) = self.pool.get_mut(&key) {
@@ -204,7 +204,7 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
     }
 
     /// Flush all pending work and shut down workers
-    pub async fn drain(&mut self) {
+    async fn drain(&mut self) {
         // flush & close workers
         for (_, worker) in self.pool.drain() {
             drop(worker.sender);
@@ -334,11 +334,10 @@ mod tests {
 
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
-    use std::time::Duration;
 
     use parking_lot::Mutex;
+    use tokio::time;
 
     // test when bibs and bobs cannot be combined
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,7 +384,7 @@ mod tests {
         }
 
         fn slice(&self, ixs: Range<usize>) -> Self {
-            WidgetBatch {
+            Self {
                 widget_type: self.widget_type,
                 widgets: self.widgets[ixs].to_vec(),
             }
@@ -394,7 +393,7 @@ mod tests {
         fn split_into(self, n: usize) -> Vec<Self> {
             self.widgets
                 .chunks(f32::ceil(self.widgets.len() as f32 / n as f32) as usize)
-                .map(|c| WidgetBatch {
+                .map(|c| Self {
                     widget_type: self.widget_type,
                     widgets: c.to_vec(),
                 })
@@ -412,7 +411,7 @@ mod tests {
             I: IntoIterator<Item = S>,
             S: AsRef<str>,
         {
-            WidgetBatch {
+            Self {
                 widget_type,
                 widgets: into_iter
                     .into_iter()
@@ -444,7 +443,7 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct RecordWriter {
-        delay: Option<Duration>,
+        delay: Option<time::Duration>,
         max_batch_len: usize,
         sent: Arc<Mutex<Vec<WidgetBatch>>>,
         waker: Arc<Mutex<Option<Waker>>>,
@@ -462,7 +461,7 @@ mod tests {
             if let Some(delay) = self.delay {
                 // A tiny delay here helps simulate a "real" sender and prevent races between a
                 // test sending events and a latency-free sender processing them
-                tokio::time::sleep(delay).await;
+                time::sleep(delay).await;
             }
 
             let batch_len = batch.len();
@@ -496,7 +495,7 @@ mod tests {
     fn recorder(
         expected: usize,
         max_batch_len: usize,
-        delay: Option<Duration>,
+        delay: Option<time::Duration>,
     ) -> (RecordWriter, RecordReader) {
         let sent = Arc::new(Mutex::new(vec![]));
         let waker = Arc::new(Mutex::new(None));
@@ -540,7 +539,7 @@ mod tests {
         // transmission end awaits the dispatch task, which awaits all worker threads
         // a more in depth version of this test will require significant refactoring for DI
         assert!(
-            tokio::time::timeout(Duration::from_secs(1), transmission.end())
+            time::timeout(time::Duration::from_secs(1), transmission.end())
                 .await
                 .is_ok()
         );
@@ -548,7 +547,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_batch() {
-        let (writer, reader) = recorder(1, 10, Some(Duration::from_millis(1)));
+        let (writer, reader) = recorder(1, 10, Some(time::Duration::from_millis(1)));
         let transmission = Transmission::start(Handle::current(), writer, 10);
 
         for i in 0..5 {
@@ -571,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_batch() {
-        let (writer, reader) = recorder(3, 2, Some(Duration::from_millis(1)));
+        let (writer, reader) = recorder(3, 2, Some(time::Duration::from_millis(1)));
         let transmission = Transmission::start(Handle::current(), writer, 10);
 
         for i in 0..5 {

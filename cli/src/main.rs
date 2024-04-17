@@ -17,27 +17,27 @@ use plateau_client::{
 mod display;
 pub use display::CliDisplay;
 
-#[derive(Debug)]
-struct Url(url::Url);
+// #[derive(Debug)]
+// struct Url(url::Url);
 
-impl Default for Url {
-    fn default() -> Url {
-        Url(localhost())
-    }
-}
+// impl Default for Url {
+//     fn default() -> Url {
+//         Url(localhost())
+//     }
+// }
 
-impl Display for Url {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
-    }
-}
+// impl Display for Url {
+//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+//         self.0.fmt(f)
+//     }
+// }
 
-impl FromStr for Url {
-    type Err = url::ParseError;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Ok(Url(url::Url::from_str(s)?))
-    }
-}
+// impl FromStr for Url {
+//     type Err = url::ParseError;
+//     fn from_str(s: &str) -> Result<Self, Self::Err> {
+//         Ok(Url(url::Url::from_str(s)?))
+//     }
+// }
 
 #[derive(Debug, Parser)]
 #[command(
@@ -161,43 +161,49 @@ pub enum OutputFormat {
     PolarsStdout,
 }
 
+impl OutputFormat {
+    fn plaintext(path: PathBuf) -> Self {
+        Self::Plaintext { path }
+    }
+
+    fn arrow(path: PathBuf) -> Self {
+        Self::Arrow { path }
+    }
+
+    #[cfg(feature = "polars")]
+    fn polars(path: PathBuf) -> Self {
+        Self::Polars { path }
+    }
+}
+
 impl Display for OutputFormat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            OutputFormat::Arrow { path } => write!(f, "arrow={}", path.display()),
-            OutputFormat::Plaintext { path } => write!(f, "plaintext={}", path.display()),
-            OutputFormat::Stdout => write!(f, "plaintext"),
-            OutputFormat::ArrowStdout => write!(f, "arrow"),
+            Self::Arrow { path } => write!(f, "arrow={}", path.display()),
+            Self::Plaintext { path } => write!(f, "plaintext={}", path.display()),
+            Self::Stdout => write!(f, "plaintext"),
+            Self::ArrowStdout => write!(f, "arrow"),
             #[cfg(feature = "polars")]
-            OutputFormat::Polars { path } => write!(f, "polars={}", path.display()),
+            Self::Polars { path } => write!(f, "polars={}", path.display()),
             #[cfg(feature = "polars")]
-            OutputFormat::PolarsStdout => write!(f, "polars"),
+            Self::PolarsStdout => write!(f, "polars"),
         }
     }
 }
 
 impl FromStr for OutputFormat {
     type Err = Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let mut equal_split = s.split('=');
-        let (format, path) = (equal_split.next(), equal_split.next());
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let (format, path) = text
+            .split_once('=')
+            .map_or((text, None), |(format, path)| (format, Some(path.into())));
 
-        match (format, path) {
-            (Some("text" | "plaintext"), None) => Ok(OutputFormat::Stdout),
-            (Some("text" | "plaintext"), Some(filename)) => Ok(OutputFormat::Plaintext {
-                path: filename.into(),
-            }),
-            (Some("arrow"), Some(filename)) => Ok(OutputFormat::Arrow {
-                path: filename.into(),
-            }),
-            (Some("arrow"), None) => Ok(OutputFormat::ArrowStdout),
+        match format {
+            "text" | "plaintext" => Ok(path.map_or(Self::Stdout, Self::plaintext)),
+            "arrow" => Ok(path.map_or(Self::ArrowStdout, Self::arrow)),
             #[cfg(feature = "polars")]
-            (Some("polars"), None) => Ok(OutputFormat::PolarsStdout),
-            #[cfg(feature = "polars")]
-            (Some("polars"), Some(filename)) => Ok(OutputFormat::Polars {
-                path: filename.into(),
-            }),
-            _ => Err(anyhow!("invalid output format specificiation: {s}")),
+            "polars" => Ok(path.map_or(Self::PolarsStdout, Self::polars)),
+            _ => Err(anyhow!("invalid output format specificiation: {text}")),
         }
     }
 }
