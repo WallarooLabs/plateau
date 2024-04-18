@@ -12,12 +12,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use plateau_transport::{ArrowSchema, PartitionId, RecordQuery, SchemaChunk};
+use plateau_transport::{MultiChunk, PartitionId, RecordQuery};
 use serde::{Deserialize, Serialize};
 
 use crate::{Client, Error, Retrieve};
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[cfg(feature = "replicate")]
 use tracing::error;
@@ -78,7 +78,7 @@ impl ReplicatePartitionJob {
             ..RecordQuery::default()
         };
 
-        let mut next_page: Vec<SchemaChunk<ArrowSchema>> = self
+        let mut next_page: MultiChunk = self
             .source
             .client
             .get_records(self.source.id.topic(), self.source.id.partition(), &query)
@@ -87,28 +87,29 @@ impl ReplicatePartitionJob {
         if !next_page.is_empty() {
             // this contains iteration information that would result in a schema
             // change per request.
-            next_page.iter_mut().for_each(|chunk| {
-                chunk.schema.metadata.remove("span");
-                chunk.schema.metadata.remove("status");
-            });
+            next_page.schema.metadata.remove("span");
+            next_page.schema.metadata.remove("status");
 
             let insert = self
                 .target
                 .client
-                .append_records(
+                .append_queue(
                     self.target.id.topic(),
                     self.target.id.partition(),
-                    &Default::default(),
                     next_page,
                 )
                 .await?;
 
-            debug!(
-                "{} => {}: {} => {}",
-                self.source, self.target, self.record_ix, insert.span.end
-            );
+            if let Some(insert) = insert {
+                debug!(
+                    "{} => {}: {} => {}",
+                    self.source, self.target, self.record_ix, insert.span.end
+                );
 
-            self.record_ix = insert.span.end;
+                self.record_ix = insert.span.end;
+            } else {
+                warn!("no insert performed")
+            }
 
             Ok(false)
         } else {
@@ -503,7 +504,7 @@ impl HostTopic {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod test {
     use std::net::SocketAddr;
 
     use anyhow::Result;
@@ -520,7 +521,7 @@ mod tests {
             chunk::Chunk,
             datatypes::{Field, Metadata, Schema},
         },
-        Span,
+        SchemaChunk, Span,
     };
 
     pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
@@ -562,7 +563,48 @@ mod tests {
         }
     }
 
-    async fn setup_with_config(config: http::Config) -> Result<(String, Client, http::TestServer)> {
+    pub(crate) fn inferences_large() -> SchemaChunk<Schema> {
+        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
+            vec!["one", "two", "three", "four", "five"].into_iter(),
+        );
+        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+        let values: Vec<Option<Vec<Option<String>>>> = vec![
+            Some(vec![Some("x".repeat(1000))]),
+            Some(vec![Some("x".repeat(1000))]),
+            Some(vec![Some("x".repeat(1000)), Some("x".repeat(1000))]),
+            Some(vec![Some("x".repeat(1000))]),
+            Some(vec![Some("x".repeat(1000))]),
+        ];
+        failures.try_extend(values).unwrap();
+        let failures = ListArray::from(failures);
+
+        let schema = Schema {
+            fields: vec![
+                Field::new("time", time.data_type().clone(), false),
+                Field::new("inputs", inputs.data_type().clone(), false),
+                Field::new("outputs", outputs.data_type().clone(), false),
+                Field::new("failures", failures.data_type().clone(), false),
+            ],
+            metadata: Metadata::default(),
+        };
+
+        SchemaChunk {
+            schema,
+            chunk: Chunk::try_new(vec![
+                time.boxed(),
+                inputs.boxed(),
+                outputs.boxed(),
+                failures.boxed(),
+            ])
+            .unwrap(),
+        }
+    }
+
+    pub(crate) async fn setup_with_config(
+        config: PlateauConfig,
+    ) -> Result<(String, Client, http::TestServer)> {
         fmt()
             .with_env_filter(EnvFilter::from_default_env())
             .try_init()
@@ -571,9 +613,9 @@ mod tests {
         let server = http::TestServer::new_with_config(PlateauConfig {
             http: http::Config {
                 bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-                ..config
+                ..config.http
             },
-            ..PlateauConfig::default()
+            ..config
         })
         .await?;
 
@@ -586,6 +628,99 @@ mod tests {
         let (target_url, client_target, _target) = setup_with_config(Default::default()).await?;
 
         let data: Vec<_> = (0..10).map(|_| inferences_schema_b()).collect();
+
+        let topic = "replicate";
+        let partition = "a";
+
+        let source_id = PartitionId::new(topic, partition);
+        let target_id = PartitionId::new(topic, "b");
+
+        client_source
+            .append_records(topic, partition, &Default::default(), data.clone())
+            .await?;
+
+        let hosts = vec![
+            ReplicateHost {
+                id: "edge".to_string(),
+                url: source_url.clone(),
+            },
+            ReplicateHost {
+                id: "mothership".to_string(),
+                url: target_url.clone(),
+            },
+        ];
+
+        let partitions = vec![ReplicatePartition {
+            source: HostPartition {
+                host_id: "edge".to_string(),
+                partition_id: source_id.clone(),
+            },
+            target: HostPartition {
+                host_id: "mothership".to_string(),
+                partition_id: target_id.clone(),
+            },
+            page_size: Some(15),
+        }];
+
+        let replicate = Replicate {
+            hosts,
+            topics: Default::default(),
+            partitions,
+            config: Default::default(),
+        };
+
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+        replicator.pump().await?;
+
+        assert_eq!(
+            client_target
+                .get_partitions(target_id.topic())
+                .await?
+                .partitions
+                .get(target_id.partition())
+                .cloned(),
+            Some(Span { start: 0, end: 50 })
+        );
+
+        // now let's simulate some more writes
+        client_source
+            .append_records(topic, partition, &Default::default(), data[0..6].to_vec())
+            .await?;
+
+        // and a brand new replicator run
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+
+        replicator.pump().await?;
+
+        assert_eq!(
+            client_target
+                .get_partitions(target_id.topic())
+                .await?
+                .partitions
+                .get(target_id.partition())
+                .cloned(),
+            Some(Span {
+                start: 0,
+                end: 50 + 30
+            })
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn page_size_discovery() -> Result<()> {
+        let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
+        let (target_url, client_target, _target) = setup_with_config(PlateauConfig {
+            http: http::Config {
+                max_append_bytes: 4000,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+
+        let data: Vec<_> = (0..10).map(|_| inferences_large()).collect();
 
         let topic = "replicate";
         let partition = "a";

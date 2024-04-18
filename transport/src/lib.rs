@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::fmt;
 use std::ops::Range;
 use std::{
@@ -18,10 +19,13 @@ use regex::Regex;
 use rweb::{openapi::Entity, Schema};
 use serde::{Deserialize, Serialize};
 
-use arrow2::array::{FixedSizeListArray, ListArray, PrimitiveArray, Utf8Array};
-use arrow2::compute::take::take;
-use arrow2::datatypes::{DataType, Metadata};
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
+use arrow2::{
+    array::{FixedSizeListArray, ListArray, PrimitiveArray, Utf8Array},
+    compute::take::take,
+    datatypes::{DataType, Metadata},
+    Either,
+};
 use strum::{Display, EnumIter};
 use thiserror::Error;
 use utoipa::{IntoParams, ToSchema};
@@ -460,7 +464,7 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MultiChunk {
     pub schema: ArrowSchema,
-    pub chunks: Vec<SegmentChunk>,
+    pub chunks: VecDeque<SegmentChunk>,
 }
 
 impl MultiChunk {
@@ -480,12 +484,51 @@ impl MultiChunk {
             .collect()
     }
 
+    /// Subdivides each chunk into a maximum of [n] roughly equal-sized sub chunks.
+    pub fn rechunk(&mut self, max_rows: usize) {
+        self.chunks = std::mem::take(&mut self.chunks)
+            .into_iter()
+            .flat_map(|chunk| {
+                let rows = chunk.len();
+                let starts = (0..rows).step_by(max_rows);
+                let new_chunks = starts.len();
+
+                if new_chunks == 1 {
+                    Either::Left(std::iter::once(chunk))
+                } else {
+                    Either::Right(starts.map(move |start| {
+                        let slice = chunk
+                            .columns()
+                            .iter()
+                            .map(|col| {
+                                let mut window = col.clone();
+                                window.slice(start, usize::min(max_rows, rows - start));
+                                window
+                            })
+                            .collect::<Vec<_>>();
+
+                        Chunk::new(slice)
+                    }))
+                }
+            })
+            .collect();
+    }
+
     pub fn len(&self) -> usize {
         self.chunks.iter().map(|c| c.len()).sum()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl From<SchemaChunk<ArrowSchema>> for MultiChunk {
+    fn from(sc: SchemaChunk<ArrowSchema>) -> MultiChunk {
+        MultiChunk {
+            schema: sc.schema,
+            chunks: [sc.chunk].into(),
+        }
     }
 }
 

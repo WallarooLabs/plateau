@@ -80,13 +80,13 @@ impl BatchClient {
             )
             .await
             .map_err(|e| match e {
-                ClientError::RequestTooLong(MaxRequestSize(Some(s))) => {
+                ClientError::RequestTooLong(_, MaxRequestSize(Some(s))) => {
                     warn!("detected new max plateau row size: {s}");
                     update_default_max_batch_bytes(s);
                     self.max_batch_bytes = s;
                     BatchSendError::Resize
                 }
-                ClientError::RequestTooLong(MaxRequestSize(None)) => {
+                ClientError::RequestTooLong(_, MaxRequestSize(None)) => {
                     error!("batch send failed with 413, and no new size limit could be detected");
                     BatchSendError::Fail
                 }

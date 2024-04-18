@@ -65,7 +65,7 @@ pub fn build_sampler(path: &Path) -> anyhow::Result<MultiChunkSampler> {
     Ok(Box::new(sample_all(samplers).try_convert(
         move |arrays| MultiChunk {
             schema: schema.clone(),
-            chunks: vec![Chunk::new(arrays)],
+            chunks: [Chunk::new(arrays)].into(),
         },
         |_| None,
     )))

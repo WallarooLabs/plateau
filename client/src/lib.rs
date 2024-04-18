@@ -1,6 +1,8 @@
 //! General-use client library for accessing plateau.
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
+use std::io::Cursor;
 #[cfg(feature = "health")]
 use std::time::{Duration, Instant};
 use std::{pin::Pin, str::FromStr};
@@ -21,18 +23,20 @@ pub use plateau_transport::{
     CONTENT_TYPE_ARROW,
 };
 pub use reqwest;
+use reqwest::Body;
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_TYPE},
-    Body, RequestBuilder, Response, Url,
+    RequestBuilder, Response, Url,
 };
 use thiserror::Error;
+use tracing::{trace, warn};
 
 #[cfg(feature = "batch")]
 pub mod batch;
 
 pub mod replicate;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MaxRequestSize(pub Option<usize>);
 
 impl fmt::Display for MaxRequestSize {
@@ -57,8 +61,8 @@ pub enum Error {
     QuerySerialization(#[from] serde_qs::Error),
     #[error("Error sending request: {0}")]
     SendingRequest(reqwest::Error),
-    #[error("The request body is too long. Max request size: {0}")]
-    RequestTooLong(MaxRequestSize),
+    #[error("The request body is too long ({0}). Max request size: {1}")]
+    RequestTooLong(String, MaxRequestSize),
     #[error("The request failed: {0}")]
     RequestFailed(String),
     #[error("Error from plateau server: {0}")]
@@ -80,7 +84,11 @@ pub enum Error {
     #[cfg(feature = "polars")]
     #[error("Failed polars parse: {0}")]
     PolarsParse(polars::error::PolarsError),
+    #[error("Cannot reshape chunks to fit within request limit (single row bytes {0} > {1})")]
+    CannotReshape(String, MaxRequestSize),
 }
+
+pub const DEFAULT_MAX_BATCH_BYTES: usize = 10240000;
 
 /// Plateau client. Creation options:
 /// ```
@@ -96,6 +104,8 @@ pub enum Error {
 pub struct Client {
     server_url: Url,
     http_client: reqwest::Client,
+    max_batch_bytes: usize,
+    max_rows: Option<usize>,
 }
 
 const DEFAULT_PLATEAU_PORT: u16 = 3030;
@@ -111,6 +121,8 @@ impl Default for Client {
         Self {
             server_url: localhost(),
             http_client: reqwest::Client::new(),
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            max_rows: None,
         }
     }
 }
@@ -120,6 +132,8 @@ impl From<Url> for Client {
         Self {
             server_url: orig,
             http_client: reqwest::Client::new(),
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            max_rows: None,
         }
     }
 }
@@ -131,13 +145,25 @@ impl FromStr for Client {
         Ok(Self {
             server_url: s.parse()?,
             http_client: reqwest::Client::new(),
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            max_rows: None,
         })
     }
 }
 
-// send request to server and perform basic erorr handling
+// send request to server and perform basic error handling
 async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
-    let response = r.send().await.map_err(Error::SendingRequest)?;
+    let (client, result) = r.build_split();
+    let request = result.map_err(Error::SendingRequest)?;
+    let body_len = request
+        .body()
+        .and_then(|body| body.as_bytes())
+        .map(|bytes| format!("{}", bytes.len()))
+        .unwrap_or_else(|| "streaming".to_string());
+    let response = client
+        .execute(request)
+        .await
+        .map_err(Error::SendingRequest)?;
 
     if response.status() == 413 {
         let max = response
@@ -145,7 +171,7 @@ async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
             .get(plateau_transport::headers::MAX_REQUEST_SIZE_HEADER)
             .and_then(|h| h.to_str().ok())
             .and_then(|s| usize::from_str(s).ok());
-        return Err(Error::RequestTooLong(MaxRequestSize(max)));
+        return Err(Error::RequestTooLong(body_len, MaxRequestSize(max)));
     }
 
     response.error_for_status().map_err(Error::Server)
@@ -298,6 +324,84 @@ impl Client {
         let builder = self.http_client.post(url).query(query);
         process_deserialize_request(records.add_to_request(builder)?).await
     }
+
+    /// Append many chunks of records to a topic. Attempts to dynamically resize
+    /// if batch size limits are encountered. See [InsertionQueue] for the ways
+    /// in which data can be provided.
+    pub async fn append_queue(
+        &mut self,
+        topic_name: impl AsRef<str>,
+        partition_name: impl AsRef<str>,
+        mut queue: impl InsertionQueue,
+    ) -> Result<Option<Inserted>, Error> {
+        let url = self
+            .server_url
+            .try_join("topic/")?
+            .try_join(add_trailing_slash(topic_name))?
+            .try_join("partition/")?
+            .try_join(partition_name.as_ref())?;
+
+        let mut final_insertion = None;
+        if let Some(max_rows) = self.max_rows {
+            queue.reshape(max_rows);
+        }
+
+        while let Some(mut front) = queue.front()? {
+            let builder = self.http_client.post(url.clone());
+            while front.bytes.len() > self.max_batch_bytes && queue.can_reshape() {
+                trace!(
+                    current_front_rows = front.rows,
+                    current_front_bytes = front.bytes.len()
+                );
+
+                let max_rows = front.rows.div_ceil(2);
+                self.max_rows = Some(max_rows);
+                queue.reshape(max_rows);
+
+                // SAFETY: reshape preserves the total number of rows, so a
+                // reshape of a non-empty queue must also be non-empty
+                front = queue.front()?.unwrap();
+                warn!(
+                    "decreasing inferred max row count: {max_rows} ({} bytes)",
+                    front.bytes.len()
+                );
+            }
+
+            let builder = builder
+                .header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
+                .header(CONTENT_LENGTH, front.bytes.len())
+                .body(front.bytes);
+            let result = process_deserialize_request(builder).await;
+
+            match result {
+                Ok(r) => {
+                    final_insertion = Some(r);
+                    trace!(sent_rows = front.rows);
+                    queue.pop_front()
+                }
+                Err(e) => {
+                    if let Error::RequestTooLong(request_size, MaxRequestSize(Some(s))) = e {
+                        if front.rows > 1 {
+                            warn!("detected new max plateau batch byte limit: {s}");
+                            self.max_batch_bytes = s;
+                            // return to sender: because we don't pop_front here
+                            // we'll start again from the top with the new limit
+                        } else {
+                            // we can't shrink below one row, so just die
+                            return Err(Error::CannotReshape(
+                                request_size,
+                                MaxRequestSize(Some(s)),
+                            ));
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+
+        Ok(final_insertion)
+    }
 }
 
 pub trait ArrowStream:
@@ -394,13 +498,72 @@ impl Insertion for SizedArrowStream {
     }
 }
 
+pub struct QueueChunk {
+    bytes: Vec<u8>,
+    rows: usize,
+}
+
+pub trait InsertionQueue {
+    /// Return the byte representation of the front queue chunk.
+    fn front(&self) -> Result<Option<QueueChunk>, Error>;
+
+    /// Remove the front chunk from the queue
+    fn pop_front(&mut self);
+
+    /// Return `true` if this queue can be reshaped (otherwise,
+    /// [InsertionQueue::reshape] will do nothing).
+    fn can_reshape(&self) -> bool;
+
+    /// Resize the queue so that all chunks have fewer than `max_rows` rows.
+    /// This operation must preserve the overall length: the total number of
+    /// rows in the resulting queue should equal the prior total number of rows.
+    fn reshape(&mut self, max_rows: usize);
+}
+
+impl InsertionQueue for MultiChunk {
+    fn front(&self) -> Result<Option<QueueChunk>, Error> {
+        self.chunks
+            .front()
+            .map(|chunk| {
+                let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+                let options = ipc::write::WriteOptions { compression: None };
+
+                let mut writer =
+                    ipc::write::FileWriter::new(bytes, self.schema.clone(), None, options);
+
+                writer.start().map_err(Error::ArrowSerialize)?;
+                let rows = chunk.len();
+                writer.write(chunk, None).map_err(Error::ArrowSerialize)?;
+                writer.finish().map_err(Error::ArrowSerialize)?;
+
+                Ok(QueueChunk {
+                    bytes: writer.into_inner().into_inner(),
+                    rows,
+                })
+            })
+            .transpose()
+    }
+
+    fn pop_front(&mut self) {
+        self.chunks.pop_front();
+    }
+
+    fn can_reshape(&self) -> bool {
+        self.chunks.front().map(|c| c.len() > 1).unwrap_or(false)
+    }
+
+    fn reshape(&mut self, max_rows: usize) {
+        self.rechunk(max_rows)
+    }
+}
+
 pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
     let mut cursor = io::Cursor::new(bytes);
     let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
     let schema = metadata.schema.clone();
     let reader = ipc::read::FileReader::new(cursor, metadata, None, None);
     let chunks = reader
-        .collect::<Result<Vec<_>, _>>()
+        .collect::<Result<VecDeque<_>, _>>()
         .map_err(Error::ArrowDeserialize)?;
 
     Ok(MultiChunk { schema, chunks })
@@ -735,16 +898,41 @@ impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
     }
 }
 
+#[async_trait]
+impl Retrieve<MultiChunk> for Client {
+    /// Retrieve a set of records from a specifid topic and partition, returning results in
+    /// [`SchemaChunk<Schema>`] format.
+    async fn get_records(
+        &self,
+        topic_name: impl AsRef<str> + Send,
+        partition_name: impl AsRef<str> + Send,
+        params: &RecordQuery,
+    ) -> Result<MultiChunk, Error> {
+        let bytes = process_request(
+            self.retrieve_request(topic_name, partition_name, params)?
+                .header("accept", CONTENT_TYPE_ARROW),
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(Error::Server)?;
+
+        bytes_into_multichunk(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
+    use crate::replicate::test::{inferences_large, setup_with_config};
     use httptest::{
         all_of,
         matchers::{contains, eq, json_decoded, key, len, not, request, url_decoded},
         responders::json_encoded,
         Expectation, Server,
     };
+    use plateau::{http, Config as PlateauConfig};
     use plateau_transport::{
         arrow2::{
             array::PrimitiveArray,
@@ -1056,6 +1244,8 @@ mod tests {
         let client = Client {
             server_url: crate::Url::parse(&server.base()).unwrap(),
             http_client: Default::default(),
+            max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
+            max_rows: None,
         };
 
         let response = client
@@ -1063,7 +1253,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            "RequestTooLong(MaxRequestSize(Some(5)))",
+            "RequestTooLong(\"1035\", MaxRequestSize(Some(5)))",
             format!("{:?}", response.err().unwrap())
         );
     }
@@ -1142,6 +1332,35 @@ mod tests {
 
         assert_eq!(response.span.start, 0);
         assert_eq!(response.span.end, 5);
+    }
+
+    #[tokio::test]
+    async fn single_large_row_fails() -> anyhow::Result<()> {
+        let (_, mut client_source, _source) = setup_with_config(PlateauConfig {
+            http: http::Config {
+                max_append_bytes: 1000,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+
+        let queue = MultiChunk::from(inferences_large());
+
+        let topic = "replicate";
+        let partition = "a";
+
+        let result = client_source.append_queue(topic, partition, queue).await;
+
+        // oh, if only assert_matches! was stable...
+        let Err(Error::CannotReshape(size, request_size)) = result else {
+            panic!("unexpected result {result:?}")
+        };
+
+        assert_eq!(size, "2635");
+        assert_eq!(request_size, MaxRequestSize(Some(1000)));
+
+        Ok(())
     }
 
     #[cfg(feature = "polars")]
