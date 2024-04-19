@@ -19,7 +19,7 @@ use plateau_transport::{
     arrow2,
     arrow2::bitmap::Bitmap,
     headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
-    test::inferences_large,
+    test::inferences_large_extension,
 };
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
@@ -524,7 +524,7 @@ async fn max_request_header() -> Result<()> {
 
 #[test_log::test(tokio::test)]
 async fn large_appends() -> Result<()> {
-    let large = inferences_large(1_000_000);
+    let large = inferences_large_extension(5, 200_000, "[2, 1000, 100]");
 
     let server = TestServer::new_with_config(PlateauConfig {
         http: http::Config {

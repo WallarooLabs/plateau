@@ -1,3 +1,5 @@
+use arrow2::array::FixedSizeListArray;
+
 use crate::{
     arrow2::{
         array::{
@@ -5,7 +7,7 @@ use crate::{
             Utf8Array,
         },
         chunk::Chunk,
-        datatypes::{Field, Metadata, Schema},
+        datatypes::{DataType, Field, Metadata, Schema},
     },
     SchemaChunk,
 };
@@ -47,5 +49,38 @@ pub fn inferences_large(blob_size: usize) -> SchemaChunk<Schema> {
             failures.boxed(),
         ])
         .unwrap(),
+    }
+}
+
+pub fn inferences_large_extension(count: i64, inner_size: i64, shape: &str) -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(0..count);
+
+    let inner = PrimitiveArray::<i64>::from_values(
+        (0..count).flat_map(|ix| (0..inner_size).map(move |_| ix)),
+    );
+    let tensor = FixedSizeListArray::new(
+        DataType::Extension(
+            "arrow.fixed_shape_tensor".to_string(),
+            Box::new(DataType::FixedSizeList(
+                Box::new(Field::new("inner", inner.data_type().clone(), false)),
+                inner_size as usize,
+            )),
+            Some(format!("{{\"shape\":{shape}}}")),
+        ),
+        inner.to_boxed(),
+        None,
+    );
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![time.boxed(), tensor.boxed()]).unwrap(),
     }
 }

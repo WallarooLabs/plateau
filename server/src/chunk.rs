@@ -498,10 +498,12 @@ pub mod test {
     #[test]
     fn test_size_estimates() -> Result<(), ChunkError> {
         let time_size = 5 * 8;
-        let a_size = time_size + 10 * 8 + 5 * 4 + 10 * 8 + 5 * 4;
+        let unknown = 40;
+        let a_size = time_size + 10 * 8 + 5 * 4 + 10 * 8 + 5 * 4 + unknown;
         assert_eq!(estimate_size(&inferences_schema_a().chunk)?, a_size);
         let numbers = 3 + 3 + 5 + 4 + 4;
-        let b_size = time_size + numbers + 5 * 4;
+        let unknown = 48;
+        let b_size = time_size + numbers + 5 * 4 + unknown;
         assert_eq!(estimate_size(&inferences_schema_b().chunk)?, b_size);
 
         assert_eq!(

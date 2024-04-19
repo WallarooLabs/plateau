@@ -7,6 +7,7 @@ use std::{
     io::Cursor,
 };
 
+use arrow2::compute::aggregate::estimated_bytes_size;
 use arrow2::{
     array::{Array, StructArray},
     chunk::Chunk,
@@ -57,12 +58,13 @@ pub enum ChunkError {
 
 /// Estimate the size of a [Chunk]. The estimate does not include null bitmaps or extent buffers.
 pub fn estimate_size(chunk: &SegmentChunk) -> Result<usize, ChunkError> {
-    chunk
+    Ok(chunk
         .arrays()
         .iter()
-        .map(|a| estimate_array_size(a.as_ref()))
-        .sum()
+        .map(|a| estimated_bytes_size(a.as_ref()))
+        .sum())
 }
+
 pub fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
     match arr.data_type() {
         DataType::UInt8 => Ok(arr.len()),
