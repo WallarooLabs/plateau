@@ -11,14 +11,16 @@ pub mod chunk;
 mod compatible;
 pub mod config;
 pub mod http;
-mod limit;
+pub mod limit;
 pub mod manifest;
 pub mod metrics;
-mod partition;
+pub mod partition;
 pub mod replication;
 mod segment;
 mod slog;
 mod storage;
+#[cfg(any(test, bench, feature = "test"))]
+pub mod test;
 mod topic;
 
 pub use crate::config::PlateauConfig as Config;
@@ -91,14 +93,4 @@ pub async fn task_from_catalog_config(
     tracing::info!("shutting down");
     end_tx.send(()).ok();
     Catalog::close_arc(catalog).await
-}
-
-#[cfg(test)]
-mod test {
-    use tracing_subscriber::{fmt, EnvFilter};
-
-    #[ctor::ctor]
-    fn init_logging() {
-        fmt().with_env_filter(EnvFilter::from_default_env()).init();
-    }
 }

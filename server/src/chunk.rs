@@ -342,7 +342,7 @@ pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
     SegmentChunk::new(arrays)
 }
 
-#[cfg(any(test, bench, feature = "test"))]
+#[cfg(any(test, bench))]
 pub mod test {
     use super::*;
     use crate::arrow2::array::{ListArray, MutableListArray, StructArray, TryExtend};

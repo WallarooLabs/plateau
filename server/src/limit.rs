@@ -1,12 +1,13 @@
-use std::time::Duration;
-
+use crate::{
+    chunk::{IndexedChunk, Schema},
+    compatible::Compatible,
+};
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
-use plateau_transport::estimate_size;
+use std::time::Duration;
 
-use crate::chunk::{IndexedChunk, Schema};
-use crate::compatible::Compatible;
+use plateau_transport::estimate_size;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -27,17 +28,17 @@ impl Default for Retention {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Rolling {
-    pub max_segment_size: ByteSize,
-    pub max_segment_index: usize,
-    pub max_segment_duration: Option<Duration>,
+    pub max_bytes: ByteSize,
+    pub max_rows: usize,
+    pub max_duration: Option<Duration>,
 }
 
 impl Default for Rolling {
     fn default() -> Self {
         Self {
-            max_segment_size: ByteSize::mib(100),
-            max_segment_index: 100000,
-            max_segment_duration: None,
+            max_bytes: ByteSize::mib(100),
+            max_rows: 100000,
+            max_duration: None,
         }
     }
 }

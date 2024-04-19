@@ -24,16 +24,19 @@
 //! Load is shed by failing any roll or checkpoint operation while an existing
 //! background checkpoint is pending. This signals the topic partition to
 //! discard writes and stall rolls until the write completes.
-
 use std::cmp::{max, min};
-use std::ops::{Add, AddAssign, Range, RangeInclusive};
+use std::iter::Zip;
+use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+use std::vec;
 
 use anyhow::Result;
+use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use metrics::counter;
+use plateau_client::estimate_size;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -42,6 +45,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
 use crate::chunk::{self, Schema, TimeRange};
+use crate::limit::Rolling;
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
 
@@ -60,7 +64,7 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub write_queue_timeout: Duration,
     pub write_queue_size: usize,
-    pub min_full_chunk_len: usize,
+    pub chunk_limits: Rolling,
     pub segment: SegmentConfig,
 }
 
@@ -69,7 +73,11 @@ impl Default for Config {
         Self {
             write_queue_timeout: Duration::from_millis(100),
             write_queue_size: 1,
-            min_full_chunk_len: 1000,
+            chunk_limits: Rolling {
+                max_rows: 1000,
+                max_bytes: ByteSize::mib(1),
+                max_duration: None,
+            },
             segment: SegmentConfig::default(),
         }
     }
@@ -134,81 +142,149 @@ pub(crate) struct Slog {
     state: RwLock<State>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct SizedChunks {
+    chunks: Vec<SegmentChunk>,
+    bytes: Vec<usize>,
+    total_rows: usize,
+    total_bytes: usize,
+}
+
+impl SizedChunks {
+    fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    fn drain<R>(&mut self, range: R) -> impl Iterator<Item = (SegmentChunk, usize)> + '_
+    where
+        R: RangeBounds<usize> + Clone,
+    {
+        self.chunks
+            .drain(range.clone())
+            .zip(self.bytes.drain(range))
+    }
+
+    fn push(&mut self, chunk: SegmentChunk, bytes: usize) {
+        self.total_rows += chunk.len();
+        self.total_bytes += bytes;
+        self.chunks.push(chunk);
+        self.bytes.push(bytes);
+    }
+
+    fn pop(&mut self) -> Option<(SegmentChunk, usize)> {
+        let chunk = self.chunks.pop()?;
+        self.total_rows -= chunk.len();
+        let bytes = self.bytes.pop()?;
+        self.total_bytes -= bytes;
+        Some((chunk, bytes))
+    }
+
+    fn concat(mut self) -> anyhow::Result<(SegmentChunk, usize)> {
+        if self.len() == 1 {
+            return Ok((self.chunks.pop().unwrap(), self.bytes.pop().unwrap()));
+        }
+
+        let chunk = chunk::concatenate(&self.chunks)?;
+
+        Ok((chunk, self.total_bytes))
+    }
+}
+
+impl Extend<(SegmentChunk, usize)> for SizedChunks {
+    fn extend<T: IntoIterator<Item = (SegmentChunk, usize)>>(&mut self, iter: T) {
+        for (chunk, bytes) in iter.into_iter() {
+            self.push(chunk, bytes);
+        }
+    }
+}
+
+impl IntoIterator for SizedChunks {
+    type Item = (SegmentChunk, usize);
+
+    type IntoIter = Zip<vec::IntoIter<SegmentChunk>, vec::IntoIter<usize>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks.into_iter().zip(self.bytes)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MemorySegment {
     metadata: SegmentData,
     schema: Schema,
-    full_chunks: Vec<SegmentChunk>,
-    full_chunk_len: usize,
-    active_chunk: Vec<SegmentChunk>,
+    saved_chunks: Vec<SegmentChunk>,
+    saved_rows: usize,
+    active_chunks: SizedChunks,
 }
 
 impl MemorySegment {
     fn record_count(&self) -> usize {
-        self.full_chunks
+        self.saved_chunks
             .iter()
-            .chain(self.active_chunk.iter())
+            .chain(self.active_chunks.chunks.iter())
             .map(|c| c.len())
             .sum()
     }
 
     /// Compact the chunks that have accumulated in this memory segment into
-    /// "full" chunks that have a minimum size limit.
+    /// "full" chunks that each exceed configurable row or byte limits.
     ///
-    /// Any existing chunks that meet the size limit will be left unmodified.
+    /// Any existing chunks that already meet the size limits will be left
+    /// unmodified.
     ///
     /// The final chunk will often be a "partial" chunk that does not meet the
     /// size limit. Future calls to `compact` will merge any new chunks into
     /// this partial chunk until it meets the limit, at which point the cycle
     /// begins anew.
     ///
-    /// Returns the total number of rows in this memory segment.
+    /// Returns the total number of rows in the active chunk.
     fn compact(&mut self, config: &Config) -> usize {
-        if self.active_chunk.is_empty() {
+        if self.active_chunks.is_empty() {
             return 0;
         }
 
-        let mut last_ix = 0;
-        let mut indices = vec![];
-        let mut cur_rows = 0;
-        let mut all_rows = 0;
-        for (ix, chunk) in self.active_chunk.iter().enumerate() {
-            all_rows += chunk.len();
-            cur_rows += chunk.len();
-            if cur_rows >= config.min_full_chunk_len {
-                let next = ix + 1;
-                trace!("full chunk {:?} {}", last_ix..next, cur_rows);
-                indices.push(last_ix..next);
-                last_ix = next;
-                cur_rows = 0;
-            }
-        }
-
-        fn log_concat(slice: &[SegmentChunk]) -> Option<SegmentChunk> {
-            if slice.len() > 1 {
-                match chunk::concatenate(slice) {
-                    Ok(full_chunk) => Some(full_chunk),
-                    Err(e) => {
-                        error!("error building full chunk: {:?}", e);
-                        None
-                    }
+        let mut start_ix = 0;
+        let mut partial = SizedChunks::default();
+        let mut compact = SizedChunks::default();
+        for (ix, (chunk, bytes)) in self.active_chunks.drain(..).enumerate() {
+            partial.push(chunk, bytes);
+            if partial.total_rows >= config.chunk_limits.max_rows
+                || partial.total_bytes >= config.chunk_limits.max_bytes.0 as usize
+            {
+                let prior_start = start_ix;
+                start_ix = ix + 1;
+                trace!(
+                    "full chunk {:?} {}",
+                    prior_start..start_ix,
+                    partial.total_rows
+                );
+                match std::mem::take(&mut partial).concat() {
+                    Ok((chunk, bytes)) => compact.push(chunk, bytes),
+                    Err(e) => error!("error building full chunk: {:?}", e),
                 }
-            } else {
-                slice.first().cloned()
             }
         }
 
-        let active = std::mem::take(&mut self.active_chunk);
-        let mut compact = vec![];
-        for slice in indices {
-            compact.extend(log_concat(&active[slice]));
+        if !partial.is_empty() {
+            trace!(
+                "compact active segment {:?} {}",
+                start_ix..(start_ix + partial.len()),
+                partial.total_rows
+            );
+            match partial.concat() {
+                Ok((chunk, bytes)) => compact.push(chunk, bytes),
+                Err(e) => error!("error building final partial chunk: {:?}", e),
+            };
         }
 
-        trace!("compact active segment {:?}", last_ix..active.len());
-        compact.extend(log_concat(&active[last_ix..]));
-        self.active_chunk = compact;
+        let total_rows = compact.total_rows;
+        self.active_chunks = compact;
 
-        all_rows
+        total_rows
     }
 }
 
@@ -324,9 +400,9 @@ impl Slog {
             // NOTE: the backing [Buffer] behind arrow2 arrays is actually
             // arc-ed, so the clones here _should_ be relatively cheap.
             let mut chunks: Vec<_> = in_mem
-                .full_chunks
+                .saved_chunks
                 .iter()
-                .chain(in_mem.active_chunk.iter())
+                .chain(in_mem.active_chunks.chunks.iter())
                 .cloned()
                 .collect();
 
@@ -388,7 +464,11 @@ impl Slog {
 
         let matches = active.as_ref().map_or(true, |s| &s.schema == other);
         if !matches {
-            trace!("{:?} != {:?}", active.as_ref().map(|s| &s.schema), other);
+            trace!(
+                "schema mismatch: {:?} != {:?}",
+                active.as_ref().map(|s| &s.schema),
+                other
+            );
         }
 
         matches
@@ -432,7 +512,15 @@ impl State {
         let index = self.active_checkpoint.segment;
         let data_time_range = d.time_range().unwrap();
 
-        let size = d.chunk.len();
+        let len = d.chunk.len();
+        let bytes = match estimate_size(&d.chunk) {
+            Ok(size) => size,
+            Err(e) => {
+                error!("error estimating chunk size: {e:?}");
+                len
+            }
+        };
+
         let active = self.active.get_or_insert_with(|| MemorySegment {
             schema: d.schema,
             metadata: SegmentData {
@@ -442,16 +530,16 @@ impl State {
                 time: data_time_range.clone(),
                 version: SEGMENT_FORMAT_VERSION,
             },
-            full_chunks: vec![],
-            full_chunk_len: 0,
-            active_chunk: vec![],
+            saved_chunks: vec![],
+            saved_rows: 0,
+            active_chunks: Default::default(),
         });
 
-        active.metadata.size += size;
-        active.metadata.records.end += size;
+        active.metadata.size += bytes;
+        active.metadata.records.end += len;
         active.metadata.time = min(*active.metadata.time.start(), *data_time_range.start())
             ..=max(*active.metadata.time.end(), *data_time_range.end());
-        active.active_chunk.push(d.chunk);
+        active.active_chunks.push(d.chunk, bytes);
 
         Checkpoint {
             segment: index,
@@ -479,23 +567,35 @@ impl State {
     }
 
     /// Checkpoints make an `AppendRequest` to the writer thread for for all
-    /// records in memory that were not stored in the last checkpoint. If `seal`
-    /// is set, the request additionally indicates that the current segment
-    /// should be finalized via `close()`, which writes the parquet footer and
-    /// syncs the file.
+    /// records in memory that were not stored in the last checkpoint.
+    ///
+    /// If `seal` is set, the request additionally indicates that the current
+    /// segment should be finalized via `close()`, which closes the underlying
+    /// segment and begins a new one.
+    ///
+    /// If the checkpoint is successful, all active chunks except for the last
+    /// (partial) chunk are considered "saved". They are "full", will not be
+    /// modified, and do not need to be resent to the writer. The final partial
+    /// chunk has been persisted as well, but may receive future updates before
+    /// it is "saved".
+    ///
+    /// We keep this final partial chunk "open" for efficiency reasons. See the
+    /// implementation of the active chunk cache in [crate::segment] for details.
+    ///
+    /// Returns `true` if the checkpoint was successful, and `false` if it timed
+    /// out.
     async fn checkpoint(&mut self, seal: bool) -> bool {
         if let Some(segment) = &mut self.active {
             let active_rows = segment.compact(&self.config);
 
             let active_start = segment.metadata.records.start;
-            let records = active_start..(active_start + segment.full_chunk_len + active_rows);
-            if !segment.active_chunk.is_empty() && records.end > self.active_checkpoint.record {
-                let mut full_chunks = std::mem::take(&mut segment.active_chunk);
-                let active_chunk = full_chunks
-                    .split_off(full_chunks.len() - 1)
-                    .into_iter()
-                    .next()
-                    .unwrap(); // SAFETY: !segment.active_chunk.is_empty(), so full_chunks.len() > 0
+            let records = active_start..(active_start + segment.saved_rows + active_rows);
+
+            if !segment.active_chunks.is_empty() && records.end > self.active_checkpoint.record {
+                let mut full_chunks = std::mem::take(&mut segment.active_chunks);
+                let Some((active_chunk, active_bytes)) = full_chunks.pop() else {
+                    return true;
+                };
 
                 let request = AppendRequest {
                     seal,
@@ -503,7 +603,7 @@ impl State {
                     records: records.clone(),
                     time: segment.metadata.time.clone(),
                     schema: segment.schema.clone(),
-                    full_chunks: full_chunks.clone(),
+                    full_chunks: full_chunks.chunks.clone(),
                     active_chunk: active_chunk.clone(),
                 };
 
@@ -523,13 +623,14 @@ impl State {
                 .await
                 .is_ok_and(|r| r.is_ok())
                 {
-                    segment.full_chunk_len += full_chunks.iter().map(|c| c.len()).sum::<usize>();
-                    segment.full_chunks.extend(full_chunks);
-                    segment.active_chunk = vec![active_chunk];
+                    segment.saved_rows += full_chunks.chunks.iter().map(|c| c.len()).sum::<usize>();
+                    segment.saved_chunks.extend(full_chunks.chunks);
+                    segment.active_chunks = SizedChunks::default();
+                    segment.active_chunks.push(active_chunk, active_bytes);
                     self.active_checkpoint.record = records.end;
                 } else {
-                    full_chunks.push(active_chunk);
-                    segment.active_chunk = full_chunks;
+                    full_chunks.push(active_chunk, active_bytes);
+                    segment.active_chunks = full_chunks;
                     return false;
                 }
             }

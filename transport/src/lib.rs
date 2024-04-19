@@ -35,6 +35,9 @@ pub mod headers {
     pub static MAX_REQUEST_SIZE_HEADER: &str = "x-max-request-size";
 }
 
+#[cfg(feature = "test")]
+pub mod test;
+
 #[derive(Error, Debug)]
 pub enum ChunkError {
     #[error("unsupported type: {0}")]

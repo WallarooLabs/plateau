@@ -34,3 +34,4 @@ utoipa = { version = "4", features = ["axum_extras"] }
 [features]
 rweb = ["dep:rweb"]
 clap = ["dep:clap"]
+test = []

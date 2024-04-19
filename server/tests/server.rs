@@ -1,5 +1,4 @@
 use std::io::Cursor;
-use std::net::SocketAddr;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -10,14 +9,17 @@ use arrow2::array::{
 use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use arrow2::io::ipc::{read, write};
+use bytesize::ByteSize;
 use plateau::chunk::Schema;
 use plateau::config::PlateauConfig;
-use plateau::http;
-use plateau::http::TestServer;
-use plateau_client::arrow2::bitmap::Bitmap;
+use plateau::test::TestServer;
+use plateau::{catalog, http, limit, partition};
+use plateau_client::{Error as ClientError, MultiChunk, Retrieve};
 use plateau_transport::{
     arrow2,
+    arrow2::bitmap::Bitmap,
     headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
+    test::inferences_large,
 };
 use reqwest::{Client, Response};
 use serde_json::{json, Value};
@@ -113,45 +115,6 @@ pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
     let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
         vec!["one", "two", "three", "four", "five"].into_iter(),
     );
-    let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-    let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-    let values: Vec<Option<Vec<Option<String>>>> = vec![
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-    ];
-    failures.try_extend(values).unwrap();
-    let failures = ListArray::from(failures);
-
-    let schema = Schema {
-        fields: vec![
-            Field::new("time", time.data_type().clone(), false),
-            Field::new("inputs", inputs.data_type().clone(), false),
-            Field::new("outputs", outputs.data_type().clone(), false),
-            Field::new("failures", failures.data_type().clone(), false),
-        ],
-        metadata: Metadata::default(),
-    };
-
-    SchemaChunk {
-        schema,
-        chunk: Chunk::try_new(vec![
-            time.boxed(),
-            inputs.boxed(),
-            outputs.boxed(),
-            failures.boxed(),
-        ])
-        .unwrap(),
-    }
-}
-
-pub(crate) fn inferences_large() -> SchemaChunk<Schema> {
-    let large = "x".repeat(1_000_000);
-    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-    let inputs =
-        Utf8Array::<i32>::from_trusted_len_values_iter(std::iter::repeat(large.as_str()).take(5));
     let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
     let values: Vec<Option<Vec<Option<String>>>> = vec![
@@ -378,11 +341,15 @@ const TEST_MESSAGE: &str = "this is my test message. it's not that long but it's
 it just needs to be long enough that we can start hitting the byte limit before we hit \
 the default record limit.";
 
-async fn setup() -> (Client, String, http::TestServer) {
+async fn setup() -> (Client, String, TestServer) {
     setup_with_config(Default::default()).await
 }
 
-async fn setup_with_config(config: http::Config) -> (Client, String, http::TestServer) {
+fn random_topic() -> String {
+    format!("topic-{}", uuid::Uuid::new_v4())
+}
+
+async fn setup_with_config(config: http::Config) -> (Client, String, TestServer) {
     fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .try_init()
@@ -390,12 +357,9 @@ async fn setup_with_config(config: http::Config) -> (Client, String, http::TestS
 
     (
         Client::new(),
-        format!("topic-{}", uuid::Uuid::new_v4()),
-        http::TestServer::new_with_config(PlateauConfig {
-            http: http::Config {
-                bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-                ..config
-            },
+        random_topic(),
+        TestServer::new_with_config(PlateauConfig {
+            http: config,
             ..PlateauConfig::default()
         })
         .await
@@ -559,53 +523,65 @@ async fn max_request_header() -> Result<()> {
 }
 
 #[test_log::test(tokio::test)]
-async fn large_append() -> Result<()> {
-    let large = inferences_large();
+async fn large_appends() -> Result<()> {
+    let large = inferences_large(1_000_000);
 
-    let (client, topic_name, server) = setup_with_config(http::Config {
-        max_append_bytes: 20,
+    let server = TestServer::new_with_config(PlateauConfig {
+        http: http::Config {
+            max_append_bytes: 20,
+            ..Default::default()
+        },
         ..Default::default()
     })
-    .await;
+    .await?;
+    let client = server.client()?;
+    let topic_name = random_topic();
 
-    let err = chunk_append(
-        &client,
-        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
-        large.clone(),
-    )
-    .await;
-
-    assert_eq!(
-        err.err()
-            .unwrap()
-            .downcast::<reqwest::Error>()
-            .unwrap()
-            .status(),
-        Some(reqwest::StatusCode::PAYLOAD_TOO_LARGE)
-    );
-
-    let (client, topic_name, server) = setup().await;
-
-    for _ in 0..10 {
-        chunk_append(
-            &client,
-            append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+    let err = client
+        .append_records(
+            &topic_name,
+            PARTITION_NAME,
+            &Default::default(),
             large.clone(),
         )
-        .await?;
-    }
+        .await;
 
-    let topic_url = topic_records_url(&server, &topic_name);
-    let (_, chunks): (Schema, Vec<SegmentChunk>) = read_next_chunks(
-        &client,
-        topic_url.as_str(),
-        Some(json!({})),
-        29,
-        DataFocus::default(),
-    )
+    assert!(matches!(err, Err(ClientError::RequestTooLong(_, _))));
+
+    let server = TestServer::new_with_config(PlateauConfig {
+        catalog: catalog::Config {
+            partition: partition::Config {
+                roll: limit::Rolling {
+                    max_bytes: ByteSize::mb(15),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..Default::default()
+    })
     .await?;
+    let client = server.client()?;
 
-    assert_eq!(chunks[0].len(), 5);
+    for _ in 0..10 {
+        client
+            .append_records(
+                &topic_name,
+                PARTITION_NAME,
+                &Default::default(),
+                large.clone(),
+            )
+            .await?;
+    }
+    server.catalog.checkpoint().await;
+
+    let multi: MultiChunk = client
+        .get_records(&topic_name, PARTITION_NAME, &Default::default())
+        .await?;
+
+    assert_eq!(multi.chunks.len(), 1);
+    assert_eq!(multi.chunks[0].len(), 5);
 
     Ok(())
 }

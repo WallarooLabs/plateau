@@ -461,7 +461,7 @@ impl State {
 
         if let Some(data) = self.messages.active_segment_data().await {
             let roll = &partition.config.roll;
-            if let Some(d) = roll.max_segment_duration {
+            if let Some(d) = roll.max_duration {
                 let dt = Instant::now() - self.last_roll;
                 if dt > d {
                     info!(
@@ -474,13 +474,20 @@ impl State {
             }
 
             let current_len = data.records.end.0 - data.records.start.0;
-            if current_len > roll.max_segment_index {
-                info!("rolling {}: length is {}", partition.id, current_len);
+            if current_len > roll.max_rows {
+                info!(
+                    "rolling {}: length {} > {}",
+                    partition.id, current_len, roll.max_rows
+                );
                 return self.roll(partition).await;
             }
 
-            if data.size > (roll.max_segment_size.as_u64() as usize) {
-                info!("rolling {}: current size is {}", partition.id, data.size);
+            let max_bytes = roll.max_bytes.as_u64() as usize;
+            if data.size > max_bytes {
+                info!(
+                    "rolling {}: current size {} > {}",
+                    partition.id, data.size, max_bytes
+                );
                 return self.roll(partition).await;
             }
         }
@@ -841,7 +848,7 @@ pub mod test {
     fn segment_3s() -> Config {
         Config {
             roll: Rolling {
-                max_segment_index: 2,
+                max_rows: 2,
                 ..Rolling::default()
             },
             ..Config::default()
@@ -986,7 +993,10 @@ pub mod test {
     fn batch_limit(write_queue_batch_limit: usize) -> Config {
         Config {
             slog: slog::Config {
-                min_full_chunk_len: write_queue_batch_limit,
+                chunk_limits: Rolling {
+                    max_rows: write_queue_batch_limit,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..segment_3s()
@@ -1126,22 +1136,22 @@ pub mod test {
 
     // NOTE: multiple copies of this test to expose and reliably reproduce an
     // underlying concurrency bug
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_schema_change1() -> Result<()> {
         _test_schema_change().await
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_schema_change2() -> Result<()> {
         _test_schema_change().await
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_schema_change3() -> Result<()> {
         _test_schema_change().await
     }
 
-    #[tokio::test]
+    #[test_log::test(tokio::test)]
     async fn test_schema_change4() -> Result<()> {
         _test_schema_change().await
     }
@@ -1433,7 +1443,7 @@ pub mod test {
             id,
             Config {
                 roll: Rolling {
-                    max_segment_index: 2,
+                    max_rows: 2,
                     ..Rolling::default()
                 },
                 retain: Retention {
@@ -1527,7 +1537,7 @@ pub mod test {
             id,
             Config {
                 roll: Rolling {
-                    max_segment_index: 2,
+                    max_rows: 2,
                     ..Rolling::default()
                 },
                 ..Config::default()
