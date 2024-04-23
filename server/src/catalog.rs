@@ -48,6 +48,7 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug)]
 #[must_use = "close() explicitly to flush writes"]
 pub struct Catalog {
     config: Config,

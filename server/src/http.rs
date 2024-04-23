@@ -154,6 +154,7 @@ pub async fn serve(
 ///
 /// Currently, we assume that only one test server can run at a given time to
 /// prevent port conflicts.
+#[derive(Debug)]
 pub struct TestServer {
     addr: SocketAddr,
     end_tx: oneshot::Sender<()>,

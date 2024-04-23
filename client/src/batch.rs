@@ -43,6 +43,7 @@ pub enum TransmissionError {
 pub type TransmissionResult<T> = Result<T, TransmissionError>;
 pub type BatchResult = Result<(), BatchSendError>;
 
+#[derive(Debug)]
 pub enum BatchSendError {
     /// The batch failed to send, and should be retried as-is
     Retriable,
@@ -52,11 +53,12 @@ pub enum BatchSendError {
     Fail,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct BatchClient {
     client: Client,
     pub max_batch_bytes: usize,
 }
+
 impl BatchClient {
     pub fn new(base_url: &str) -> Result<Self, ClientError> {
         Ok(Self {

@@ -529,8 +529,8 @@ impl MultiChunk {
 }
 
 impl From<SchemaChunk<ArrowSchema>> for MultiChunk {
-    fn from(sc: SchemaChunk<ArrowSchema>) -> MultiChunk {
-        MultiChunk {
+    fn from(sc: SchemaChunk<ArrowSchema>) -> Self {
+        Self {
             schema: sc.schema,
             chunks: [sc.chunk].into(),
         }

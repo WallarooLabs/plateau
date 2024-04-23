@@ -70,6 +70,7 @@ impl std::fmt::Debug for Partition {
     }
 }
 
+#[derive(Debug)]
 pub struct State {
     last_roll: Instant,
     messages: Slog,

@@ -24,6 +24,7 @@ use tracing::debug;
 
 type PartitionMap = HashMap<String, Partition>;
 
+#[derive(Debug)]
 #[must_use = "close() explicitly to flush writes"]
 pub struct Topic {
     root: PathBuf,

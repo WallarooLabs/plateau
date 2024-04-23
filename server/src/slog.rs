@@ -135,6 +135,7 @@ impl AddAssign<usize> for RecordIndex {
 pub(crate) type SlogWrites = mpsc::Receiver<WriteResult>;
 
 /// A slog (segment log) is a named and ordered series of segments.
+#[derive(Debug)]
 #[must_use = "close() explicitly to flush writes"]
 pub(crate) struct Slog {
     root: PathBuf,
@@ -288,6 +289,7 @@ impl MemorySegment {
     }
 }
 
+#[derive(Debug)]
 struct State {
     active: Option<MemorySegment>,
     active_checkpoint: Checkpoint,
@@ -669,6 +671,7 @@ impl State {
     }
 }
 
+#[derive(Debug)]
 struct SlogThread {
     tx: mpsc::Sender<WriterMessage>,
     tx_fin: oneshot::Sender<()>,

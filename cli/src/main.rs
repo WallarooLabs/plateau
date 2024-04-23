@@ -17,28 +17,6 @@ use plateau_client::{
 mod display;
 pub use display::CliDisplay;
 
-// #[derive(Debug)]
-// struct Url(url::Url);
-
-// impl Default for Url {
-//     fn default() -> Url {
-//         Url(localhost())
-//     }
-// }
-
-// impl Display for Url {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         self.0.fmt(f)
-//     }
-// }
-
-// impl FromStr for Url {
-//     type Err = url::ParseError;
-//     fn from_str(s: &str) -> Result<Self, Self::Err> {
-//         Ok(Url(url::Url::from_str(s)?))
-//     }
-// }
-
 #[derive(Debug, Parser)]
 #[command(
     name = "plateau-cli",

@@ -41,7 +41,7 @@ impl fmt::Display for ClientPartition {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ReplicatePartitionJob {
     source: ClientPartition,
     target: ClientPartition,
@@ -123,7 +123,7 @@ impl ReplicatePartitionJob {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ClientTopic {
     host_id: String,
     topic: String,
@@ -149,7 +149,7 @@ impl fmt::Display for ClientTopic {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReplicateTopicJob {
     source: ClientTopic,
     target: ClientTopic,
@@ -240,7 +240,7 @@ impl Default for Config {
 }
 
 /// Driver for a number of replication jobs configured via [`Replicate`].
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReplicationWorker {
     config: Config,
     hosts: HashMap<String, (String, Client)>,

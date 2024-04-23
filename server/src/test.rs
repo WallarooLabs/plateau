@@ -11,6 +11,7 @@ use crate::{http, Catalog, Config};
 ///
 /// Currently, we assume that only one test server can run at a given time to
 /// prevent port conflicts.
+#[derive(Debug)]
 pub struct TestServer {
     addr: SocketAddr,
     end_tx: oneshot::Sender<()>,
@@ -48,7 +49,7 @@ impl TestServer {
             tokio::spawn(crate::replication::run(replication, addr));
         }
 
-        Ok(TestServer {
+        Ok(Self {
             addr,
             end_tx,
             catalog,

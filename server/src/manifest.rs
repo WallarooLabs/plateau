@@ -33,11 +33,12 @@ use crate::slog::{RecordIndex, SegmentIndex};
 
 pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
-#[derive(PartialEq, Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Ordering {
     Forward,
     Reverse,
 }
+
 impl Ordering {
     fn to_sql_order(&self) -> &'static str {
         match self {
@@ -59,6 +60,7 @@ impl From<TopicIterationOrder> for Ordering {
     }
 }
 
+#[derive(Debug)]
 pub enum Scope<'a> {
     Global,
     Topic(&'a str),
@@ -105,7 +107,7 @@ impl<P: Borrow<PartitionId>> SegmentId<P> {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Manifest {
     pool: SqlitePool,
 }

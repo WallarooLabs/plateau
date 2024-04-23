@@ -6,6 +6,7 @@ use serde::de;
 #[derive(Debug)]
 pub struct Query<T>(pub T);
 
+#[derive(Debug)]
 #[non_exhaustive]
 pub enum QueryRejection {
     FailedToDeserializeQueryString,

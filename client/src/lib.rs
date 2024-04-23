@@ -158,8 +158,7 @@ async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
     let body_len = request
         .body()
         .and_then(|body| body.as_bytes())
-        .map(|bytes| format!("{}", bytes.len()))
-        .unwrap_or_else(|| "streaming".to_string());
+        .map_or_else(|| "streaming".to_string(), |bytes| bytes.len().to_string());
     let response = client
         .execute(request)
         .await
@@ -498,6 +497,16 @@ impl Insertion for SizedArrowStream {
     }
 }
 
+impl fmt::Debug for SizedArrowStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SizedArrowStream")
+            .field("stream", &"<ArrowStream>")
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 pub struct QueueChunk {
     bytes: Vec<u8>,
     rows: usize,
@@ -549,7 +558,7 @@ impl InsertionQueue for MultiChunk {
     }
 
     fn can_reshape(&self) -> bool {
-        self.chunks.front().map(|c| c.len() > 1).unwrap_or(false)
+        self.chunks.front().is_some_and(|c| c.len() > 1)
     }
 
     fn reshape(&mut self, max_rows: usize) {
