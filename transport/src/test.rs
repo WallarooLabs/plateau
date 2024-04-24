@@ -3,8 +3,8 @@ use arrow2::array::FixedSizeListArray;
 use crate::{
     arrow2::{
         array::{
-            Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, TryExtend,
-            Utf8Array,
+            Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray,
+            TryExtend, Utf8Array,
         },
         chunk::Chunk,
         datatypes::{DataType, Field, Metadata, Schema},
@@ -82,5 +82,68 @@ pub fn inferences_large_extension(count: i64, inner_size: i64, shape: &str) -> S
     SchemaChunk {
         schema,
         chunk: Chunk::try_new(vec![time.boxed(), tensor.boxed()]).unwrap(),
+    }
+}
+
+pub fn inferences_schema_a() -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+    let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
+    let inner = PrimitiveArray::<f64>::from_values(vec![
+        2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
+    ]);
+
+    // TODO: we need fixed size list array support, which currently is not
+    // in arrow2's parquet io module.
+    /*
+    let outputs = FixedSizeListArray::new(
+        DataType::FixedSizeList(
+            Box::new(Field::new("inner", inner.data_type().clone(), false)),
+            2,
+        ),
+        inner.to_boxed(),
+        None,
+    );
+    */
+    let offsets = vec![0, 2, 2, 4, 6, 8];
+    let tensor = ListArray::new(
+        DataType::List(Box::new(Field::new(
+            "inner",
+            inner.data_type().clone(),
+            false,
+        ))),
+        offsets.try_into().unwrap(),
+        inner.boxed(),
+        None,
+    );
+
+    let outputs = StructArray::new(
+        DataType::Struct(vec![
+            Field::new("mul", mul.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+        ]),
+        vec![mul.clone().boxed(), tensor.clone().boxed()],
+        None,
+    );
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+            Field::new("inputs", inputs.data_type().clone(), false),
+            Field::new("outputs", outputs.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![
+            time.boxed(),
+            tensor.boxed(),
+            inputs.boxed(),
+            outputs.boxed(),
+        ])
+        .unwrap(),
     }
 }
