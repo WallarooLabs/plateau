@@ -24,3 +24,7 @@ plateau-client = { path = "../client" }
 [features]
 default = ["polars"]
 polars = ["dep:polars", "plateau-client/polars"]
+
+
+[lints]
+workspace = true

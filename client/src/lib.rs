@@ -659,7 +659,7 @@ impl Iterate<ArrowIterationReply> for Client {
 pub trait IterateUnlimited<Output> {
     async fn iterate_topic_unlimited(
         &self,
-        topic_name: impl AsRef<str> + Send + std::marker::Copy,
+        topic_name: impl AsRef<str> + Send + Copy,
         params: &TopicIterationQuery,
     ) -> Result<Output, Error>;
 }
@@ -1240,7 +1240,7 @@ mod tests {
     async fn oversize_chunk_reports_max() {
         let chunk = example_chunk();
 
-        let server = plateau::http::TestServer::new_with_config(plateau::config::PlateauConfig {
+        let server = plateau::http::TestServer::new_with_config(PlateauConfig {
             http: plateau::http::Config {
                 max_append_bytes: 5,
                 ..plateau::http::Config::default()

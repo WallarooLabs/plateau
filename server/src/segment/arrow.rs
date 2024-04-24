@@ -7,15 +7,14 @@
 //! - `{segment}.recovered`: Fully recovered segment. Available after the
 //!   recovery process succesfully completes. Contains all rows that are
 //!   recoverable from any prior partially written segment file and cache.
-use anyhow::Result;
-use plateau_transport::SegmentChunk;
+
 use std::ffi::OsStr;
+use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::{
-    fs,
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+
+use plateau_transport::SegmentChunk;
 use tracing::{error, trace, warn};
 
 use crate::arrow2::{
@@ -33,7 +32,7 @@ use super::{cache, SegmentIterator};
 
 const ARROW_HEADER: &str = "ARROW1";
 
-pub fn check_file(f: &mut fs::File) -> Result<bool> {
+pub fn check_file(f: &mut fs::File) -> anyhow::Result<bool> {
     let mut buffer = [0u8; 6];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut buffer)?;
@@ -48,7 +47,7 @@ pub struct Segment {
 }
 
 impl Segment {
-    pub fn new(path: PathBuf) -> Result<Self> {
+    pub fn new(path: PathBuf) -> anyhow::Result<Self> {
         anyhow::ensure!(path.extension() != Some(OsStr::new("recovery")));
         anyhow::ensure!(path.extension() != Some(OsStr::new("recovered")));
 
@@ -64,13 +63,13 @@ impl Segment {
         })
     }
 
-    fn directory(&self) -> Result<fs::File> {
+    fn directory(&self) -> anyhow::Result<fs::File> {
         let mut parent = self.path.clone();
         parent.pop();
         fs::File::open(&parent).map_err(anyhow::Error::from)
     }
 
-    pub fn read(&self, cache: Option<cache::Data>) -> Result<Reader> {
+    pub fn read(&self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
         if self.recovered_path.exists() {
             trace!("reading from recovered file at {:?}", self.recovered_path);
             Reader::open(&self.recovered_path)
@@ -85,7 +84,7 @@ impl Segment {
         }
     }
 
-    fn recover(&self, cache: Option<cache::Data>) -> Result<(usize, Reader)> {
+    fn recover(&self, cache: Option<cache::Data>) -> anyhow::Result<(usize, Reader)> {
         warn!("beginning recovery of {:?}", self.path);
 
         // Combine all readable data from a damaged (partially written) segment with
@@ -207,7 +206,7 @@ pub struct Writer {
 }
 
 impl Writer {
-    pub fn create(file: fs::File, schema: &Schema) -> Result<Self> {
+    pub fn create(file: fs::File, schema: &Schema) -> anyhow::Result<Self> {
         let options = WriteOptions { compression: None };
         Ok(Self {
             writer: FileWriter::try_new(file.try_clone()?, schema.clone(), None, options)?,
@@ -215,15 +214,15 @@ impl Writer {
         })
     }
 
-    pub fn write_chunk(&mut self, chunk: SegmentChunk) -> Result<()> {
+    pub fn write_chunk(&mut self, chunk: SegmentChunk) -> anyhow::Result<()> {
         self.writer.write(&chunk, None).map_err(Into::into)
     }
 
-    pub fn checkpoint(&self) -> Result<()> {
+    pub fn checkpoint(&self) -> anyhow::Result<()> {
         self.file.sync_data().map_err(Into::into)
     }
 
-    pub fn end(mut self) -> Result<()> {
+    pub fn end(mut self) -> anyhow::Result<()> {
         self.writer.finish()?;
         self.file.sync_data()?;
 
@@ -242,7 +241,7 @@ pub struct Reader {
 }
 
 impl Reader {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let mut file = fs::File::open(&path)?;
 
         let mut data_scratch = vec![];
@@ -261,7 +260,7 @@ impl Reader {
         })
     }
 
-    fn read_ix(&mut self, ix: usize) -> Result<SegmentChunk> {
+    fn read_ix(&mut self, ix: usize) -> anyhow::Result<SegmentChunk> {
         read_batch(
             &mut self.file,
             &self.dictionaries,
@@ -277,7 +276,7 @@ impl Reader {
 }
 
 impl Iterator for Reader {
-    type Item = Result<SegmentChunk>;
+    type Item = anyhow::Result<SegmentChunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.iter_range.is_empty() {
@@ -324,13 +323,13 @@ pub mod test {
     use crate::segment::test::{build_records, collect_records, deep_chunk};
 
     impl Writer {
-        fn create_path(path: impl AsRef<Path>, schema: &Schema) -> Result<Self> {
+        fn create_path(path: impl AsRef<Path>, schema: &Schema) -> anyhow::Result<Self> {
             Self::create(fs::File::create(path)?, schema)
         }
     }
 
     #[test]
-    fn check_file_format() -> Result<()> {
+    fn check_file_format() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
@@ -343,7 +342,7 @@ pub mod test {
     }
 
     #[test]
-    fn can_iter_forward_double_ended() -> Result<()> {
+    fn can_iter_forward_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let records: Vec<_> = build_records((0..10).map(|i| (i, format!("m{i}"))));
@@ -362,7 +361,7 @@ pub mod test {
     }
 
     #[test]
-    fn can_iter_reverse_double_ended() -> Result<()> {
+    fn can_iter_reverse_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
@@ -383,7 +382,7 @@ pub mod test {
     }
 
     #[test]
-    fn schema_file_metadata() -> Result<()> {
+    fn schema_file_metadata() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
@@ -407,7 +406,7 @@ pub mod test {
     }
 
     #[test]
-    fn nested() -> Result<()> {
+    fn nested() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
@@ -418,7 +417,7 @@ pub mod test {
     }
 
     #[test]
-    fn large_records() -> Result<()> {
+    fn large_records() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
@@ -440,7 +439,7 @@ pub mod test {
         Ok(())
     }
 
-    fn open_drop(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
+    fn open_drop(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> anyhow::Result<Segment> {
         let path = root.as_ref().join("open-drop.arrow");
         let s = Segment::new(path.clone())?;
 
@@ -454,7 +453,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_open_drop_recovery() -> Result<()> {
+    fn test_open_drop_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
         let s = open_drop(root.path(), a.clone())?;
@@ -468,7 +467,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_open_drop_read_reread() -> Result<()> {
+    fn test_open_drop_read_reread() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
         let s = open_drop(root.path(), a.clone())?;
@@ -485,7 +484,10 @@ pub mod test {
         Ok(())
     }
 
-    pub fn partial_write(root: impl AsRef<Path>, rows: SchemaChunk<Schema>) -> Result<Segment> {
+    pub fn partial_write(
+        root: impl AsRef<Path>,
+        rows: SchemaChunk<Schema>,
+    ) -> anyhow::Result<Segment> {
         let path = root.as_ref().join("partial-write.arrow");
         let s = Segment::new(path.clone())?;
 
@@ -506,7 +508,7 @@ pub mod test {
     }
 
     #[test]
-    fn test_partial_write_recovery() -> Result<()> {
+    fn test_partial_write_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
         let s = partial_write(root.path(), a.clone())?;
@@ -519,7 +521,7 @@ pub mod test {
         Ok(())
     }
 
-    fn test_partial_write_read_reread() -> Result<()> {
+    fn test_partial_write_read_reread() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
         let s = partial_write(root.path(), a.clone())?;

@@ -35,3 +35,7 @@ utoipa = { version = "4", features = ["axum_extras"] }
 rweb = ["dep:rweb"]
 clap = ["dep:clap"]
 test = []
+
+
+[lints]
+workspace = true

@@ -186,7 +186,7 @@ impl FromStr for OutputFormat {
     }
 }
 
-async fn make_request<'a>(client: &Client, cmd: Command) -> Result<(), Error> {
+async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
     match cmd {
         Command::Topics => {
             print!("{}", client.get_topics().await?.into_string());

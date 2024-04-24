@@ -1,3 +1,4 @@
+use std::fs::File;
 use std::io::Cursor;
 use std::time::Duration;
 
@@ -22,8 +23,7 @@ use plateau_transport::{
     test::inferences_large_extension,
 };
 use reqwest::{Client, Response};
-use serde_json::{json, Value};
-use std::fs::File;
+use serde_json as json;
 use tracing::trace;
 use tracing_subscriber::{fmt, EnvFilter};
 
@@ -193,11 +193,11 @@ async fn chunk_append(client: &Client, url: &str, data: SchemaChunk<Schema>) -> 
 async fn read_next_chunks(
     client: &Client,
     url: &str,
-    iter: Option<serde_json::Value>,
+    iter: Option<json::Value>,
     limit: impl Into<Option<usize>>,
     focus: DataFocus,
 ) -> Result<(Schema, Vec<SegmentChunk>)> {
-    let mut response = client.post(url).json(&json!({}));
+    let mut response = client.post(url).json(&json::json!({}));
 
     if let Some(limit) = limit.into() {
         response = response.query(&[("page_size", limit)]);
@@ -228,14 +228,14 @@ async fn read_next_chunks(
 
     // verify we also get pandas records of the same length with the same
     // request and no accept-able specified
-    let records: Vec<serde_json::Value> = response.send().await?.error_for_status()?.json().await?;
+    let records: Vec<json::Value> = response.send().await?.error_for_status()?.json().await?;
     assert_eq!(records.len(), chunks.iter().map(|c| c.len()).sum::<usize>());
 
     Ok((schema, chunks))
 }
 
-fn next_from_schema(schema: &Schema) -> Result<serde_json::Value> {
-    let status: serde_json::Value = serde_json::from_str(schema.metadata.get("status").unwrap())?;
+fn next_from_schema(schema: &Schema) -> Result<json::Value> {
+    let status: json::Value = json::from_str(schema.metadata.get("status").unwrap())?;
     Ok(status.get("next").unwrap().clone())
 }
 
@@ -248,7 +248,7 @@ async fn fetch_topic_response(
     url: &str,
     limit: impl Into<Option<usize>>,
 ) -> Response {
-    let mut response = client.post(url).json(&json!({}));
+    let mut response = client.post(url).json(&json::json!({}));
     if let Some(limit) = limit.into() {
         response = response.query(&[("page_size", limit)]);
     }
@@ -261,7 +261,10 @@ async fn fetch_partition_response(
     url: &str,
     limit: impl Into<Option<usize>>,
 ) -> Response {
-    let mut response = client.get(url).json(&json!({})).query(&[("start", 0)]);
+    let mut response = client
+        .get(url)
+        .json(&json::json!({}))
+        .query(&[("start", 0)]);
     if let Some(limit) = limit.into() {
         response = response.query(&[("page_size", limit)]);
     }
@@ -269,9 +272,9 @@ async fn fetch_partition_response(
     result.unwrap().error_for_status().unwrap()
 }
 
-async fn get_topics(client: &Client, url: &str) -> Result<serde_json::Value> {
+async fn get_topics(client: &Client, url: &str) -> Result<json::Value> {
     let response = client.get(url).send().await?.error_for_status()?;
-    Ok(response.json::<serde_json::Value>().await?)
+    Ok(response.json::<json::Value>().await?)
 }
 
 fn topic_url(server: &TestServer) -> String {
@@ -311,7 +314,7 @@ fn partition_records_url(
 fn assert_status(response: &Response, expected: &str) {
     let header = response.headers().get(ITERATION_STATUS_HEADER).unwrap();
     trace!("{header:?}");
-    let status: serde_json::Value = serde_json::from_str(header.to_str().unwrap()).unwrap();
+    let status: json::Value = json::from_str(header.to_str().unwrap()).unwrap();
     let status = status
         .as_object()
         .expect("expected object in JSON response")
@@ -329,7 +332,7 @@ fn assert_partition_status(response: &Response, expected: &str) {
 }
 
 async fn assert_response_length(response: Response, expected: usize) {
-    let json_response: serde_json::Value = response.json().await.unwrap();
+    let json_response: json::Value = response.json().await.unwrap();
     let records = json_response
         .as_array()
         .expect("expected pandas records formatted array");
@@ -373,7 +376,7 @@ async fn topic_status_all() -> Result<()> {
 
     assert_eq!(
         get_topics(&client, &topic_url(&server)).await?,
-        json!({"topics": []})
+        json::json!({"topics": []})
     );
     repeat_append(
         &client,
@@ -389,7 +392,7 @@ async fn topic_status_all() -> Result<()> {
 
     assert_eq!(
         get_topics(&client, &topic_url(&server)).await?,
-        json!({"topics": [{"name": topic_name.clone()}]})
+        json::json!({"topics": [{"name": topic_name.clone()}]})
     );
 
     // test unlimited request, should get all records
@@ -482,7 +485,7 @@ async fn stored_schema_metadata() -> Result<()> {
     let (schema, _): (Schema, Vec<SegmentChunk>) = read_next_chunks(
         &client,
         topic_url.as_str(),
-        Some(json!({})),
+        Some(json::json!({})),
         29,
         DataFocus::default(),
     )
@@ -616,7 +619,7 @@ async fn topic_iterate_schema_change() -> Result<()> {
     let (schema, response): (Schema, Vec<SegmentChunk>) = read_next_chunks(
         &client,
         topic_url.as_str(),
-        Some(json!({})),
+        Some(json::json!({})),
         29,
         DataFocus::default(),
     )
@@ -712,7 +715,7 @@ async fn topic_iterate_data_focus() -> Result<()> {
     let (schema, chunk): (Schema, Vec<SegmentChunk>) = read_next_chunks(
         &client,
         topic_url.as_str(),
-        Some(json!({})),
+        Some(json::json!({})),
         29,
         DataFocus {
             dataset: vec!["time".to_string()],
@@ -760,7 +763,7 @@ async fn topic_time_query() -> Result<()> {
     .await?;
 
     let topic_url = topic_records_url(&server, &topic_name);
-    let mut response = client.post(&topic_url).json(&json!({}));
+    let mut response = client.post(&topic_url).json(&json::json!({}));
     response = response.header("Accept", CONTENT_TYPE_ARROW);
     response = response.query(&[("time.start", "2023-11-15T19:00:00+00:00")]);
     response = response.query(&[("time.end", "2023-11-17T21:00:00+00:00")]);
@@ -794,7 +797,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
     let topic_url = topic_records_url(&server, &topic_name);
     let request = client
         .post(&topic_url)
-        .json(&json!({}))
+        .json(&json::json!({}))
         .query(&[("page_size", 3)])
         .query(&[("dataset[]", "inputs")])
         .query(&[("dataset[]", "outputs")])
@@ -812,11 +815,11 @@ async fn topic_iterate_pandas_records() -> Result<()> {
         "{\"status\":\"RecordLimited\",\"next\":{\"partition-1\":3}}"
     );
 
-    let json = result.json::<serde_json::Value>().await?;
+    let json = result.json::<json::Value>().await?;
 
     assert_eq!(
         json,
-        json!([
+        json::json!([
             {
                 "inputs": 1.0,
                 "outputs.mul": 2.0,
@@ -836,14 +839,14 @@ async fn topic_iterate_pandas_records() -> Result<()> {
                 "outputs.mul": 2.0,
                 "outputs.tensor": [4.0, 4.0],
                 "outputs.fixed": [6.0, 6.0],
-                "outputs.null": Value::Null
+                "outputs.null": json::Value::Null
             },
         ])
     );
 
     let request = client
         .post(&topic_url)
-        .json(&json!({}))
+        .json(&json::json!({}))
         .query(&[("page_size", 100)])
         .query(&[("dataset[]", "inputs")])
         .query(&[("dataset[]", "outputs")])
@@ -851,7 +854,7 @@ async fn topic_iterate_pandas_records() -> Result<()> {
         .header("Accept", "application/json; format=pandas-records");
 
     let result = request.send().await?.error_for_status()?;
-    let status: serde_json::Value = serde_json::from_str(
+    let status: json::Value = json::from_str(
         result
             .headers()
             .get(ITERATION_STATUS_HEADER)
@@ -869,8 +872,8 @@ async fn topic_iterate_pandas_records() -> Result<()> {
         .header("Accept", "application/json; format=pandas-records");
 
     let result = request.send().await?.error_for_status()?;
-    let json = result.json::<serde_json::Value>().await?;
-    assert_eq!(json, json!([]));
+    let json = result.json::<json::Value>().await?;
+    assert_eq!(json, json::json!([]));
 
     server.close().await;
 

@@ -12,11 +12,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use lazy_static::lazy_static;
 use thiserror::Error;
-use tokio::{
-    runtime::Handle,
-    sync::mpsc::{channel, Receiver, Sender},
-    task,
-};
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
+use tokio::task;
 use tracing::{error, warn};
 
 use plateau_transport::InsertQuery;
@@ -24,12 +22,13 @@ use plateau_transport::InsertQuery;
 use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 
 lazy_static! {
-    pub static ref DEFAULT_MAX_BATCH_BYTES: Arc<std::sync::Mutex<usize>> =
-        Arc::new(std::sync::Mutex::new(100 * 1024));
+    pub static ref DEFAULT_MAX_BATCH_BYTES: Arc<Mutex<usize>> = Arc::new(Mutex::new(100 * 1024));
 }
+
 pub fn get_default_max_batch_bytes() -> usize {
     *(DEFAULT_MAX_BATCH_BYTES.lock().unwrap())
 }
+
 pub fn update_default_max_batch_bytes(max: usize) {
     *(DEFAULT_MAX_BATCH_BYTES.lock().unwrap()) = max;
 }
@@ -166,8 +165,8 @@ pub trait Batch: Sized {
 }
 
 struct WorkerHandle<T> {
-    sender: Sender<T>,
-    task: tokio::task::JoinHandle<()>,
+    sender: mpsc::Sender<T>,
+    task: task::JoinHandle<()>,
 }
 
 struct WorkerPool<T, C> {
@@ -189,7 +188,7 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
         let worker = if let Some(w) = self.pool.get_mut(&key) {
             w
         } else {
-            let (s, r) = tokio::sync::mpsc::channel(self.sender.pending_work_capacity());
+            let (s, r) = mpsc::channel(self.sender.pending_work_capacity());
             let worker = WorkerHandle {
                 sender: s,
                 task: Self::spawn_worker(r, self.sender.clone()),
@@ -218,9 +217,9 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
     }
 
     fn spawn_worker(
-        mut receiver: Receiver<T>,
+        mut receiver: mpsc::Receiver<T>,
         mut sender: impl BatchSender<Batch = T>,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut last = None;
 
@@ -273,7 +272,7 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
 /// - queue flushing at regular and configurable intervals.
 #[derive(Debug, Clone)]
 pub struct Transmission<E: Clone> {
-    work_sender: Sender<E>,
+    work_sender: mpsc::Sender<E>,
     dispatch_task: Arc<Mutex<Option<task::JoinHandle<()>>>>,
 }
 
@@ -283,7 +282,7 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
         sender: impl BatchSender<Batch = B>,
         pending_capacity: usize,
     ) -> Self {
-        let (work_sender, work_receiver) = channel(pending_capacity);
+        let (work_sender, work_receiver) = mpsc::channel(pending_capacity);
 
         let dispatch_task =
             Arc::new(Mutex::new(Some(runtime.spawn(async move {
@@ -312,7 +311,10 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
             .map_err(|_| TransmissionError::QueueFull)
     }
 
-    async fn dispatch_work(mut work_receiver: Receiver<B>, sender: impl BatchSender<Batch = B>) {
+    async fn dispatch_work(
+        mut work_receiver: mpsc::Receiver<B>,
+        sender: impl BatchSender<Batch = B>,
+    ) {
         let mut workers = WorkerPool::new(sender.clone());
 
         loop {

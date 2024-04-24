@@ -10,3 +10,30 @@ debug = true
 [patch.crates-io]
 arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/match-polars" }
 parquet2 = { git = "https://github.com/WallarooLabs/parquet2", branch = "more-writer-details" }
+
+
+[workspace.lints.clippy]
+use_self = "warn"
+map_flatten = "warn"
+map_unwrap_or = "warn"
+large_futures = "warn"
+
+
+[workspace.lints.rust]
+deprecated_in_future = "warn"
+future_incompatible = "warn"
+# non_exhaustive_omitted_patterns = "warn"
+noop_method_call = "warn"
+# unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+rust_2018_compatibility = "warn"
+rust_2021_compatibility = "warn"
+rust_2024_compatibility = "warn"
+rust_2018_idioms = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unused = "warn"
+# unused_crate_dependencies = "warn"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+# warnings = "deny"

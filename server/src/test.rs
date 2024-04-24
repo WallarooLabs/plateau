@@ -1,5 +1,6 @@
-use anyhow::Result;
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
+use std::sync::Arc;
+
 use tempfile::tempdir;
 use tokio::sync::oneshot;
 
@@ -19,11 +20,11 @@ pub struct TestServer {
 }
 
 impl TestServer {
-    pub async fn new() -> Result<Self> {
+    pub async fn new() -> anyhow::Result<Self> {
         Self::new_with_config(Default::default()).await
     }
 
-    pub async fn new_with_config(config: Config) -> Result<Self> {
+    pub async fn new_with_config(config: Config) -> anyhow::Result<Self> {
         let config = Config {
             http: http::Config {
                 bind: SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -35,7 +36,7 @@ impl TestServer {
         Self::with_port_config(config).await
     }
 
-    pub async fn with_port_config(mut config: Config) -> Result<Self> {
+    pub async fn with_port_config(mut config: Config) -> anyhow::Result<Self> {
         let temp = tempdir()?;
         let root = temp.into_path();
         let catalog = Arc::new(Catalog::attach(root, config.catalog.clone()).await?);

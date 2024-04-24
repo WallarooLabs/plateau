@@ -19,7 +19,6 @@ use crate::arrow2::{
     },
 };
 
-use anyhow::Result;
 use parquet2::{
     metadata::{FileMetaData, KeyValue},
     write::FileWriter,
@@ -45,7 +44,7 @@ fn checkpoint_path(path: impl AsRef<Path>) -> PathBuf {
     path
 }
 
-pub(crate) fn check_file(f: &mut fs::File) -> Result<bool> {
+pub(crate) fn check_file(f: &mut fs::File) -> anyhow::Result<bool> {
     let mut buffer = [0u8; 4];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut buffer)?;
@@ -60,7 +59,7 @@ pub(crate) struct Segment {
 }
 
 impl Segment {
-    pub(crate) fn new(path: PathBuf) -> Result<Self> {
+    pub(crate) fn new(path: PathBuf) -> anyhow::Result<Self> {
         let checkpoint_path = checkpoint_path(&path);
         let mut checkpoint_tmp_path = path.clone();
 
@@ -75,13 +74,13 @@ impl Segment {
         })
     }
 
-    fn directory(&self) -> Result<fs::File> {
+    fn directory(&self) -> anyhow::Result<fs::File> {
         let mut parent = self.checkpoint_path.clone();
         parent.pop();
         fs::File::open(&parent).map_err(anyhow::Error::from)
     }
 
-    pub(crate) fn read(self, cache: Option<cache::Data>) -> Result<Reader> {
+    pub(crate) fn read(self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
         Reader::open(self, cache)
     }
 
@@ -89,7 +88,7 @@ impl Segment {
         [self.checkpoint_path, self.checkpoint_tmp_path].into_iter()
     }
 
-    pub(crate) fn rm_parts(&self) -> Result<()> {
+    pub(crate) fn rm_parts(&self) -> anyhow::Result<()> {
         for part in self.clone().parts() {
             if part.exists() {
                 fs::remove_file(&part)?;
@@ -116,7 +115,7 @@ impl Writer {
         file: fs::File,
         schema: &Schema,
         config: super::Config,
-    ) -> Result<Self> {
+    ) -> anyhow::Result<Self> {
         let segment = Segment::new(path)?;
         let created_by = Some("plateau v0.1.0 segment v1".to_string());
 
@@ -157,7 +156,11 @@ impl Writer {
         })
     }
 
-    pub(super) fn write_chunk(&mut self, schema: &Schema, chunk: SegmentChunk) -> Result<()> {
+    pub(super) fn write_chunk(
+        &mut self,
+        schema: &Schema,
+        chunk: SegmentChunk,
+    ) -> anyhow::Result<()> {
         let encodings: Vec<_> = schema
             .fields
             .iter()
@@ -174,7 +177,7 @@ impl Writer {
         Ok(())
     }
 
-    pub(super) fn checkpoint(&self) -> Result<()> {
+    pub(super) fn checkpoint(&self) -> anyhow::Result<()> {
         let metadata = self
             .writer
             .compute_metadata(self.key_value_metadata.clone())?;
@@ -227,7 +230,7 @@ impl Writer {
         Ok(())
     }
 
-    pub(super) fn end(&mut self) -> Result<()> {
+    pub(super) fn end(&mut self) -> anyhow::Result<()> {
         self.writer.end(self.key_value_metadata.clone())?;
         self.file.sync_data()?;
 
@@ -237,7 +240,10 @@ impl Writer {
     }
 }
 
-fn recover(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<FileMetaData> {
+fn recover(
+    path: impl AsRef<Path>,
+    checkpoint_path: impl AsRef<Path>,
+) -> anyhow::Result<FileMetaData> {
     let path = path.as_ref();
     let checkpoint_path = checkpoint_path.as_ref();
     warn!("attempting to recover checkpoint {:?}", checkpoint_path);
@@ -275,11 +281,14 @@ fn recover(path: impl AsRef<Path>, checkpoint_path: impl AsRef<Path>) -> Result<
 
 pub(super) struct Reader {
     schema: Schema,
-    iter: Chain<Flatten<option::IntoIter<CachingReader>>, option::IntoIter<Result<SegmentChunk>>>,
+    iter: Chain<
+        Flatten<option::IntoIter<CachingReader>>,
+        option::IntoIter<anyhow::Result<SegmentChunk>>,
+    >,
 }
 
 impl Reader {
-    pub(super) fn open(segment: Segment, cache: Option<cache::Data>) -> Result<Self> {
+    pub(super) fn open(segment: Segment, cache: Option<cache::Data>) -> anyhow::Result<Self> {
         match CachingReader::open(segment) {
             Ok((schema, reader)) => {
                 let cache = cache
@@ -305,7 +314,7 @@ impl Reader {
 }
 
 impl Iterator for Reader {
-    type Item = Result<SegmentChunk>;
+    type Item = anyhow::Result<SegmentChunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -333,7 +342,7 @@ pub(super) struct CachingReader {
 }
 
 impl CachingReader {
-    fn open(segment: Segment) -> Result<(Schema, Self)> {
+    fn open(segment: Segment) -> anyhow::Result<(Schema, Self)> {
         let mut f = fs::File::open(&segment.path)?;
 
         let metadata = read_metadata(&mut f).or_else(|err| {
@@ -368,7 +377,7 @@ impl CachingReader {
 
 /// Reads chunks in forward or reverse order, with lazy caching of chunk data
 impl Iterator for CachingReader {
-    type Item = Result<SegmentChunk>;
+    type Item = anyhow::Result<SegmentChunk>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.next_ix >= self.next_back_ix {
@@ -428,7 +437,7 @@ mod test {
     use crate::segment::{Config, Segment};
 
     impl Writer {
-        fn from_path(path: PathBuf, schema: &Schema) -> Result<Self> {
+        fn from_path(path: PathBuf, schema: &Schema) -> anyhow::Result<Self> {
             Self::create(
                 path.clone(),
                 fs::File::create(&path)?,
@@ -439,7 +448,7 @@ mod test {
     }
 
     #[test]
-    fn check_file_format() -> Result<()> {
+    fn check_file_format() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
 
@@ -452,7 +461,7 @@ mod test {
     }
 
     #[test]
-    fn can_iter_forward_double_ended() -> Result<()> {
+    fn can_iter_forward_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path.clone());
@@ -475,7 +484,7 @@ mod test {
     }
 
     #[test]
-    fn can_iter_reverse_double_ended() -> Result<()> {
+    fn can_iter_reverse_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path.clone());
@@ -499,7 +508,7 @@ mod test {
     }
 
     #[test]
-    fn round_trip1_2() -> Result<()> {
+    fn round_trip1_2() -> anyhow::Result<()> {
         let path = PathBuf::from("tests/data/v1.parquet");
         let s = Segment::at(path);
         let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}"))));
@@ -510,7 +519,7 @@ mod test {
     }
 
     #[test]
-    fn round_trip2() -> Result<()> {
+    fn round_trip2() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
@@ -535,7 +544,7 @@ mod test {
     }
 
     #[test]
-    fn schema_change() -> Result<()> {
+    fn schema_change() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
@@ -550,7 +559,7 @@ mod test {
     }
 
     #[test]
-    fn schema_file_metadata() -> Result<()> {
+    fn schema_file_metadata() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
@@ -574,7 +583,7 @@ mod test {
     }
 
     #[test]
-    fn nested() -> Result<()> {
+    fn nested() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
@@ -586,7 +595,7 @@ mod test {
     }
 
     #[test]
-    fn large_records() -> Result<()> {
+    fn large_records() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
         let s = Segment::at(path);
@@ -612,7 +621,7 @@ mod test {
     }
 
     #[test]
-    fn test_open_drop_recovery() -> Result<()> {
+    fn test_open_drop_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("open-drop.parquet");
         let s = Segment::at(path.clone());
@@ -631,7 +640,7 @@ mod test {
     }
 
     #[test]
-    fn test_partial_write_recovery() -> Result<()> {
+    fn test_partial_write_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
         let s = super::Segment::new(path.clone())?;

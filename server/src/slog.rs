@@ -32,7 +32,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::vec;
 
-use anyhow::Result;
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use metrics::counter;
@@ -425,7 +424,7 @@ impl Slog {
 
         let reader = segment.iter().unwrap();
         let schema = reader.schema().clone();
-        let filter = move |c: Result<SegmentChunk>| {
+        let filter = move |c: anyhow::Result<SegmentChunk>| {
             c.map_or(None, |chunk| {
                 Some(SchemaChunk {
                     schema: schema.clone(),
@@ -444,7 +443,7 @@ impl Slog {
         self.state.write().await.append(data).await
     }
 
-    pub(crate) fn destroy(&self, segment_ix: SegmentIndex) -> Result<()> {
+    pub(crate) fn destroy(&self, segment_ix: SegmentIndex) -> anyhow::Result<()> {
         self.get_segment(segment_ix).destroy()
     }
 
@@ -494,7 +493,7 @@ impl Slog {
             .map(|segment| segment.metadata.clone())
     }
 
-    pub(crate) async fn roll(&self) -> Result<()> {
+    pub(crate) async fn roll(&self) -> anyhow::Result<()> {
         counter!("slog_roll", "name" => self.name.clone()).increment(1);
         self.state.write().await.roll().await
     }
@@ -643,7 +642,7 @@ impl State {
         }
     }
 
-    pub(crate) async fn roll(&mut self) -> Result<()> {
+    pub(crate) async fn roll(&mut self) -> anyhow::Result<()> {
         if let Some(records) = self.active.as_ref().map(|s| s.record_count()) {
             if self.checkpoint(true).await {
                 let segment = self.active_checkpoint.segment;
@@ -826,7 +825,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn basic_sequencing() -> Result<()> {
+    async fn basic_sequencing() -> anyhow::Result<()> {
         let root = tempdir().unwrap();
         let (slog, mut commits) = Slog::attach(
             PathBuf::from(root.path()),
@@ -886,7 +885,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn checkpoint_timeouts() -> Result<()> {
+    async fn checkpoint_timeouts() -> anyhow::Result<()> {
         let root = tempdir().unwrap();
 
         let segment = SegmentIndex(0);

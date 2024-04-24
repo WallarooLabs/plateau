@@ -407,7 +407,7 @@ mod test {
             .collect()
     }
 
-    async fn scratch() -> (tempfile::TempDir, Topic) {
+    async fn scratch() -> (TempDir, Topic) {
         let dir = tempdir().unwrap();
         let root = PathBuf::from(dir.path());
         let manifest = Manifest::attach(root.join("manifest.sqlite")).await;

@@ -7,7 +7,6 @@ edition = "2021"
 
 [dependencies]
 backoff = { version = "0.4", features = ["tokio"], optional = true }
-humantime-serde = { version = "1", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 plateau-transport = { path = "../transport" }
 reqwest = { version = "0.11", default-features = false, features = [
@@ -44,8 +43,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 
 [features]
-batch = ["dep:humantime-serde", "dep:tokio"]
+batch = ["dep:tokio"]
 health = ["dep:tokio"]
 polars = ["dep:polars"]
 replicate = ["dep:backoff", "dep:tokio"]
 rweb = ["plateau-transport/rweb"]
+
+
+[lints]
+workspace = true

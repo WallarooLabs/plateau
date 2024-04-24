@@ -67,7 +67,7 @@ impl DiskMonitor {
         let root = root.as_ref();
 
         let path = root.to_path_buf();
-        let path = tokio::task::spawn_blocking(|| canonical_mount(path)).await??;
+        let path = spawn_blocking(|| canonical_mount(path)).await??;
 
         info!("storage monitor starting for {root:?} (mount point: {path:?})");
 

@@ -951,19 +951,19 @@ mod tests {
             DataType::List(Box::new(Field::new("inner_field", DataType::Null, false))),
             true,
         ));
-        assert!(super::contains_null_type(&schema));
+        assert!(contains_null_type(&schema));
 
         let mut schema = ArrowSchema::default();
         schema
             .fields
             .push(Field::new("column", DataType::Float64, false));
-        assert!(!super::contains_null_type(&schema));
+        assert!(!contains_null_type(&schema));
 
         let mut schema = ArrowSchema::default();
         schema
             .fields
             .push(Field::new("column", DataType::Float64, true));
-        assert!(!super::contains_null_type(&schema));
+        assert!(!contains_null_type(&schema));
     }
 
     #[test]
