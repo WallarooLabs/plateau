@@ -46,11 +46,7 @@ impl Task for Iterator {
                 &self.topic,
                 &TopicIterationQuery {
                     page_size: Some(self.page_size),
-                    order: None,
-                    start_time: None,
-                    end_time: None,
-                    data_focus: Default::default(),
-                    partition_filter: Default::default(),
+                    ..Default::default()
                 },
                 self.state.as_ref().map(|status| &status.next),
             )

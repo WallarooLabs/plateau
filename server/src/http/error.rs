@@ -18,7 +18,7 @@ pub enum ErrorReply {
     NoHeartbeat,
     InsufficientDiskSpace,
     Unknown,
-    PayloadTooLarge(u64),
+    PayloadTooLarge(usize),
 }
 
 impl axum::response::IntoResponse for ErrorReply {

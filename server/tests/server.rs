@@ -15,7 +15,9 @@ use plateau::chunk::Schema;
 use plateau::config::PlateauConfig;
 use plateau::test::TestServer;
 use plateau::{catalog, http, limit, partition};
-use plateau_client::{Error as ClientError, MultiChunk, Retrieve};
+use plateau_client::{
+    Error as ClientError, Iterate, MultiChunk, PandasRecordIteration, Retrieve, TopicIterationQuery,
+};
 use plateau_transport::{
     arrow2,
     arrow2::bitmap::Bitmap,
@@ -432,16 +434,24 @@ async fn topic_status_record_limited() {
 async fn topic_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
-    const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
-    let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
+    let test_message = TEST_MESSAGE.repeat(100);
+    let test_message_bytelen = test_message.as_bytes().len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
-    let message_limit = DEFAULT_MAX_BYTES / test_messsage_bytelen;
+    let message_limit = plateau::DEFAULT_BYTE_LIMIT / test_message_bytelen;
+    let lower = message_limit / 2;
     repeat_append(
         &client,
         append_url(&server, &topic_name, PARTITION_NAME).as_str(),
-        TEST_MESSAGE,
+        &test_message,
+        lower,
+    )
+    .await;
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        &test_message,
         // add one more message so that we're beyond the limit
-        message_limit + 1,
+        message_limit - lower + 1,
     )
     .await;
     let response = fetch_topic_response(
@@ -451,8 +461,6 @@ async fn topic_status_byte_limited() {
     )
     .await;
     assert_status(&response, "ByteLimited");
-    // plateau always finishes the current record when we hit the byte limit, so we expect to have
-    // one more than the actual hard limit caculated above
     assert_response_length(response, message_limit + 1).await;
 }
 
@@ -510,7 +518,7 @@ async fn max_request_header() -> Result<()> {
     let req = client
         .post(append_url(&server, &topic_name, PARTITION_NAME))
         .header("content-type", CONTENT_TYPE_ARROW)
-        .body(" ".repeat(max as usize * 10));
+        .body(" ".repeat(max * 10));
     let resp = req.send().await?;
 
     let status = resp.status();
@@ -579,11 +587,42 @@ async fn large_appends() -> Result<()> {
     }
     server.catalog.checkpoint().await;
 
+    let json: PandasRecordIteration = client
+        .iterate_topic(
+            &topic_name,
+            &TopicIterationQuery {
+                data_focus: DataFocus {
+                    dataset: vec!["*".into()],
+                    max_bytes: Some(100 * 1024),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+        )
+        .await?;
+
+    assert_eq!(
+        json.value,
+        json::json!([
+            {"tensor": null, "time": 0},
+            {"tensor": null, "time": 1},
+            {"tensor": null, "time": 2},
+            {"tensor": null, "time": 3},
+            {"tensor": null, "time": 4},
+            {"tensor": null, "time": 0},
+            {"tensor": null, "time": 1},
+            {"tensor": null, "time": 2},
+            {"tensor": null, "time": 3},
+            {"tensor": null, "time": 4},
+        ])
+    );
+
     let multi: MultiChunk = client
         .get_records(&topic_name, PARTITION_NAME, &Default::default())
         .await?;
 
-    assert_eq!(multi.chunks.len(), 1);
+    assert_eq!(multi.chunks.len(), 2);
     assert_eq!(multi.chunks[0].len(), 5);
 
     Ok(())
@@ -929,16 +968,24 @@ async fn partition_status_record_limited() {
 async fn partition_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
-    const DEFAULT_MAX_BYTES: usize = 100 * 1024; // 100KB
-    let test_messsage_bytelen = TEST_MESSAGE.as_bytes().len();
+    let test_message = TEST_MESSAGE.repeat(100);
+    let test_message_bytelen = test_message.as_bytes().len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
-    let message_limit = DEFAULT_MAX_BYTES / test_messsage_bytelen;
+    let message_limit = plateau::DEFAULT_BYTE_LIMIT / test_message_bytelen;
+    let lower = message_limit / 2;
     repeat_append(
         &client,
         append_url(&server, &topic_name, PARTITION_NAME).as_str(),
-        TEST_MESSAGE,
+        &test_message,
+        lower,
+    )
+    .await;
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        &test_message,
         // add one more message so that we're beyond the limit
-        message_limit + 1,
+        message_limit - lower + 1,
     )
     .await;
     let response = fetch_partition_response(
@@ -948,7 +995,5 @@ async fn partition_status_byte_limited() {
     )
     .await;
     assert_partition_status(&response, "ByteLimited");
-    // plateau always finishes the current record when we hit the byte limit, so we expect to have
-    // one more than the actual hard limit caculated above
     assert_response_length(response, message_limit + 1).await;
 }

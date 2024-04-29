@@ -54,7 +54,7 @@ impl Default for RowLimit {
     fn default() -> Self {
         Self {
             max_records: 10000,
-            max_bytes: 100 * 1024,
+            max_bytes: crate::DEFAULT_BYTE_LIMIT,
         }
     }
 }

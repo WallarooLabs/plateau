@@ -47,7 +47,7 @@ pub use self::error::ErrorReply;
 #[serde(default)]
 pub struct Config {
     pub bind: SocketAddr,
-    pub max_append_bytes: u64,
+    pub max_append_bytes: usize,
     pub max_page: RowLimit,
 }
 
@@ -55,7 +55,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             bind: SocketAddr::from(([0, 0, 0, 0], 3030)),
-            max_append_bytes: 10240000,
+            max_append_bytes: crate::DEFAULT_BYTE_LIMIT,
             max_page: RowLimit::default(),
         }
     }
@@ -116,7 +116,7 @@ pub async fn serve(
         )
         .route(
             "/topic/:topic_name/partition/:partition_name",
-            post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes as usize)),
+            post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes)),
         )
         .route("/topic/:topic_name/records", post(topic_iterate_route))
         .route("/topic/:topic_name", get(topic_get_partitions))
@@ -401,7 +401,12 @@ pub async fn topic_iterate(
         );
     }
 
-    chunk::to_reply(content, result.batch, query.data_focus)
+    chunk::to_reply(
+        content,
+        result.batch,
+        query.data_focus,
+        query.page_bytes.unwrap_or(max_page.max_bytes),
+    )
 }
 
 #[utoipa::path(
@@ -467,6 +472,7 @@ async fn partition_get_records(
         headers.get(ACCEPT).and_then(|header| header.to_str().ok()),
         result,
         query.data_focus,
+        max_page.max_bytes,
     )
 }
 

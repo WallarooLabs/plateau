@@ -27,6 +27,8 @@ pub use crate::config::PlateauConfig as Config;
 pub use catalog::Catalog;
 use plateau_transport::arrow2;
 
+pub const DEFAULT_BYTE_LIMIT: usize = 10240000;
+
 /// Future that resolves when an exit signal (SIGINT / SIGTERM / SIGQUIT) is
 /// received.
 pub fn exit_signal<'a>() -> future::BoxFuture<'a, ()> {

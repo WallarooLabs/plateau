@@ -1,12 +1,13 @@
 use std::collections::VecDeque;
-use std::fmt;
 use std::ops::Range;
 use std::{
     borrow::Borrow,
     collections::{HashMap, HashSet},
+    fmt,
     io::Cursor,
 };
 
+use arrow2::bitmap::Bitmap;
 use arrow2::compute::aggregate::estimated_bytes_size;
 use arrow2::{
     array::{Array, StructArray},
@@ -19,6 +20,7 @@ use regex::Regex;
 #[cfg(feature = "rweb")]
 use rweb::{openapi::Entity, Schema};
 use serde::{Deserialize, Serialize};
+use serde_with::{serde_as, DisplayFromStr};
 
 pub use arrow2::{self, datatypes::Schema as ArrowSchema, error::Error as ArrowError};
 use arrow2::{
@@ -188,6 +190,7 @@ pub struct Records {
     pub records: Vec<String>,
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Default, Deserialize, Serialize, IntoParams, ToSchema)]
 #[cfg_attr(feature = "clap", derive(clap::Args))]
 #[cfg_attr(feature = "rweb", derive(Schema))]
@@ -202,6 +205,12 @@ pub struct DataFocus {
     #[cfg_attr(feature = "clap", arg(skip))]
     pub exclude: Vec<String>,
 
+    /// Maximum number of bytes that a single dataset may occupy.
+    #[serde_as(as = "Option<DisplayFromStr>")]
+    #[serde(default, rename = "dataset.max_bytes")]
+    #[cfg_attr(feature = "clap", arg(skip))]
+    pub max_bytes: Option<usize>,
+
     /// When specified, flattens the output data sets into a single table. Uses
     /// the given separator to join nested keys.
     #[serde(default, rename = "dataset.separator")]
@@ -211,7 +220,10 @@ pub struct DataFocus {
 
 impl DataFocus {
     pub fn is_some(&self) -> bool {
-        !self.dataset.is_empty() || self.dataset_separator.is_some()
+        !self.dataset.is_empty()
+            || !self.exclude.is_empty()
+            || self.dataset_separator.is_some()
+            || self.max_bytes.is_some()
     }
 }
 
@@ -280,6 +292,10 @@ pub struct TopicIterationQuery {
     /// Number of records to return (defaults to 1000, maximum of 10000)
     #[cfg_attr(feature = "clap", arg(short, long))]
     pub page_size: Option<usize>,
+    /// Maximum number of bytes to return (defaults to 100K)
+    #[cfg_attr(feature = "clap", arg(short, long))]
+    #[serde(default)]
+    pub page_bytes: Option<usize>,
     /// Use reverse iteration to work backwards through the topic
     #[cfg_attr(feature = "clap", arg(short, long))]
     pub order: Option<TopicIterationOrder>,
@@ -619,7 +635,16 @@ impl SchemaChunk<ArrowSchema> {
                 || vec![path.as_str()],
                 |s| path.split(s.as_str()).collect::<Vec<_>>(),
             );
-            let arr = self.get_array(split)?;
+            let mut arr = self.get_array(split)?;
+
+            let too_many_bytes = focus
+                .max_bytes
+                .map_or(false, |max| estimated_bytes_size(arr.as_ref()) > max);
+
+            if too_many_bytes {
+                let all_null = Bitmap::new_zeroed(arr.len());
+                arr = arr.with_validity(Some(all_null));
+            }
 
             if !exclude.contains(path) {
                 if let Some(s) = focus.dataset_separator.as_ref() {
@@ -1087,7 +1112,8 @@ mod tests {
             test.focus(&DataFocus {
                 dataset: vec!["*".to_string()],
                 dataset_separator: Some(".".to_string()),
-                exclude: vec!["time".to_string()]
+                exclude: vec!["time".to_string()],
+                ..Default::default()
             })
             .unwrap()
             .arrays(),
@@ -1098,7 +1124,8 @@ mod tests {
             test.focus(&DataFocus {
                 dataset: vec!["*".to_string()],
                 dataset_separator: Some(".".to_string()),
-                exclude: vec!["child.grandchild".to_string()]
+                exclude: vec!["child.grandchild".to_string()],
+                ..Default::default()
             })
             .unwrap()
             .arrays(),
@@ -1109,7 +1136,8 @@ mod tests {
             test.focus(&DataFocus {
                 dataset: vec!["*".to_string()],
                 dataset_separator: Some(".".to_string()),
-                exclude: vec!["child".to_string()]
+                exclude: vec!["child".to_string()],
+                ..Default::default()
             })
             .unwrap()
             .arrays(),

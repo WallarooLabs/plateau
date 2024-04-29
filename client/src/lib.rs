@@ -721,6 +721,33 @@ impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PandasRecordIteration {
+    pub value: serde_json::Value,
+}
+
+#[async_trait]
+impl Iterate<PandasRecordIteration> for Client {
+    /// Iterate over a topic, returning records in [`PandasRecordIteration`] format.
+    async fn iterate_path<'a>(
+        &self,
+        path: impl AsRef<str> + Send,
+        params: &TopicIterationQuery,
+        position: impl Into<Option<&'a TopicIterator>> + Send,
+    ) -> Result<PandasRecordIteration, Error> {
+        let value = process_request(
+            self.iteration_request(path, params, position)?
+                .header("accept", CONTENT_TYPE_JSON),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(Error::Server)?;
+
+        Ok(PandasRecordIteration { value })
+    }
+}
+
 #[cfg(feature = "polars")]
 #[async_trait]
 impl Iterate<polars::frame::DataFrame> for Client {
@@ -1140,11 +1167,9 @@ mod tests {
                 "topic-1",
                 &TopicIterationQuery {
                     page_size: Some(4),
-                    start_time: None,
-                    end_time: None,
                     order: Some(TopicIterationOrder::Asc),
                     data_focus: DataFocus::default(),
-                    partition_filter: None,
+                    ..Default::default()
                 },
                 &None,
             )
@@ -1170,11 +1195,9 @@ mod tests {
                 "topic-1",
                 &TopicIterationQuery {
                     page_size: Some(4),
-                    start_time: None,
-                    end_time: None,
                     order: Some(TopicIterationOrder::Asc),
                     data_focus: DataFocus::default(),
-                    partition_filter: None,
+                    ..Default::default()
                 },
                 &Some(HashMap::from([("part-1".to_owned(), 4)])),
             )
@@ -1459,12 +1482,9 @@ mod tests {
                 .iterate_topic_unlimited(
                     "topic-1",
                     &TopicIterationQuery {
-                        page_size: None,
-                        start_time: None,
-                        end_time: None,
                         order: Some(TopicIterationOrder::Asc),
                         data_focus: DataFocus::default(),
-                        partition_filter: None,
+                        ..Default::default()
                     },
                 )
                 .await
