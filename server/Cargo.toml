@@ -1,13 +1,16 @@
 [package]
 name = "plateau"
 description = "A low-profile event and log aggregator"
-authors = ["Wallaroo Labs"]
-license = "MIT"
-version = "0.1.0"
-edition = "2021"
+
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
 
 [features]
 test = []
+
 
 [dependencies]
 anyhow = "1"

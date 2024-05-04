@@ -3,6 +3,13 @@ resolver = "2"
 members = ["client", "server", "transport", "cli", "server/bench"]
 
 
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+authors = ["Wallaroo Labs"]
+repository = "https://github.com/WallarooLabs/plateau"
+
+
 [profile.bench]
 debug = true
 
