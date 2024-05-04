@@ -19,7 +19,7 @@ itertools = "0.12"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 thiserror = "1"
-parquet2 = { version = "0.17", default_features = false }
+parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
 plateau-client = { path = "../client", features = ["replicate"] }
 plateau-transport = { path = "../transport" }
