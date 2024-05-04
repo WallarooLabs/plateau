@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ $default-branch ]
+    branches: [ "main" ]
   pull_request:
-    branches: [ $default-branch ]
+    branches: [ "main" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,7 +16,9 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+    - name: Clippy
+      run: cargo clippy --workspace --all-targets --features batch,polars,test -- -D warnings
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --workspace --features test,batch,polars -- --nocapture
+    - name: Build
+      run: cargo build --workspace --verbose
