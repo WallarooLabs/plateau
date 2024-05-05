@@ -2,9 +2,6 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::io::Cursor;
-#[cfg(feature = "health")]
-use std::time::{Duration, Instant};
 use std::{pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
@@ -29,6 +26,7 @@ use reqwest::{
     RequestBuilder, Response, Url,
 };
 use thiserror::Error;
+use tokio::time;
 use tracing::{trace, warn};
 
 #[cfg(feature = "batch")]
@@ -225,14 +223,18 @@ impl Client {
     ///
     /// Returns either `Ok(elapsed)` or the `Error` from the last healthcheck attempt.
     #[cfg(feature = "health")]
-    pub async fn healthy(&self, duration: Duration, retry: Duration) -> Result<Duration, Error> {
-        let start = Instant::now();
+    pub async fn healthy(
+        &self,
+        duration: time::Duration,
+        retry: time::Duration,
+    ) -> Result<time::Duration, Error> {
+        let start = time::Instant::now();
 
         loop {
             match self.healthcheck().await {
                 Ok(_) => return Ok(start.elapsed()),
                 Err(e) if start.elapsed() > duration => return Err(e),
-                _ => tokio::time::sleep(retry).await,
+                _ => time::sleep(retry).await,
             }
         }
     }
@@ -534,7 +536,7 @@ impl InsertionQueue for MultiChunk {
         self.chunks
             .front()
             .map(|chunk| {
-                let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
+                let bytes = io::Cursor::new(vec![]);
                 let options = ipc::write::WriteOptions { compression: None };
 
                 let mut writer =
@@ -1263,18 +1265,18 @@ mod tests {
     async fn oversize_chunk_reports_max() {
         let chunk = example_chunk();
 
-        let server = plateau::http::TestServer::new_with_config(PlateauConfig {
-            http: plateau::http::Config {
+        let server = http::TestServer::new_with_config(PlateauConfig {
+            http: http::Config {
                 max_append_bytes: 5,
-                ..plateau::http::Config::default()
+                ..http::Config::default()
             },
-            ..plateau::config::PlateauConfig::default()
+            ..PlateauConfig::default()
         })
         .await
         .unwrap();
 
         let client = Client {
-            server_url: crate::Url::parse(&server.base()).unwrap(),
+            server_url: Url::parse(&server.base()).unwrap(),
             http_client: Default::default(),
             max_batch_bytes: DEFAULT_MAX_BATCH_BYTES,
             max_rows: None,
@@ -1464,9 +1466,8 @@ mod tests {
 
             let server = Server::run();
 
-            let responder = status_code(200).body(bytes::Bytes::from(
-                inferences_schema_a().to_bytes().unwrap(),
-            ));
+            let responder =
+                status_code(200).body(Bytes::from(inferences_schema_a().to_bytes().unwrap()));
 
             server.expect(
                 Expectation::matching(all_of![

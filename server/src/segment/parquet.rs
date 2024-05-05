@@ -131,7 +131,7 @@ impl Writer {
         let parquet_schema = to_parquet_schema(schema)?;
 
         let self_file = file.try_clone()?;
-        let writer = parquet2::write::FileWriter::new(
+        let writer = FileWriter::new(
             file,
             parquet_schema,
             parquet2::write::WriteOptions {
@@ -652,7 +652,7 @@ mod test {
         let len = w.writer.offset();
         drop(w);
 
-        std::fs::File::options()
+        fs::File::options()
             .append(true)
             .open(&path)?
             .set_len(len - 4)?;
@@ -674,8 +674,8 @@ mod test {
         let s = Segment::at(path);
 
         use sample_std::Sample;
-        let mut name = sample_std::Regex::new("[a-z]{4, 8}");
-        let mut g = sample_std::Random::new();
+        let mut name = Regex::new("[a-z]{4, 8}");
+        let mut g = Random::new();
 
         let schema = Schema {
             fields: chunk

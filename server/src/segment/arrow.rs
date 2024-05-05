@@ -497,7 +497,7 @@ pub mod test {
         drop(w);
         let len = fs::File::open(&path)?.metadata()?.len();
 
-        std::fs::File::options()
+        fs::File::options()
             .append(true)
             .open(&path)?
             .set_len(len - 40)?;
@@ -545,8 +545,8 @@ pub mod test {
         let path = root.path().join("testing.arrow");
 
         use sample_std::Sample;
-        let mut name = sample_std::Regex::new("[a-z]{4, 8}");
-        let mut g = sample_std::Random::new();
+        let mut name = Regex::new("[a-z]{4, 8}");
+        let mut g = Random::new();
 
         let schema = Schema {
             fields: chunk

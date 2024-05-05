@@ -1282,7 +1282,7 @@ mod benches {
     const PARTITION_NAME: &str = "test";
 
     fn run_async<F: core::future::Future>(func: F) -> F::Output {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         rt.block_on(func)
     }
 
@@ -1345,7 +1345,7 @@ mod benches {
 
     #[bench]
     fn forward_iteration_bench(b: &mut Bencher) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         let dir = rt.block_on(prep_dataset());
 
         attach_and_iterate(b, &rt, &dir, &Ordering::Forward);
@@ -1353,7 +1353,7 @@ mod benches {
 
     #[bench]
     fn reverse_iteration_bench(b: &mut Bencher) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = Runtime::new().unwrap();
         let dir = rt.block_on(prep_dataset());
 
         attach_and_iterate(b, &rt, &dir, &Ordering::Reverse);

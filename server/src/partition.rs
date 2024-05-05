@@ -1373,7 +1373,7 @@ pub mod test {
         // first, corrupt the last file.
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
         debug!("corrupting {last:?}");
-        let f = std::fs::File::options().write(true).open(segment.path())?;
+        let f = fs::File::options().write(true).open(segment.path())?;
         f.set_len(16)?;
 
         // delete the next data entry from the manifest
