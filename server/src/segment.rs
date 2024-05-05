@@ -517,7 +517,7 @@ pub mod test {
         w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
         drop(w);
 
-        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        let f = fs::File::options().append(true).open(s.cache_path())?;
         f.set_len(f.metadata()?.len() - 15)?;
 
         let mut r = s.iter()?;
@@ -541,7 +541,7 @@ pub mod test {
         w.log_arrows(&a.schema, vec![], Some(more))?;
         drop(w);
 
-        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        let f = fs::File::options().append(true).open(s.cache_path())?;
         f.set_len(f.metadata()?.len() - 15)?;
 
         let mut r = s.iter()?;
@@ -567,7 +567,7 @@ pub mod test {
         w.log_arrows(&a.schema, vec![], Some(more))?;
         drop(w);
 
-        let f = std::fs::File::options().append(true).open(s.cache_path())?;
+        let f = fs::File::options().append(true).open(s.cache_path())?;
         f.set_len(f.metadata()?.len() - 15)?;
 
         let mut r = s.iter()?;
@@ -596,7 +596,7 @@ pub mod test {
         w.log_arrows(&a.schema, vec![], Some(more))?;
         drop(w);
 
-        let f = std::fs::File::options().append(true).open(s.path())?;
+        let f = fs::File::options().append(true).open(s.path())?;
         f.set_len(f.metadata()?.len() - 15)?;
 
         let mut r = s.iter()?;

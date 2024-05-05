@@ -67,7 +67,7 @@ impl ActiveChunk {
 
     pub fn destroy(&mut self) -> Result<()> {
         if Path::exists(&self.path) {
-            std::fs::remove_file(&self.path)?;
+            fs::remove_file(&self.path)?;
         }
         self.writer = None;
 

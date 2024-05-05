@@ -306,7 +306,7 @@ impl Catalog {
                 }
             }
             trace!("outstanding: {}", Arc::strong_count(&catalog));
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            time::sleep(Duration::from_secs(1)).await;
         }
 
         if let Some(exclusive) = exclusive {
