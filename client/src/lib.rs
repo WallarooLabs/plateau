@@ -26,8 +26,10 @@ use reqwest::{
     RequestBuilder, Response, Url,
 };
 use thiserror::Error;
-use tokio::time;
 use tracing::{trace, warn};
+
+#[cfg(feature = "health")]
+use tokio::time;
 
 #[cfg(feature = "batch")]
 pub mod batch;
