@@ -9,26 +9,25 @@ TIME                      = $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 RUST_VERSION              = 1.76.0
 
 test:
-	cd upstream && cargo test --workspace --features test,batch,polars -- --nocapture
+	cargo test --workspace --features test,batch,polars -- --nocapture
 
 fmt: check-fmt
 
 check-fmt:
-	cd upstream && cargo fmt --all -- --check
+	cargo fmt --all -- --check
 
 lint:
-	cd upstream && cargo clippy --workspace --all-targets --features batch,polars,test -- -D warnings
+	cargo clippy --workspace --all-targets --features batch,polars,test -- -D warnings
 
 coverage-%:
 	@$(MAKE) -C upstream -f ../../rust-grcov.mk $@
 
 clean:
-	cd upstream && cargo clean
-	cd upstream/server/bench && cargo clean
+	cargo clean
 
 image: image-plateau
 
-include ../sccache.mk
+include sccache.mk
 
 image-plateau:
 	$(DOCKER) build \
