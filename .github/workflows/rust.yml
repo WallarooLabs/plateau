@@ -10,15 +10,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  check:
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
-    - name: Clippy
-      run: cargo clippy --workspace --all-targets --features batch,polars,test -- -D warnings
+    - name: Check formatting
+      shell: bash
+      run: make check-fmt
+    - name: Lint
+      shell: bash
+      run: make lint
     - name: Run tests
-      run: cargo test --workspace --features test,batch,polars -- --nocapture
-    - name: Build
-      run: cargo build --workspace --verbose
+      shell: bash
+      run: make test
