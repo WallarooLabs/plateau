@@ -16,7 +16,10 @@ jobs:
     - uses: actions/checkout@v4
     - name: Announce Rust
       shell: bash
-      run: cargo --version && rustc --version
+      run: cargo --version && rustc --version && rustup --version
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: "20240509"
     - name: Check formatting
       shell: bash
       run: make check-fmt
