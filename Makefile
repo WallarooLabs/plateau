@@ -27,7 +27,7 @@ clean:
 
 image: image-plateau
 
-include sccache.mk
+# include sccache.mk
 
 image-plateau:
 	$(DOCKER) build \
