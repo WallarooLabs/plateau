@@ -10,13 +10,14 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.6", features = ["headers"] }
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["typed-header"] }
 bytesize = { version = "1.1.0", features = ["serde"] }
 config = "0.14"
 futures = "0.3"
 itertools = "0.12"
 metrics = "0.22"
-metrics-exporter-prometheus = "0.13"
+metrics-exporter-prometheus = "0.14"
 thiserror = "1"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
@@ -32,7 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.4", features = ["trace"] }
+tower-http = { version = "0.5", features = ["trace"] }
 # TODO: 0.7.4 adds a deprecation warning that will need to be fixed down the road
 sqlx = { version = "=0.7.3", features = [
   "chrono",
@@ -42,7 +43,7 @@ sqlx = { version = "=0.7.3", features = [
 systemstat = "0.2"
 rand = "0.8"
 utoipa = { version = "4", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "4", features = ["axum"] }
+utoipa-swagger-ui = { version = "7", features = ["axum"] }
 uuid = "1.4"
 regex = "1.10"
 
@@ -52,7 +53,7 @@ plateau-transport.workspace = true
 
 [dev-dependencies]
 ctor = "0.2"
-reqwest = { version = "0.11", default-features = false, features = [
+reqwest = { version = "0.12", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
