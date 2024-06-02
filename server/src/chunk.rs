@@ -24,7 +24,7 @@ pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
 
 pub(crate) struct LegacyRecords(pub(crate) Vec<Record>);
 
-pub fn chunk_into_legacy(chunk: SegmentChunk, order: &Ordering) -> Vec<Record> {
+pub fn chunk_into_legacy(chunk: SegmentChunk, order: Ordering) -> Vec<Record> {
     let mut records = LegacyRecords::try_from(SchemaChunk {
         schema: legacy_schema(),
         chunk,
@@ -199,7 +199,7 @@ pub(crate) struct IndexedChunk {
     pub(crate) chunk: SegmentChunk,
 }
 impl IndexedChunk {
-    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>, order: &Ordering) -> Self {
+    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>, order: Ordering) -> Self {
         assert!(!data.chunk.arrays().is_empty());
         let start = ix.0 as i32;
         let size = data.chunk.len() as i32;
@@ -297,7 +297,7 @@ impl IndexedChunk {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_legacy(self, order: &Ordering) -> Vec<Record> {
+    pub(crate) fn into_legacy(self, order: Ordering) -> Vec<Record> {
         chunk_into_legacy(self.chunk, order)
     }
 }

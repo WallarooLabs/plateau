@@ -384,7 +384,7 @@ pub async fn topic_iterate(
             .await
     } else {
         topic
-            .get_records(position, page_size, &order, partition_filter)
+            .get_records(position, page_size, order, partition_filter)
             .await
     };
 
@@ -443,7 +443,7 @@ async fn partition_get_records(
         topic
             .get_partition(&partition_name)
             .await
-            .get_records(start_record, page_size, &Ordering::Forward)
+            .get_records(start_record, page_size, Ordering::Forward)
             .await
     };
 

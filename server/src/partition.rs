@@ -211,7 +211,7 @@ impl Partition {
         &'a self,
         stored: impl Stream<Item = SegmentData> + 'a + Send,
         state: &RwLockReadGuard<'a, State>,
-        order: &Ordering,
+        order: Ordering,
     ) -> BoxStream<'a, SegmentData> {
         let mut cached = state.messages.cached_segment_data().await;
         if order.is_reverse() {
@@ -239,7 +239,7 @@ impl Partition {
         &self,
         start: RecordIndex,
         limit: RowLimit,
-        order: &Ordering,
+        order: Ordering,
     ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
@@ -278,7 +278,7 @@ impl Partition {
             .stream_with_active(
                 self.manifest.stream_time_segments(&self.id, start, &times),
                 &state,
-                &Ordering::Forward,
+                Ordering::Forward,
             )
             .await;
 
@@ -296,14 +296,14 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments, &Ordering::Forward)
+            .get_records_from_segments(limit, filter, segments, Ordering::Forward)
             .await
     }
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
         let record_response = self
-            .get_records(index, RowLimit::records(1), &Ordering::Forward)
+            .get_records(index, RowLimit::records(1), Ordering::Forward)
             .await;
 
         record_response
@@ -317,7 +317,7 @@ impl Partition {
                     ))
                     .unwrap()
             })
-            .flat_map(|indexed| indexed.into_legacy(&Ordering::Forward))
+            .flat_map(|indexed| indexed.into_legacy(Ordering::Forward))
             .next()
     }
 
@@ -501,7 +501,7 @@ impl State {
         limit: RowLimit,
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
         indices: impl StreamExt<Item = SegmentData> + Send + 'a,
-        order: &Ordering,
+        order: Ordering,
     ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
@@ -630,7 +630,7 @@ pub mod test {
 
     pub(crate) fn deindex(is: Vec<IndexedChunk>) -> Vec<Record> {
         is.into_iter()
-            .flat_map(|i| i.into_legacy(&Ordering::Forward))
+            .flat_map(|i| i.into_legacy(Ordering::Forward))
             .collect()
     }
 
@@ -671,7 +671,7 @@ pub mod test {
                     max_records: 3,
                     max_bytes: 100_000,
                 },
-                &Ordering::Forward,
+                Ordering::Forward,
             )
             .await
             .chunks
@@ -698,7 +698,7 @@ pub mod test {
                     max_records: 3,
                     max_bytes: 100_000,
                 },
-                &Ordering::Forward,
+                Ordering::Forward,
             )
             .await
             .chunks
@@ -725,7 +725,7 @@ pub mod test {
                     max_records: 3,
                     max_bytes: 100_000,
                 },
-                &Ordering::Reverse,
+                Ordering::Reverse,
             )
             .await
             .chunks
@@ -752,7 +752,7 @@ pub mod test {
                     max_records: 3,
                     max_bytes: 100_000,
                 },
-                &Ordering::Reverse,
+                Ordering::Reverse,
             )
             .await
             .chunks
@@ -789,7 +789,7 @@ pub mod test {
                     max_records: 1000,
                     max_bytes: 100_000,
                 },
-                &Ordering::Reverse,
+                Ordering::Reverse,
             )
             .await;
 
@@ -894,7 +894,7 @@ pub mod test {
                     part.get_records(
                         RecordIndex(start),
                         RowLimit::records(limit),
-                        &Ordering::Forward
+                        Ordering::Forward
                     )
                     .await
                     .chunks
@@ -932,7 +932,7 @@ pub mod test {
             )
             .await;
 
-        let mut chunk_slice = IndexedChunk::from_start(RecordIndex(0), chunk_a, &Ordering::Forward);
+        let mut chunk_slice = IndexedChunk::from_start(RecordIndex(0), chunk_a, Ordering::Forward);
         chunk_slice.slice(2, 2);
         assert_eq!(result.chunks, vec![chunk_slice]);
 
@@ -1028,7 +1028,7 @@ pub mod test {
         {
             let part = reattach(&dir, spec).await;
             let result = part
-                .get_records(RecordIndex(0), RowLimit::default(), &Ordering::Forward)
+                .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
                 .await;
 
             assert_eq!(SegmentChunk::from(result.chunks[0].clone()), chunk_a.chunk);
@@ -1052,7 +1052,7 @@ pub mod test {
 
             let start = RecordIndex(0);
             let result = part
-                .get_records(start, RowLimit::default(), &Ordering::Forward)
+                .get_records(start, RowLimit::default(), Ordering::Forward)
                 .await;
             assert_eq!(
                 format!("{:?}", SegmentChunk::from(result.chunks[0].clone())),
@@ -1086,7 +1086,7 @@ pub mod test {
 
         {
             let part = reattach(&dir, spec).await;
-            let order = &Ordering::Forward;
+            let order = Ordering::Forward;
 
             let start = RecordIndex(0);
             let result = part.get_records(start, RowLimit::default(), order).await;
@@ -1174,7 +1174,7 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(0), RowLimit::default(), &Ordering::Forward)
+            .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
             .await;
         let msgs = result
             .chunks
@@ -1207,7 +1207,7 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(6), RowLimit::default(), &Ordering::Reverse)
+            .get_records(RecordIndex(6), RowLimit::default(), Ordering::Reverse)
             .await;
         let msgs = result
             .chunks
@@ -1254,7 +1254,7 @@ pub mod test {
             // iterate schema A
             let start = RecordIndex(part_len);
             let result = part
-                .get_records(start, RowLimit::default(), &Ordering::Reverse)
+                .get_records(start, RowLimit::default(), Ordering::Reverse)
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(result.schema.unwrap(), chunk_b.schema);
@@ -1284,7 +1284,7 @@ pub mod test {
                 .get_records(
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
-                    &Ordering::Reverse,
+                    Ordering::Reverse,
                 )
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
@@ -1315,7 +1315,7 @@ pub mod test {
                 .get_records(
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
-                    &Ordering::Reverse,
+                    Ordering::Reverse,
                 )
                 .await;
             assert!(result.status.is_open());
@@ -1480,7 +1480,7 @@ pub mod test {
 
         // fetch from start fast-forwards to first valid index
         let result = t
-            .get_records(RecordIndex(0), RowLimit::records(2), &Ordering::Forward)
+            .get_records(RecordIndex(0), RowLimit::records(2), Ordering::Forward)
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let start_index = result.chunks.first().unwrap().start().unwrap();
@@ -1491,7 +1491,7 @@ pub mod test {
 
         // iterate through from start
         let result = t
-            .get_records(start_index, RowLimit::records(2), &Ordering::Forward)
+            .get_records(start_index, RowLimit::records(2), Ordering::Forward)
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1501,7 +1501,7 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1511,14 +1511,14 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
             .await;
         assert_limit_unreached(&result.status);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(deindex(result.chunks), vec![records[7].clone()]);
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), &Ordering::Forward)
+            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
             .await;
         assert_limit_unreached(&result.status);
         assert_eq!(deindex(result.chunks), vec![]);
@@ -1620,7 +1620,7 @@ pub mod test {
                     max_records: 10,
                     max_bytes: 250,
                 },
-                &Ordering::Forward,
+                Ordering::Forward,
             )
             .await;
 
@@ -1641,7 +1641,7 @@ pub mod test {
                     max_records: 10,
                     max_bytes: 1,
                 },
-                &Ordering::Forward,
+                Ordering::Forward,
             )
             .await;
         assert_eq!(result.status, BatchStatus::BytesExceeded);
