@@ -400,11 +400,11 @@ impl Slog {
             .nth(relative)
     }
 
-    pub(crate) async fn iter_segment<'a>(
-        &'a self,
+    pub(crate) async fn iter_segment(
+        &self,
         ix: SegmentIndex,
         order: Ordering,
-    ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send + 'a> {
+    ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
             return Box::new(std::iter::empty());
