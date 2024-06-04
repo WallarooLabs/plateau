@@ -26,7 +26,7 @@
 //! discard writes and stall rolls until the write completes.
 use std::cmp::{max, min};
 use std::iter::Zip;
-use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive};
+use std::ops::{self, Range, RangeBounds, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -117,7 +117,7 @@ pub(crate) struct Checkpoint {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct RecordIndex(pub usize);
 
-impl Add<usize> for RecordIndex {
+impl ops::Add<usize> for RecordIndex {
     type Output = Self;
 
     fn add(self, span: usize) -> Self {
@@ -125,9 +125,23 @@ impl Add<usize> for RecordIndex {
     }
 }
 
-impl AddAssign<usize> for RecordIndex {
+impl ops::AddAssign<usize> for RecordIndex {
     fn add_assign(&mut self, span: usize) {
         self.0 += span;
+    }
+}
+
+impl ops::Sub<usize> for RecordIndex {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
+impl ops::SubAssign<usize> for RecordIndex {
+    fn sub_assign(&mut self, rhs: usize) {
+        self.0 -= rhs;
     }
 }
 
