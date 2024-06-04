@@ -380,7 +380,7 @@ impl Slog {
     ) -> Option<Record> {
         use crate::chunk::LegacyRecords;
 
-        self.iter_segment(segment, &Ordering::Forward)
+        self.iter_segment(segment, Ordering::Forward)
             .await
             .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
             .nth(relative)
@@ -389,7 +389,7 @@ impl Slog {
     pub(crate) async fn iter_segment<'a>(
         &'a self,
         ix: SegmentIndex,
-        order: &'a Ordering,
+        order: Ordering,
     ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send + 'a> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {

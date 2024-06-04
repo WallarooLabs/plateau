@@ -33,14 +33,14 @@ use crate::slog::{RecordIndex, SegmentIndex};
 
 pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Ordering {
     Forward,
     Reverse,
 }
 
 impl Ordering {
-    fn to_sql_order(&self) -> &'static str {
+    fn to_sql_order(self) -> &'static str {
         match self {
             Self::Forward => "ASC",
             Self::Reverse => "DESC",
@@ -366,7 +366,7 @@ impl Manifest {
         &'a self,
         id: &'a PartitionId,
         start: RecordIndex,
-        order: &Ordering,
+        order: Ordering,
     ) -> impl futures::Stream<Item = SegmentData> + 'a + Send {
         let query = match order {
             Ordering::Forward => {
