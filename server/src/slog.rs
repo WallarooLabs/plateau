@@ -48,9 +48,6 @@ use crate::limit::Rolling;
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
 
-#[cfg(test)]
-use crate::chunk::Record;
-
 #[derive(Error, Debug)]
 pub(crate) enum SlogError {
     #[error("writer thread busy")]
@@ -384,20 +381,6 @@ impl Slog {
 
     pub(crate) fn get_segment(&self, segment_ix: SegmentIndex) -> Segment {
         Self::segment_from_name(&self.root, &self.name, segment_ix)
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_record(
-        &self,
-        segment: SegmentIndex,
-        relative: usize,
-    ) -> Option<Record> {
-        use crate::chunk::LegacyRecords;
-
-        self.iter_segment(segment, Ordering::Forward)
-            .await
-            .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
-            .nth(relative)
     }
 
     pub(crate) async fn iter_segment(
@@ -806,9 +789,19 @@ mod test {
     use super::*;
 
     use crate::chunk::LegacyRecords;
+    use crate::chunk::Record;
 
     use chrono::TimeZone;
     use tempfile::tempdir;
+
+    impl Slog {
+        async fn get_record(&self, ix: SegmentIndex, relative: usize) -> Option<Record> {
+            self.iter_segment(ix, Ordering::Forward)
+                .await
+                .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
+                .nth(relative)
+        }
+    }
 
     #[tokio::test]
     async fn reverse_chunks() {
