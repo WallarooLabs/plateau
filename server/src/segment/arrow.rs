@@ -8,7 +8,6 @@
 //!   recovery process succesfully completes. Contains all rows that are
 //!   recoverable from any prior partially written segment file and cache.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
@@ -48,13 +47,12 @@ pub struct Segment {
 
 impl Segment {
     pub fn new(path: PathBuf) -> anyhow::Result<Self> {
-        anyhow::ensure!(path.extension() != Some(OsStr::new("recovery")));
-        anyhow::ensure!(path.extension() != Some(OsStr::new("recovered")));
+        let ext = path.extension().unwrap_or_default();
+        anyhow::ensure!(ext != "recovery");
+        anyhow::ensure!(ext != "recovered");
 
-        let mut recovery_path = path.clone();
-        recovery_path.set_extension("recovery");
-        let mut recovered_path = path.clone();
-        recovered_path.set_extension("recovery");
+        let recovery_path = path.with_extension("recovery");
+        let recovered_path = path.with_extension("recovery");
 
         Ok(Self {
             path,
@@ -71,16 +69,13 @@ impl Segment {
 
     pub fn read(&self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
         if self.recovered_path.exists() {
-            trace!("reading from recovered file at {:?}", self.recovered_path);
+            trace!(?self.recovered_path, "reading from");
             Reader::open(&self.recovered_path)
         } else {
-            match Reader::open(&self.path) {
-                Ok(reader) => Ok(reader),
-                Err(e) => {
-                    error!("error reading {:?}: {e:?}", self.path);
-                    Ok(self.recover(cache)?.1)
-                }
-            }
+            Reader::open(&self.path).or_else(|err| {
+                error!(%err, path = %self.path.display(), "error reading segment");
+                self.recover(cache).map(|(_, reader)| reader)
+            })
         }
     }
 
