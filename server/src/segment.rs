@@ -175,10 +175,9 @@ impl Segment {
     }
 
     pub(crate) fn iter(&self) -> Result<impl SegmentIterator> {
-        let cache = cache::read(self.cache_path()).unwrap_or_else(|err| {
-            error!("error reading cache at {:?}: {err:?}", self.cache_path());
-            None
-        });
+        let cache = cache::read(self.cache_path())
+            .inspect_err(|err| error!("error reading cache at {:?}: {err:?}", self.cache_path()))
+            .unwrap_or_default();
 
         if self.path.exists() {
             trace!(

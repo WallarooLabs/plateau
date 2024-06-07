@@ -43,6 +43,7 @@ use futures::FutureExt;
 use futures::{future, stream};
 use metrics::{counter, gauge};
 use plateau_transport::arrow2::compute::comparison::lt_scalar;
+use plateau_transport::DataFocus;
 use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch, RwLock, RwLockReadGuard};
@@ -240,6 +241,7 @@ impl Partition {
         start: RecordIndex,
         limit: RowLimit,
         order: Ordering,
+        focus: DataFocus,
     ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
@@ -272,6 +274,7 @@ impl Partition {
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
         limit: RowLimit,
+        focus: DataFocus,
     ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
@@ -303,7 +306,12 @@ impl Partition {
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
         let record_response = self
-            .get_records(index, RowLimit::records(1), Ordering::Forward)
+            .get_records(
+                index,
+                RowLimit::records(1),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
 
         record_response
@@ -692,6 +700,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -719,6 +728,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -746,6 +756,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -773,6 +784,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -810,6 +822,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await;
 
@@ -914,7 +927,8 @@ pub mod test {
                     part.get_records(
                         RecordIndex(start),
                         RowLimit::records(limit),
-                        Ordering::Forward
+                        Ordering::Forward,
+                        DataFocus::default(),
                     )
                     .await
                     .chunks
@@ -949,6 +963,7 @@ pub mod test {
                 RecordIndex(0),
                 parse_time(2)..=parse_time(3),
                 RowLimit::default(),
+                DataFocus::default(),
             )
             .await;
 
@@ -1048,7 +1063,12 @@ pub mod test {
         {
             let part = reattach(&dir, spec).await;
             let result = part
-                .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
+                .get_records(
+                    RecordIndex(0),
+                    RowLimit::default(),
+                    Ordering::Forward,
+                    DataFocus::default(),
+                )
                 .await;
 
             assert_eq!(SegmentChunk::from(result.chunks[0].clone()), chunk_a.chunk);
@@ -1072,7 +1092,12 @@ pub mod test {
 
             let start = RecordIndex(0);
             let result = part
-                .get_records(start, RowLimit::default(), Ordering::Forward)
+                .get_records(
+                    start,
+                    RowLimit::default(),
+                    Ordering::Forward,
+                    DataFocus::default(),
+                )
                 .await;
             assert_eq!(
                 format!("{:?}", SegmentChunk::from(result.chunks[0].clone())),
@@ -1109,7 +1134,9 @@ pub mod test {
             let order = Ordering::Forward;
 
             let start = RecordIndex(0);
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
@@ -1121,7 +1148,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
@@ -1139,7 +1168,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert!(result.status.is_open());
             assert_eq!(
                 result.chunks,
@@ -1147,7 +1178,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert!(result.status.is_open());
             assert_eq!(result.chunks, vec![]);
         }
@@ -1194,7 +1227,12 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
+            .get_records(
+                RecordIndex(0),
+                RowLimit::default(),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         let msgs = result
             .chunks
@@ -1227,7 +1265,12 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(6), RowLimit::default(), Ordering::Reverse)
+            .get_records(
+                RecordIndex(6),
+                RowLimit::default(),
+                Ordering::Reverse,
+                DataFocus::default(),
+            )
             .await;
         let msgs = result
             .chunks
@@ -1274,7 +1317,12 @@ pub mod test {
             // iterate schema A
             let start = RecordIndex(part_len);
             let result = part
-                .get_records(start, RowLimit::default(), Ordering::Reverse)
+                .get_records(
+                    start,
+                    RowLimit::default(),
+                    Ordering::Reverse,
+                    DataFocus::default(),
+                )
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(result.schema.unwrap(), chunk_b.schema);
@@ -1305,6 +1353,7 @@ pub mod test {
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
                     Ordering::Reverse,
+                    DataFocus::default(),
                 )
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
@@ -1336,6 +1385,7 @@ pub mod test {
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
                     Ordering::Reverse,
+                    DataFocus::default(),
                 )
                 .await;
             assert!(result.status.is_open());
@@ -1500,7 +1550,12 @@ pub mod test {
 
         // fetch from start fast-forwards to first valid index
         let result = t
-            .get_records(RecordIndex(0), RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                RecordIndex(0),
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let start_index = result.chunks.first().unwrap().start().unwrap();
@@ -1511,7 +1566,12 @@ pub mod test {
 
         // iterate through from start
         let result = t
-            .get_records(start_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                start_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1521,7 +1581,12 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1531,14 +1596,24 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_limit_unreached(&result.status);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(deindex(result.chunks), vec![records[7].clone()]);
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_limit_unreached(&result.status);
         assert_eq!(deindex(result.chunks), vec![]);
@@ -1607,7 +1682,8 @@ pub mod test {
                             t.get_records_by_time(
                                 RecordIndex(start),
                                 query,
-                                RowLimit::records(limit)
+                                RowLimit::records(limit),
+                                DataFocus::default(),
                             )
                             .await
                             .chunks
@@ -1641,6 +1717,7 @@ pub mod test {
                     max_bytes: 250,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await;
 
@@ -1662,6 +1739,7 @@ pub mod test {
                     max_bytes: 1,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await;
         assert_eq!(result.status, BatchStatus::BytesExceeded);

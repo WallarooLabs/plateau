@@ -13,6 +13,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use plateau_transport::DataFocus;
 use plateau_transport::SegmentChunk;
 use tracing::{error, trace, warn};
 
@@ -253,6 +254,11 @@ impl Reader {
             message_scratch,
             data_scratch,
         })
+    }
+
+    pub fn focus(self, focus: DataFocus) -> Self {
+        trace!(?focus);
+        self
     }
 
     fn read_ix(&mut self, ix: usize) -> anyhow::Result<SegmentChunk> {

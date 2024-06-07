@@ -319,6 +319,7 @@ pub async fn topic_iterate(
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
     let position = position.unwrap_or_default();
     let partition_filter = query.partition_filter;
+    let data_focus = query.data_focus.clone();
     let order: Ordering = query.order.unwrap_or(TopicIterationOrder::Asc).into();
 
     let mut result = if let Some(start) = query.start_time {
@@ -327,11 +328,11 @@ pub async fn topic_iterate(
             Err(ErrorReply::InvalidQuery)?
         }
         topic
-            .get_records_by_time(position, times, page_size, partition_filter)
+            .get_records_by_time(position, times, page_size, partition_filter, data_focus)
             .await
     } else {
         topic
-            .get_records(position, page_size, order, partition_filter)
+            .get_records(position, page_size, order, partition_filter, data_focus)
             .await
     };
 
@@ -374,18 +375,19 @@ async fn partition_get_records(
     let topic = catalog.get_topic(&topic_name).await;
     let start_record = RecordIndex(query.start);
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
+    let data_focus = query.data_focus.clone();
     let mut result = if let Some(start) = query.start_time {
         let times = parse_time_range(start, query.end_time)?;
         topic
             .get_partition(&partition_name)
             .await
-            .get_records_by_time(start_record, times, page_size)
+            .get_records_by_time(start_record, times, page_size, data_focus)
             .await
     } else {
         topic
             .get_partition(&partition_name)
             .await
-            .get_records(start_record, page_size, Ordering::Forward)
+            .get_records(start_record, page_size, Ordering::Forward, data_focus)
             .await
     };
 
