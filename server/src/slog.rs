@@ -26,7 +26,7 @@
 //! discard writes and stall rolls until the write completes.
 use std::cmp::{max, min};
 use std::iter::Zip;
-use std::ops::{Add, AddAssign, Range, RangeBounds, RangeInclusive};
+use std::ops::{self, Range, RangeBounds, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -47,9 +47,6 @@ use crate::chunk::{self, Schema, TimeRange};
 use crate::limit::Rolling;
 use crate::manifest::{Ordering, PartitionId, SegmentData, SegmentId, SEGMENT_FORMAT_VERSION};
 use crate::segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer};
-
-#[cfg(test)]
-use crate::chunk::Record;
 
 #[derive(Error, Debug)]
 pub(crate) enum SlogError {
@@ -117,7 +114,7 @@ pub(crate) struct Checkpoint {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct RecordIndex(pub usize);
 
-impl Add<usize> for RecordIndex {
+impl ops::Add<usize> for RecordIndex {
     type Output = Self;
 
     fn add(self, span: usize) -> Self {
@@ -125,9 +122,23 @@ impl Add<usize> for RecordIndex {
     }
 }
 
-impl AddAssign<usize> for RecordIndex {
+impl ops::AddAssign<usize> for RecordIndex {
     fn add_assign(&mut self, span: usize) {
         self.0 += span;
+    }
+}
+
+impl ops::Sub<usize> for RecordIndex {
+    type Output = Self;
+
+    fn sub(self, rhs: usize) -> Self::Output {
+        Self(self.0 - rhs)
+    }
+}
+
+impl ops::SubAssign<usize> for RecordIndex {
+    fn sub_assign(&mut self, rhs: usize) {
+        self.0 -= rhs;
     }
 }
 
@@ -372,25 +383,11 @@ impl Slog {
         Self::segment_from_name(&self.root, &self.name, segment_ix)
     }
 
-    #[cfg(test)]
-    pub(crate) async fn get_record(
+    pub(crate) async fn iter_segment(
         &self,
-        segment: SegmentIndex,
-        relative: usize,
-    ) -> Option<Record> {
-        use crate::chunk::LegacyRecords;
-
-        self.iter_segment(segment, Ordering::Forward)
-            .await
-            .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
-            .nth(relative)
-    }
-
-    pub(crate) async fn iter_segment<'a>(
-        &'a self,
         ix: SegmentIndex,
         order: Ordering,
-    ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send + 'a> {
+    ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
             return Box::new(std::iter::empty());
@@ -792,9 +789,19 @@ mod test {
     use super::*;
 
     use crate::chunk::LegacyRecords;
+    use crate::chunk::Record;
 
     use chrono::TimeZone;
     use tempfile::tempdir;
+
+    impl Slog {
+        async fn get_record(&self, ix: SegmentIndex, relative: usize) -> Option<Record> {
+            self.iter_segment(ix, Ordering::Forward)
+                .await
+                .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
+                .nth(relative)
+        }
+    }
 
     #[tokio::test]
     async fn reverse_chunks() {

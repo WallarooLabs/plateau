@@ -890,10 +890,10 @@ pub struct PartitionId {
 }
 
 impl PartitionId {
-    pub fn new(topic: &str, partition: &str) -> Self {
+    pub fn new(topic: impl ToString, partition: impl ToString) -> Self {
         Self {
-            topic: String::from(topic),
-            partition: String::from(partition),
+            topic: topic.to_string(),
+            partition: partition.to_string(),
         }
     }
 

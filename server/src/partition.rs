@@ -531,19 +531,19 @@ impl State {
                         .flat_map(stream::iter)
                         .scan(
                             if order.is_reverse() {
-                                segment.records.end.0
+                                segment.records.end
                             } else {
-                                segment.records.start.0
+                                segment.records.start
                             },
-                            move |start: &mut usize, mut data: SchemaChunk<Schema>| {
-                                let index = RecordIndex(*start);
+                            move |start, mut data: SchemaChunk<Schema>| {
+                                let ix = *start;
                                 if order.is_reverse() {
                                     data.reverse_inner();
                                     *start -= data.chunk.len();
                                 } else {
                                     *start += data.chunk.len();
                                 }
-                                future::ready(Some(IndexedChunk::from_start(index, data, order)))
+                                future::ready(Some(IndexedChunk::from_start(ix, data, order)))
                             },
                         )
                 })

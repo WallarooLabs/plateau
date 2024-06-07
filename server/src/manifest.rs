@@ -48,7 +48,7 @@ impl Ordering {
     }
 
     pub(crate) fn is_reverse(&self) -> bool {
-        self == &Self::Reverse
+        *self == Self::Reverse
     }
 }
 impl From<TopicIterationOrder> for Ordering {
@@ -69,8 +69,8 @@ pub enum Scope<'a> {
 
 fn partition_id_from_row(row: &SqliteRow) -> PartitionId {
     PartitionId::new(
-        &row.get::<String, _>("topic"),
-        &row.get::<String, _>("partition"),
+        row.get::<String, _>("topic"),
+        row.get::<String, _>("partition"),
     )
 }
 
