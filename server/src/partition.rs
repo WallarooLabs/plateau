@@ -149,7 +149,7 @@ impl Partition {
         // rewind until we find a starting index based upon a good segment
         while index.is_none() {
             if let Some(ix) = current {
-                let segment = Slog::segment_from_name(root, slog_name, ix);
+                let segment = Slog::segment_from_name(root, slog_name, ix, None);
                 let data = manifest.get_segment_data(ix.to_id(id)).await;
                 let valid = segment.validate();
                 index = match data {
@@ -265,7 +265,7 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments, order)
+            .get_records_from_segments(limit, filter, segments, order, focus)
             .await
     }
 
@@ -299,7 +299,7 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments, Ordering::Forward)
+            .get_records_from_segments(limit, filter, segments, Ordering::Forward, focus)
             .await
     }
 
@@ -514,6 +514,7 @@ impl State {
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
         indices: impl StreamExt<Item = SegmentData> + Send + 'a,
         order: Ordering,
+        focus: DataFocus,
     ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
@@ -538,7 +539,7 @@ impl State {
                     // pagination, so compute those while we have the relevant
                     // ranges easily accessible in `SegmentData`.
                     self.messages
-                        .iter_segment(segment.index, order)
+                        .iter_segment(segment.index, order, focus.clone())
                         .into_stream()
                         .flat_map(stream::iter)
                         .scan(
@@ -1441,7 +1442,7 @@ pub mod test {
         let root = PathBuf::from(dir.path());
 
         // first, corrupt the last file.
-        let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, last, None);
         debug!("corrupting {last:?}");
         let f = fs::File::options().write(true).open(segment.path())?;
         f.set_len(16)?;
@@ -1452,7 +1453,7 @@ pub mod test {
         manifest.remove_segment(ix.to_id(&spec.1)).await;
 
         // delete the next file entirely
-        let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap(), None);
         debug!("deleting {:?}", ix.prev().unwrap());
         segment.destroy()?;
 

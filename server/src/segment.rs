@@ -24,6 +24,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{error, trace, warn};
 
 use crate::arrow2::datatypes::Schema;
+use plateau_transport::DataFocus;
 use plateau_transport::SegmentChunk;
 
 #[cfg(test)]
@@ -81,11 +82,13 @@ pub trait SegmentIterator: DoubleEndedIterator<Item = Result<SegmentChunk>> {
 #[derive(Clone, Debug)]
 pub(crate) struct Segment {
     path: PathBuf,
+    focus: Option<DataFocus>,
 }
 
 impl Segment {
-    pub(crate) fn at(path: PathBuf) -> Self {
-        Self { path }
+    pub(crate) fn at(path: PathBuf, focus: impl Into<Option<DataFocus>>) -> Self {
+        let focus = focus.into();
+        Self { path, focus }
     }
 
     pub(crate) fn path(&self) -> &PathBuf {
@@ -197,7 +200,8 @@ impl Segment {
                     Ok(ReadFormat::Parquet(segment.read(cache)?))
                 } else if arrow {
                     trace!("{:?} in arrow format", self.path);
-                    let segment = arrow::Segment::new(self.path.clone())?;
+                    let segment = arrow::Segment::new(self.path.clone())?
+                        .focus(self.focus.clone().unwrap_or_default());
                     Ok(ReadFormat::Arrow(segment.read(cache)?))
                 } else {
                     anyhow::bail!("unable to detect file format for segment {:?}", self.path)
@@ -509,7 +513,7 @@ pub mod test {
     fn test_interrupted_cache_write() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::default())?;
@@ -530,7 +534,7 @@ pub mod test {
     fn test_partial_cache_write() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.parquet");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::default())?;
@@ -555,7 +559,7 @@ pub mod test {
     fn test_arrow_with_truncated_cache() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.arrow");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::arrow())?;
@@ -584,7 +588,7 @@ pub mod test {
     fn test_arrow_corruption_with_cache_write() -> Result<()> {
         let root = tempdir()?;
         let path = root.path().join("partial-write.arrow");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::arrow())?;
@@ -609,8 +613,8 @@ pub mod test {
     #[test]
     fn test_dual_format() -> Result<()> {
         let root = tempdir()?;
-        let parquet = Segment::at(root.path().join("test.parquet"));
-        let arrow = Segment::at(root.path().join("test.arrow"));
+        let parquet = Segment::at(root.path().join("test.parquet"), None);
+        let arrow = Segment::at(root.path().join("test.arrow"), None);
 
         let a = inferences_schema_a();
 
@@ -648,7 +652,7 @@ pub mod test {
             let mut chunk = a.chunk.clone();
 
             let path = root.path().join(format!("{ix:?}.parquet"));
-            let s = Segment::at(path.clone());
+            let s = Segment::at(path.clone(), None);
             let mut w = s.create(a.schema.clone(), Config::parquet())?;
 
             for count in &all_counts[0..ix] {
@@ -680,7 +684,7 @@ pub mod test {
             let mut chunk = a.chunk.clone();
 
             let path = root.path().join(format!("{ix:?}.arrow"));
-            let s = Segment::at(path.clone());
+            let s = Segment::at(path.clone(), None);
             let mut w = s.create(a.schema.clone(), Config::arrow())?;
 
             for count in &all_counts[0..ix] {
@@ -707,7 +711,7 @@ pub mod test {
         let arrow_segment = partial_write(root.path(), a.clone())?;
 
         let paths: Vec<_> = arrow_segment.clone().parts().collect();
-        let segment = Segment::at(arrow_segment.into_path());
+        let segment = Segment::at(arrow_segment.into_path(), None);
 
         segment.iter()?.count();
 

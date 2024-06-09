@@ -464,7 +464,7 @@ mod test {
     fn can_iter_forward_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
         let records = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let mut w = s.create(legacy_schema(), Config::parquet())?;
@@ -487,7 +487,7 @@ mod test {
     fn can_iter_reverse_double_ended() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
         let mut records = build_records((0..10).map(|i| (i, format!("m{i}"))));
 
         let mut w = s.create(legacy_schema(), Config::parquet())?;
@@ -510,7 +510,7 @@ mod test {
     #[test]
     fn round_trip1_2() -> anyhow::Result<()> {
         let path = PathBuf::from("tests/data/v1.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
         let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}"))));
 
         let r = s.iter()?;
@@ -522,7 +522,7 @@ mod test {
     fn round_trip2() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
         let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}"))));
 
         let schema = legacy_schema();
@@ -547,7 +547,7 @@ mod test {
     fn schema_change() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::parquet())?;
@@ -562,7 +562,7 @@ mod test {
     fn schema_file_metadata() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
 
         let mut a = inferences_schema_a();
         a.schema
@@ -586,7 +586,7 @@ mod test {
     fn nested() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
 
         let a = inferences_nested();
         let mut w = s.create(a.schema.clone(), Config::parquet())?;
@@ -598,7 +598,7 @@ mod test {
     fn large_records() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
         let large: String = (0..100 * 1024).map(|_| "x").collect();
         let records = build_records((0..20).map(|ix| (ix, format!("message-{ix}-{large}"))));
 
@@ -624,7 +624,7 @@ mod test {
     fn test_open_drop_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let path = root.path().join("open-drop.parquet");
-        let s = Segment::at(path.clone());
+        let s = Segment::at(path.clone(), None);
 
         let a = inferences_schema_a();
         let mut w = s.create(a.schema.clone(), Config::parquet())?;
@@ -671,7 +671,7 @@ mod test {
         let chunk = chunk.value;
         let root = tempdir().unwrap();
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
 
         use sample_std::Sample;
         let mut name = Regex::new("[a-z]{4, 8}");
@@ -710,7 +710,7 @@ mod test {
         let chunks = chunk.value;
         let root = tempdir().unwrap();
         let path = root.path().join("testing.parquet");
-        let s = Segment::at(path);
+        let s = Segment::at(path, None);
 
         let mut name = Regex::new("[a-z]{4, 8}");
         let mut g = Random::new();

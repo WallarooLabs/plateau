@@ -36,6 +36,7 @@ use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use metrics::counter;
 use plateau_client::estimate_size;
+use plateau_transport::DataFocus;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -371,22 +372,31 @@ impl Slog {
     }
 
     fn segment_path(root: &Path, name: &str, segment_ix: SegmentIndex) -> PathBuf {
-        let file = PathBuf::from(format!("{}-{}", name, segment_ix.0));
-        [root, file.as_path()].into_iter().collect()
+        root.join(format!("{}-{}", name, segment_ix.0))
     }
 
-    pub(crate) fn segment_from_name(root: &Path, name: &str, segment_ix: SegmentIndex) -> Segment {
-        Segment::at(Self::segment_path(root, name, segment_ix))
+    pub(crate) fn segment_from_name(
+        root: &Path,
+        name: &str,
+        segment_ix: SegmentIndex,
+        focus: impl Into<Option<DataFocus>>,
+    ) -> Segment {
+        Segment::at(Self::segment_path(root, name, segment_ix), focus)
     }
 
-    pub(crate) fn get_segment(&self, segment_ix: SegmentIndex) -> Segment {
-        Self::segment_from_name(&self.root, &self.name, segment_ix)
+    pub(crate) fn get_segment(
+        &self,
+        segment_ix: SegmentIndex,
+        focus: impl Into<Option<DataFocus>>,
+    ) -> Segment {
+        Self::segment_from_name(&self.root, &self.name, segment_ix, focus)
     }
 
     pub(crate) async fn iter_segment(
         &self,
         ix: SegmentIndex,
         order: Ordering,
+        focus: DataFocus,
     ) -> Box<dyn DoubleEndedIterator<Item = SchemaChunk<Schema>> + Send> {
         let state = self.state.read().await;
         if ix > state.active_checkpoint.segment {
@@ -414,7 +424,7 @@ impl Slog {
             }));
         }
 
-        let segment = self.get_segment(ix);
+        let segment = self.get_segment(ix, focus);
         if !Path::new(segment.path()).exists() {
             return Box::new(std::iter::empty());
         }
@@ -441,7 +451,7 @@ impl Slog {
     }
 
     pub(crate) fn destroy(&self, segment_ix: SegmentIndex) -> anyhow::Result<()> {
-        self.get_segment(segment_ix).destroy()
+        self.get_segment(segment_ix, None).destroy()
     }
 
     pub(crate) async fn cached_segment_data(&self) -> Vec<SegmentData> {
@@ -701,7 +711,7 @@ fn spawn_slog_thread(
                     active_chunk,
                 })) => {
                     trace!("{}: received request for {:?}", name, records);
-                    let new_segment = Slog::segment_from_name(&root, &name, segment);
+                    let new_segment = Slog::segment_from_name(&root, &name, segment, None);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
                             trace!("{}: segment change {:?} {:?}", name, id, segment);
@@ -797,7 +807,8 @@ mod test {
 
     impl Slog {
         async fn get_record(&self, ix: SegmentIndex, relative: usize) -> Option<Record> {
-            self.iter_segment(ix, Ordering::Forward)
+            let focus = DataFocus::default();
+            self.iter_segment(ix, Ordering::Forward, focus)
                 .await
                 .flat_map(|chunk| LegacyRecords::try_from(chunk).unwrap().0)
                 .nth(relative)

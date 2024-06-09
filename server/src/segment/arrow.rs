@@ -65,7 +65,7 @@ impl Segment {
         })
     }
 
-    fn focus(self, focus: DataFocus) -> Self {
+    pub fn focus(self, focus: DataFocus) -> Self {
         Self { focus, ..self }
     }
 
