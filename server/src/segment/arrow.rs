@@ -44,6 +44,7 @@ pub struct Segment {
     path: PathBuf,
     recovery_path: PathBuf,
     recovered_path: PathBuf,
+    focus: DataFocus,
 }
 
 impl Segment {
@@ -54,12 +55,18 @@ impl Segment {
 
         let recovery_path = path.with_extension("recovery");
         let recovered_path = path.with_extension("recovery");
+        let focus = DataFocus::default();
 
         Ok(Self {
             path,
             recovery_path,
             recovered_path,
+            focus,
         })
+    }
+
+    fn focus(self, focus: DataFocus) -> Self {
+        Self { focus, ..self }
     }
 
     fn directory(&self) -> anyhow::Result<fs::File> {
@@ -71,7 +78,7 @@ impl Segment {
     pub fn read(&self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
         if self.recovered_path.exists() {
             trace!(?self.recovered_path, "reading from");
-            Reader::open(&self.recovered_path)
+            Reader::open(&self.recovered_path).map(|reader| reader.focus(self.focus.clone()))
         } else {
             Reader::open(&self.path).or_else(|err| {
                 error!(%err, path = %self.path.display(), "error reading segment");
@@ -232,8 +239,9 @@ pub struct Reader {
     dictionaries: Dictionaries,
     message_scratch: Vec<u8>,
     data_scratch: Vec<u8>,
-
     iter_range: Range<usize>,
+    focus: DataFocus,
+    projection: Option<Vec<usize>>,
 }
 
 impl Reader {
@@ -244,21 +252,50 @@ impl Reader {
         let message_scratch = vec![];
         let metadata = read_file_metadata(&mut file)?;
         let dictionaries = read_file_dictionaries(&mut file, &metadata, &mut data_scratch)?;
+        let iter_range = 0..metadata.blocks.len();
+        let focus = DataFocus::default();
+        let projection = None;
 
         Ok(Self {
-            iter_range: 0..metadata.blocks.len(),
-
             metadata,
             dictionaries,
             file,
             message_scratch,
             data_scratch,
+            iter_range,
+            focus,
+            projection,
         })
     }
 
     pub fn focus(self, focus: DataFocus) -> Self {
-        trace!(?focus);
-        self
+        let projection = if focus.is_some() {
+            if focus.is_everything() {
+                None
+            } else {
+                let include = focus.include();
+                let exclude = focus.exclude();
+                let projection = self
+                    .metadata
+                    .schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| !exclude.contains(&field.name))
+                    .filter(|(_, field)| include.contains(&field.name))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                Some(projection)
+            }
+        } else {
+            None
+        };
+
+        Self {
+            focus,
+            projection,
+            ..self
+        }
     }
 
     fn read_ix(&mut self, ix: usize) -> anyhow::Result<SegmentChunk> {
@@ -266,7 +303,7 @@ impl Reader {
             &mut self.file,
             &self.dictionaries,
             &self.metadata,
-            None,
+            self.projection.as_deref(),
             None,
             ix,
             &mut self.message_scratch,

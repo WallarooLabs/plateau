@@ -233,6 +233,40 @@ impl DataFocus {
             *arr = arr.with_validity(Some(all_null));
         }
     }
+
+    pub fn is_everything(&self) -> bool {
+        self.dataset.first().is_some_and(|ds| ds == "*")
+    }
+
+    pub fn include(&self) -> HashSet<&String> {
+        self.dataset.iter().collect()
+    }
+
+    pub fn exclude(&self) -> HashSet<&String> {
+        self.exclude.iter().collect()
+    }
+
+    pub fn projection(&self, schema: &ArrowSchema) -> Option<Vec<usize>> {
+        if self.is_some() {
+            if self.is_everything() {
+                None
+            } else {
+                let include = self.include();
+                let exclude = self.exclude();
+                let projection = schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| !exclude.contains(&field.name))
+                    .filter(|(_, field)| include.is_empty() || include.contains(&field.name))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                Some(projection)
+            }
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, IntoParams)]
