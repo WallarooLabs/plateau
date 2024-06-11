@@ -19,8 +19,6 @@ pub mod replication;
 mod segment;
 mod slog;
 mod storage;
-#[cfg(any(test, bench, feature = "test"))]
-pub mod test;
 mod topic;
 
 pub use crate::config::PlateauConfig as Config;

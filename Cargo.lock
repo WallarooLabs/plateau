@@ -2488,6 +2488,7 @@ dependencies = [
  "parquet-format-safe",
  "parquet2",
  "plateau-client",
+ "plateau-test",
  "plateau-transport",
  "rand",
  "regex",
@@ -2512,6 +2513,18 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",
+]
+
+[[package]]
+name = "plateau-test"
+version = "0.2.4"
+dependencies = [
+ "anyhow",
+ "plateau-client",
+ "plateau-server",
+ "plateau-transport",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
