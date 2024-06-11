@@ -1,4 +1,4 @@
-.PHONY: default image push-image image-plateau push-image-plateau check-fmt fmt lint clean
+.PHONY: default image push-image image-plateau push-image-plateau check-fmt fmt lint clean test
 
 TAG                      ?= $(shell git rev-parse --short  HEAD)
 IMAGE_ROOT                = ghcr.io/wallaroolabs

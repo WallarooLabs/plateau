@@ -1,16 +1,22 @@
-use arrow2::array::FixedSizeListArray;
+use plateau_transport::arrow2::array::Array;
+use plateau_transport::arrow2::array::FixedSizeListArray;
+use plateau_transport::arrow2::array::ListArray;
+use plateau_transport::arrow2::array::MutableListArray;
+use plateau_transport::arrow2::array::MutableUtf8Array;
+use plateau_transport::arrow2::array::PrimitiveArray;
+use plateau_transport::arrow2::array::StructArray;
+use plateau_transport::arrow2::array::TryExtend;
+use plateau_transport::arrow2::array::Utf8Array;
+use plateau_transport::arrow2::chunk::Chunk;
+use plateau_transport::arrow2::datatypes::DataType;
+use plateau_transport::arrow2::datatypes::Field;
+use plateau_transport::arrow2::datatypes::Metadata;
+use plateau_transport::arrow2::datatypes::Schema;
+use plateau_transport::SchemaChunk;
 
-use crate::{
-    arrow2::{
-        array::{
-            Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, StructArray,
-            TryExtend, Utf8Array,
-        },
-        chunk::Chunk,
-        datatypes::{DataType, Field, Metadata, Schema},
-    },
-    SchemaChunk,
-};
+pub use self::server::TestServer;
+
+mod server;
 
 pub fn inferences_large(blob_size: usize) -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);

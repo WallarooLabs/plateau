@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use tokio::sync::oneshot;
 
-use crate::{http, Catalog, Config};
+use plateau_server::{http, Catalog, Config};
 
 /// A RAII wrapper around a full plateau test server.
 ///
@@ -47,7 +47,7 @@ impl TestServer {
         tokio::spawn(server);
 
         if let Some(replication) = replication {
-            tokio::spawn(crate::replication::run(replication, addr));
+            tokio::spawn(plateau_server::replication::run(replication, addr));
         }
 
         Ok(Self {

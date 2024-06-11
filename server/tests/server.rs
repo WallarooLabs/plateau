@@ -16,13 +16,13 @@ use plateau_client::{
 };
 use plateau_server::chunk::Schema;
 use plateau_server::config::PlateauConfig;
-use plateau_server::test::TestServer;
 use plateau_server::{catalog, http, limit, partition};
+use plateau_test::inferences_large_extension;
+use plateau_test::TestServer;
 use plateau_transport::{
     arrow2,
     arrow2::bitmap::Bitmap,
     headers::{ITERATION_STATUS_HEADER, MAX_REQUEST_SIZE_HEADER},
-    test::inferences_large_extension,
 };
 use reqwest::{Client, Response};
 use serde_json as json;
