@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client", "server", "transport", "cli", "server/bench"]
+members = ["client", "server", "transport", "cli", "bench"]
 
 
 [workspace.package]
