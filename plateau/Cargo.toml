@@ -1,0 +1,22 @@
+[package]
+name = "plateau"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+
+[dependencies]
+chrono = "0.4"
+tokio = { version = "1.38", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+plateau-server.workspace = true
+
+
+[build-dependencies]
+chrono = "0.4"
+
+
+[lints]
+workspace = true

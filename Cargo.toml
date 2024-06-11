@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["client", "server", "transport", "cli", "bench"]
+members = ["client", "server", "transport", "cli", "bench", "plateau"]
 
 
 [workspace.package]
@@ -15,6 +15,7 @@ plateau-client = { path = "./client" }
 plateau-transport = { path = "./transport" }
 plateau-cli = { path = "./cli" }
 plateau-server = { path = "./server" }
+plateau = { path = "./plateau" }
 
 
 [profile.bench]
