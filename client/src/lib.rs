@@ -972,7 +972,7 @@ mod tests {
         responders::json_encoded,
         Expectation, Server,
     };
-    use plateau::{http, Config as PlateauConfig};
+    use plateau_server::{http, Config as PlateauConfig};
     use plateau_transport::{
         arrow2::{
             array::PrimitiveArray,
@@ -1404,7 +1404,7 @@ mod tests {
         use super::*;
 
         // TODO: This is copied from the server, refactor to share amongst other tests.
-        use plateau::chunk::Schema;
+        use plateau_server::chunk::Schema;
 
         fn inferences_schema_a() -> SchemaChunk<Schema> {
             use crate::arrow2::array::ListArray;

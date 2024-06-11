@@ -1,5 +1,5 @@
 [package]
-name = "plateau"
+name = "plateau-server"
 description = "A low-profile event and log aggregator"
 
 version.workspace = true
@@ -24,8 +24,6 @@ metrics-exporter-prometheus = "0.13"
 thiserror = "1"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
-plateau-client = { path = "../client", features = ["replicate"] }
-plateau-transport = { path = "../transport" }
 bytes = "1"
 humantime-serde = "1"
 serde_json = "1"
@@ -52,11 +50,12 @@ utoipa-swagger-ui = { version = "4", features = ["axum"] }
 uuid = "1.4"
 regex = "1.10"
 
+plateau-client = { workspace = true, features = ["replicate"] }
+plateau-transport.workspace = true
+
+
 [dev-dependencies]
 ctor = "0.2"
-
-plateau-client = { path = "../client" }
-plateau-transport = { path = "../transport", features = ["test"] }
 
 reqwest = { version = "0.11", default-features = false, features = [
   "json",
@@ -69,6 +68,9 @@ sample-std = "0.2.1"
 sample-arrow2 = "0.17.2"
 
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
+
+plateau-client.workspace = true
+plateau-transport = { workspace = true, features = ["test"] }
 
 
 [build-dependencies]

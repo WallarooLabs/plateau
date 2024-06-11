@@ -11,13 +11,13 @@ use arrow2::chunk::Chunk;
 use arrow2::datatypes::{DataType, Field, Metadata};
 use arrow2::io::ipc::{read, write};
 use bytesize::ByteSize;
-use plateau::chunk::Schema;
-use plateau::config::PlateauConfig;
-use plateau::test::TestServer;
-use plateau::{catalog, http, limit, partition};
 use plateau_client::{
     Error as ClientError, Iterate, MultiChunk, PandasRecordIteration, Retrieve, TopicIterationQuery,
 };
+use plateau_server::chunk::Schema;
+use plateau_server::config::PlateauConfig;
+use plateau_server::test::TestServer;
+use plateau_server::{catalog, http, limit, partition};
 use plateau_transport::{
     arrow2,
     arrow2::bitmap::Bitmap,
@@ -437,7 +437,7 @@ async fn topic_status_byte_limited() {
     let test_message = TEST_MESSAGE.repeat(100);
     let test_message_bytelen = test_message.as_bytes().len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
-    let message_limit = plateau::DEFAULT_BYTE_LIMIT / test_message_bytelen;
+    let message_limit = plateau_server::DEFAULT_BYTE_LIMIT / test_message_bytelen;
     let lower = message_limit / 2;
     repeat_append(
         &client,
@@ -971,7 +971,7 @@ async fn partition_status_byte_limited() {
     let test_message = TEST_MESSAGE.repeat(100);
     let test_message_bytelen = test_message.as_bytes().len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
-    let message_limit = plateau::DEFAULT_BYTE_LIMIT / test_message_bytelen;
+    let message_limit = plateau_server::DEFAULT_BYTE_LIMIT / test_message_bytelen;
     let lower = message_limit / 2;
     repeat_append(
         &client,

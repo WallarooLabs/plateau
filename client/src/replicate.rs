@@ -511,7 +511,7 @@ pub mod test {
     use tracing_subscriber::{fmt, EnvFilter};
 
     use super::*;
-    use plateau::{config::PlateauConfig, http};
+    use plateau_server::{config::PlateauConfig, http};
     use plateau_transport::{
         arrow2::{
             array::{
