@@ -1,7 +1,7 @@
 use std::env;
 use tracing_subscriber::{fmt, EnvFilter};
 
-use plateau::metrics;
+use plateau_server::metrics;
 
 fn squawk() {
     let version = env!("CARGO_PKG_VERSION");
@@ -35,11 +35,11 @@ async fn main() {
     }
     fmt().with_env_filter(EnvFilter::from_default_env()).init();
 
-    let config = plateau::config::binary_config().expect("error getting configuration");
+    let config = plateau_server::config::binary_config().expect("error getting configuration");
     squawk();
     config.log();
 
     metrics::start_metrics(config.metrics.clone());
 
-    plateau::task_from_config(config, plateau::exit_signal()).await;
+    plateau_server::task_from_config(config, plateau_server::exit_signal()).await;
 }

@@ -7,8 +7,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::FutureExt;
 use hdrhistogram::Histogram;
-use plateau::config::PlateauConfig;
 use plateau_client::Client;
+use plateau_server::config::PlateauConfig;
 use rand::{rngs::StdRng, seq::SliceRandom, Rng, RngCore, SeedableRng};
 use sample_std::Random;
 use serde::Deserialize;
@@ -89,7 +89,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
     let (tx_exit, rx_exit) = tokio::sync::oneshot::channel();
     let exit = rx_exit.map(|_| ()).boxed();
     let config = PlateauConfig::default();
-    let plateau_server = tokio::spawn(plateau::task_from_config(config, exit));
+    let plateau_server = tokio::spawn(plateau_server::task_from_config(config, exit));
 
     let config = Config {
         client: Client::new("http://localhost:3030").unwrap(),

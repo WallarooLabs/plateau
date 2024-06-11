@@ -10,6 +10,13 @@ authors = ["Wallaroo Labs"]
 repository = "https://github.com/WallarooLabs/plateau"
 
 
+[workspace.dependencies]
+plateau-client = { path = "./client" }
+plateau-transport = { path = "./transport" }
+plateau-cli = { path = "./cli" }
+plateau-server = { path = "./server" }
+
+
 [profile.bench]
 debug = true
 
