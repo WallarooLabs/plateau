@@ -24,8 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 reqwest = { version = "0.11", features = ["json"] }
 serde_json = "1.0"
 tokio = { version = "1", features = ["full"] }
-plateau = { path = "../" }
-plateau-client = { path = "../../client", features = ["health"] }
+plateau = { path = "../server" }
+plateau-client = { path = "../client", features = ["health"] }
 
 
 [[bin]]
