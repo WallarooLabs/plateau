@@ -2452,7 +2452,6 @@ dependencies = [
  "bytes",
  "futures",
  "httptest",
- "lazy_static",
  "parking_lot 0.11.2",
  "plateau-server",
  "plateau-transport",

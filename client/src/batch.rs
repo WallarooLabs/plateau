@@ -7,10 +7,9 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use lazy_static::lazy_static;
 use thiserror::Error;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -21,16 +20,14 @@ use plateau_transport::InsertQuery;
 
 use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 
-lazy_static! {
-    pub static ref DEFAULT_MAX_BATCH_BYTES: Arc<Mutex<usize>> = Arc::new(Mutex::new(100 * 1024));
-}
+static DEFAULT_MAX_BATCH_BYTES: AtomicUsize = AtomicUsize::new(100 * 1024);
 
 pub fn get_default_max_batch_bytes() -> usize {
-    *(DEFAULT_MAX_BATCH_BYTES.lock().unwrap())
+    DEFAULT_MAX_BATCH_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn update_default_max_batch_bytes(max: usize) {
-    *(DEFAULT_MAX_BATCH_BYTES.lock().unwrap()) = max;
+    DEFAULT_MAX_BATCH_BYTES.store(max, Ordering::Relaxed);
 }
 
 #[derive(Clone, Debug, Error)]
@@ -270,10 +267,10 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
 ///   size limits.
 /// - retries of failed batches on errors.
 /// - queue flushing at regular and configurable intervals.
-#[derive(Debug, Clone)]
-pub struct Transmission<E: Clone> {
+#[derive(Debug)]
+pub struct Transmission<E> {
     work_sender: mpsc::Sender<E>,
-    dispatch_task: Arc<Mutex<Option<task::JoinHandle<()>>>>,
+    dispatch_task: task::JoinHandle<()>,
 }
 
 impl<B: Clone + Batch + Send + 'static> Transmission<B> {
@@ -283,11 +280,7 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
         pending_capacity: usize,
     ) -> Self {
         let (work_sender, work_receiver) = mpsc::channel(pending_capacity);
-
-        let dispatch_task =
-            Arc::new(Mutex::new(Some(runtime.spawn(async move {
-                Self::dispatch_work(work_receiver, sender).await
-            }))));
+        let dispatch_task = runtime.spawn(Self::dispatch_work(work_receiver, sender));
 
         Self {
             work_sender,
@@ -297,12 +290,7 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
 
     pub async fn end(self) {
         drop(self.work_sender);
-
-        let task = { self.dispatch_task.lock().unwrap().take() };
-
-        if let Some(task) = task {
-            task.await.unwrap();
-        }
+        self.dispatch_task.await.unwrap();
     }
 
     pub fn send(&self, event: B) -> TransmissionResult<()> {
@@ -338,6 +326,7 @@ mod tests {
 
     use std::future::Future;
     use std::pin::Pin;
+    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
     use parking_lot::Mutex;
