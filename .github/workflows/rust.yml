@@ -76,9 +76,9 @@ jobs:
           cache-to: type=registry,ref=ghcr.io/wallaroolabs/plateau:buildcache,mode=max
           build-args: |
             RUST_VERSION=1.76.0
+  # Legacy build step, unused. It is kept here for the reference only.
   build2:
     if: false
-    description: Legacy build step, unused. It is kept here for the reference only.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
