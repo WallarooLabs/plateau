@@ -9,7 +9,7 @@ TIME                      = $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 RUST_VERSION              = 1.76.0
 
 test:
-	cargo test --workspace --features test,batch,polars -- --nocapture
+	cargo test --workspace --features batch,polars,replicate -- --nocapture
 
 fmt: check-fmt
 
@@ -17,7 +17,7 @@ check-fmt:
 	cargo fmt --all -- --check
 
 lint:
-	cargo clippy --workspace --all-targets --features batch,polars,test -- -D warnings
+	cargo clippy --workspace --all-targets --features batch,polars,replicate -- -D warnings
 
 coverage-%:
 	@$(MAKE) -C upstream -f ../../rust-grcov.mk $@
