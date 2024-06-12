@@ -8,10 +8,6 @@ repository.workspace = true
 authors.workspace = true
 
 
-[features]
-test = []
-
-
 [dependencies]
 anyhow = "1"
 axum = { version = "0.6", features = ["headers"] }
