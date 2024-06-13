@@ -178,7 +178,8 @@ impl Segment {
     }
 
     pub(crate) fn iter(&self) -> Result<impl SegmentIterator> {
-        let cache = cache::read(self.cache_path())
+        let focus = self.focus.clone().unwrap_or_default();
+        let cache = cache::read(self.cache_path(), &focus)
             .inspect_err(|err| error!("error reading cache at {:?}: {err:?}", self.cache_path()))
             .unwrap_or_default();
 
@@ -200,8 +201,7 @@ impl Segment {
                     Ok(ReadFormat::Parquet(segment.read(cache)?))
                 } else if arrow {
                     trace!("{:?} in arrow format", self.path);
-                    let segment = arrow::Segment::new(self.path.clone())?
-                        .focus(self.focus.clone().unwrap_or_default());
+                    let segment = arrow::Segment::new(self.path.clone())?.focus(focus);
                     Ok(ReadFormat::Arrow(segment.read(cache)?))
                 } else {
                     anyhow::bail!("unable to detect file format for segment {:?}", self.path)

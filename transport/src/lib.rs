@@ -9,11 +9,12 @@ use std::{
 
 use arrow2::bitmap::Bitmap;
 use arrow2::compute::aggregate::estimated_bytes_size;
+use arrow2::datatypes::Field;
+use arrow2::datatypes::Schema;
 use arrow2::{
     array::{Array, StructArray},
     chunk::Chunk,
     compute::concatenate::concatenate,
-    datatypes::Field,
     io::ipc::{read, write},
 };
 use regex::Regex;
@@ -670,7 +671,7 @@ impl SchemaChunk<ArrowSchema> {
             }
         });
 
-        let exclude: HashSet<&String> = focus.exclude.iter().collect();
+        let exclude = focus.exclude();
 
         for path in paths {
             let split = focus.dataset_separator.as_ref().map_or_else(
@@ -786,7 +787,7 @@ impl SchemaChunk<ArrowSchema> {
     }
 }
 
-fn contains_null_type(schema: &arrow2::datatypes::Schema) -> bool {
+fn contains_null_type(schema: &Schema) -> bool {
     schema
         .fields
         .iter()

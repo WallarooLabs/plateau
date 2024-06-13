@@ -76,15 +76,15 @@ impl Segment {
     }
 
     pub fn read(&self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
-        if self.recovered_path.exists() {
+        let reader = if self.recovered_path.exists() {
             trace!(?self.recovered_path, "reading from");
-            Reader::open(&self.recovered_path).map(|reader| reader.focus(self.focus.clone()))
+            Reader::open(&self.recovered_path)
         } else {
-            Reader::open(&self.path).or_else(|err| {
-                error!(%err, path = %self.path.display(), "error reading segment");
-                self.recover(cache).map(|(_, reader)| reader)
-            })
-        }
+            Reader::open(&self.path)
+                .inspect_err(|e| error!(%e, path = %self.path.display(), "error reading segment"))
+                .or_else(|_| self.recover(cache).map(|(_, reader)| reader))
+        }?;
+        Ok(reader.focus(self.focus.clone()))
     }
 
     fn recover(&self, cache: Option<cache::Data>) -> anyhow::Result<(usize, Reader)> {
@@ -269,27 +269,7 @@ impl Reader {
     }
 
     pub fn focus(self, focus: DataFocus) -> Self {
-        let projection = if focus.is_some() {
-            if focus.is_everything() {
-                None
-            } else {
-                let include = focus.include();
-                let exclude = focus.exclude();
-                let projection = self
-                    .metadata
-                    .schema
-                    .fields
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, field)| !exclude.contains(&field.name))
-                    .filter(|(_, field)| include.contains(&field.name))
-                    .map(|(idx, _)| idx)
-                    .collect();
-                Some(projection)
-            }
-        } else {
-            None
-        };
+        let projection = focus.projection(self.schema());
 
         Self {
             focus,

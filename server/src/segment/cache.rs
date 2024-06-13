@@ -16,6 +16,7 @@ use std::{
 use crate::arrow2::{datatypes::Schema, io::ipc};
 use anyhow::Result;
 use plateau_client::ipc::read::StreamState;
+use plateau_transport::DataFocus;
 use plateau_transport::{SchemaChunk, SegmentChunk};
 use tracing::{debug, error, trace, warn};
 
@@ -151,7 +152,7 @@ pub struct Data {
     pub rows: SchemaChunk<Schema>,
 }
 
-pub fn read(path: PathBuf) -> Result<Option<Data>> {
+pub fn read(path: PathBuf, focus: &DataFocus) -> Result<Option<Data>> {
     if path.exists() {
         let mut reader = fs::File::open(&path)?;
         validate_header(&mut reader)?;
@@ -162,7 +163,8 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
 
         let metadata = ipc::read::read_stream_metadata(&mut reader)?;
         let schema = metadata.schema.clone();
-        let reader = ipc::read::StreamReader::new(reader, metadata, None);
+        let projection = focus.projection(&schema);
+        let reader = ipc::read::StreamReader::new(reader, metadata, projection);
 
         let chunks = reader
             .take_while(|state| matches!(state, Ok(StreamState::Some(..)) | Err(..)))
