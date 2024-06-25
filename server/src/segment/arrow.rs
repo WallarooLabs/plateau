@@ -54,7 +54,7 @@ impl Segment {
         anyhow::ensure!(ext != "recovered");
 
         let recovery_path = path.with_extension("recovery");
-        let recovered_path = path.with_extension("recovery");
+        let recovered_path = path.with_extension("recovered");
         let focus = DataFocus::default();
 
         Ok(Self {
