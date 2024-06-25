@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::chunk::{LegacyRecords, Record, Schema};
 use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
-use crate::manifest::{Manifest, Ordering, PartitionId};
+use crate::manifest::{Manifest, Ordering, PartitionId, SegmentData};
 use crate::partition::Config as PartitionConfig;
 use crate::partition::Partition;
 use crate::slog::RecordIndex;
@@ -122,6 +122,18 @@ impl Topic {
             .await
     }
 
+    pub(crate) async fn active_data(&self) -> HashMap<String, SegmentData> {
+        stream::iter(self.partitions.read().await.iter())
+            .flat_map(|(name, active)| {
+                active
+                    .active_data()
+                    .into_stream()
+                    .flat_map(|data| stream::iter(data.map(|d| (name.clone(), d))))
+            })
+            .collect()
+            .await
+    }
+
     pub async fn get_partition(&self, partition_name: &str) -> RwLockReadGuard<'_, Partition> {
         let partitions = self.partitions.read().await;
         let current_partition = RwLockReadGuard::try_map(partitions, |map| map.get(partition_name));
@@ -147,6 +159,15 @@ impl Topic {
                 map.get(partition_name).unwrap()
             })
         }
+    }
+
+    pub(crate) async fn close_partition(&self, partition_name: &str) -> Option<SegmentData> {
+        let mut partitions = self.partitions.write().await;
+        let partition = partitions.remove(partition_name)?;
+
+        let data = partition.active_data().await;
+        partition.close().await;
+        data
     }
 
     pub fn partition_filter_expanded(
@@ -385,6 +406,20 @@ mod test {
     use crate::partition::test::{assert_limit_unreached, deindex};
     use chrono::TimeZone;
     use tempfile::{tempdir, TempDir};
+
+    impl Topic {
+        // this could be used outside of tests once the issue below is fixed
+        pub(crate) async fn ensure_index(
+            &self,
+            partition_name: &str,
+            index: RecordIndex,
+        ) -> Result<()> {
+            let partition = self.get_partition(partition_name).await;
+            // XXX - holds read lock for topic, so no new partitions may be added
+            // until the future completes.
+            partition.ensure_index(index).await
+        }
+    }
 
     fn dummy_records<I, S>(s: I) -> Vec<Record>
     where
