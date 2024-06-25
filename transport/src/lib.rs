@@ -217,6 +217,38 @@ pub struct DataFocus {
 }
 
 impl DataFocus {
+    pub fn with_dataset(dataset: impl ToString) -> Self {
+        let dataset = vec![dataset.to_string()];
+        Self {
+            dataset,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_datasets(datasets: &[impl ToString]) -> Self {
+        let dataset = datasets.iter().map(ToString::to_string).collect();
+        Self {
+            dataset,
+            ..Self::default()
+        }
+    }
+
+    pub fn without_dataset(dataset: impl ToString) -> Self {
+        let exclude = vec![dataset.to_string()];
+        Self {
+            exclude,
+            ..Self::default()
+        }
+    }
+
+    pub fn without_datasets(datasets: &[impl ToString]) -> Self {
+        let exclude = datasets.iter().map(ToString::to_string).collect();
+        Self {
+            exclude,
+            ..Self::default()
+        }
+    }
+
     pub fn is_some(&self) -> bool {
         !self.dataset.is_empty()
             || !self.exclude.is_empty()
