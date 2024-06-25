@@ -180,7 +180,7 @@ impl Segment {
 
     pub(crate) fn iter(&self) -> Result<impl SegmentIterator> {
         let focus = self.focus.clone().unwrap_or_default();
-        let cache = cache::read(self.cache_path(), &focus)
+        let cache = cache::read(self.cache_path())
             .inspect_err(|err| error!("error reading cache at {:?}: {err:?}", self.cache_path()))
             .unwrap_or_default();
 
