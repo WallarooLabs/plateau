@@ -348,6 +348,7 @@ pub mod test {
     use crate::arrow2::array::{ListArray, MutableListArray, StructArray, TryExtend};
     use plateau_transport::estimate_size;
 
+    // TODO replace with `plateau_test::inference_schema_a`
     pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
         let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
