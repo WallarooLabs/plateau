@@ -55,7 +55,7 @@ pub fn env_source() -> config::Environment {
 
 pub fn binary_config() -> Result<PlateauConfig> {
     let config = Config::builder()
-        .set_default("catalog.retain.max_bytes", "95GiB")?
+        .set_default("catalog.retain.max_bytes", "99GiB")?
         .add_source(File::with_name("/etc/plateau.yaml").required(false))
         .add_source(File::with_name("./plateau.yaml").required(false))
         .add_source(File::with_name("/etc/plateau.toml").required(false))

@@ -13,6 +13,7 @@
 use std::borrow::Borrow;
 use std::fmt;
 use std::ops::{Range, RangeInclusive};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
@@ -25,7 +26,7 @@ use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use sqlx::{ColumnIndex, Row};
-use tracing::{info, trace};
+use tracing::{debug, error, info, trace};
 
 pub use plateau_transport::PartitionId;
 
@@ -110,6 +111,7 @@ impl<P: Borrow<PartitionId>> SegmentId<P> {
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pool: SqlitePool,
+    path: PathBuf,
 }
 
 #[derive(Clone, Debug)]
@@ -190,14 +192,22 @@ fn copy_existing(src: &Path, dst: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn shm_path(db: &Path) -> anyhow::Result<PathBuf> {
+    add_suffix(db, "-shm")
+}
+
+fn wal_path(db: &Path) -> anyhow::Result<PathBuf> {
+    add_suffix(db, "-wal")
+}
+
 static MIGRATOR: Migrator = sqlx::migrate!();
 
 impl Manifest {
     pub async fn current_prior_attach(current: PathBuf, prior: PathBuf) -> anyhow::Result<Self> {
         if prior.exists() && !current.exists() {
             info!("migrating {prior:?} to {current:?}");
-            copy_existing(&add_suffix(&prior, "-shm")?, &add_suffix(&current, "-shm")?)?;
-            copy_existing(&add_suffix(&prior, "-wal")?, &add_suffix(&current, "-wal")?)?;
+            copy_existing(&shm_path(&prior)?, &shm_path(&current)?)?;
+            copy_existing(&wal_path(&prior)?, &wal_path(&current)?)?;
             std::fs::copy(&prior, &current)?;
         }
 
@@ -237,7 +247,7 @@ impl Manifest {
             .await
             .expect("database migration failed!");
         // TODO clear pending segments (size=NULL)
-        Self { pool }
+        Self { pool, path }
     }
 
     /// Upserts data for a segment with the given identifier.
@@ -490,13 +500,42 @@ impl Manifest {
             .bind(topic),
         };
 
-        query
+        let bytes = query
             .map(|row: SqliteRow| Some(usize::try_from(row.get::<Option<i64>, _>(0)?).unwrap()))
             .fetch_optional(&self.pool)
             .await
             .unwrap()
             .flatten()
-            .unwrap_or(0)
+            .unwrap_or(0);
+
+        if matches!(scope, Scope::Global) {
+            let db_bytes = self.db_bytes();
+            debug!(db_bytes);
+            bytes + db_bytes
+        } else {
+            bytes
+        }
+    }
+
+    pub fn db_bytes(&self) -> usize {
+        fn try_size(path: &Path, transform: Option<fn(&Path) -> anyhow::Result<PathBuf>>) -> usize {
+            let transformed = transform.and_then(|f| f(path).ok());
+
+            let required = transformed.as_deref().map_or(true, |p| p.exists());
+            if !required {
+                return 0;
+            };
+
+            let path = transformed.as_deref().unwrap_or(path);
+            path.metadata()
+                .map(|meta| meta.size())
+                .inspect_err(|e| error!("error getting size of {path:?}: {e:?}"))
+                .unwrap_or(0) as usize
+        }
+
+        try_size(&self.path, None)
+            + try_size(&self.path, Some(wal_path))
+            + try_size(&self.path, Some(shm_path))
     }
 
     pub async fn get_partitions(&self, topic: &str) -> Vec<String> {
@@ -731,7 +770,7 @@ mod test {
         }
         assert_eq!(state.get_size(Scope::Topic(a.topic())).await, 20);
         assert_eq!(state.get_size(Scope::Topic(c.topic())).await, 20);
-        assert_eq!(state.get_size(Scope::Global).await, 30);
+        assert_eq!(state.get_size(Scope::Global).await, 30 + state.db_bytes());
 
         let oldest = state.get_oldest_segment(None).await.unwrap();
         assert_eq!(oldest.partition_id, b.clone());
