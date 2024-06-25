@@ -157,3 +157,7 @@ pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         .unwrap(),
     }
 }
+
+pub fn default<T: Default>() -> T {
+    T::default()
+}
