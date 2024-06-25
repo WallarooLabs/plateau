@@ -317,7 +317,7 @@ fn test_partial_write_size_destroy() -> Result<()> {
 
 #[test]
 fn focus_vs_unfocus() -> Result<()> {
-    let (_root, path) = prepare_segment("focus.arrow")?;
+    let (_root, path) = prepare_segment("focus.arrow", true)?;
 
     // Make sure unfocused data has all the datasets
     let mut full = Segment::at(&path, None).iter()?;
@@ -341,7 +341,7 @@ fn focus_vs_unfocus() -> Result<()> {
 
 #[test]
 fn focus_include_single() -> Result<()> {
-    let (_root, path) = prepare_segment("focus.arrow")?;
+    let (_root, path) = prepare_segment("focus.arrow", true)?;
 
     let focus = DataFocus::with_dataset("time");
     let mut focused = Segment::at(path, focus).iter()?;
@@ -363,7 +363,7 @@ fn focus_include_single() -> Result<()> {
 
 #[test]
 fn focus_include_multiple() -> Result<()> {
-    let (_root, path) = prepare_segment("focus.arrow")?;
+    let (_root, path) = prepare_segment("focus.arrow", true)?;
 
     let focus = DataFocus::with_datasets(&["inputs", "outputs"]);
     let mut focused = Segment::at(path, focus).iter()?;
@@ -385,7 +385,7 @@ fn focus_include_multiple() -> Result<()> {
 
 #[test]
 fn focus_exclude_single() -> Result<()> {
-    let (_root, path) = prepare_segment("focus.arrow")?;
+    let (_root, path) = prepare_segment("focus.arrow", true)?;
     let focus = DataFocus::without_dataset("time");
     let mut focused = Segment::at(path, focus).iter()?;
     let arrays1 = focused.next().unwrap().unwrap().into_arrays();
@@ -416,7 +416,7 @@ fn focus_exclude_single() -> Result<()> {
 
 #[test]
 fn focus_exclude_multiple() -> Result<()> {
-    let (_root, path) = prepare_segment("focus.arrow")?;
+    let (_root, path) = prepare_segment("focus.arrow", true)?;
     let focus = DataFocus::without_datasets(&["inputs", "outputs"]);
     let mut focused = Segment::at(path, focus).iter()?;
     let arrays1 = focused.next().unwrap().unwrap().into_arrays();
@@ -440,14 +440,180 @@ fn focus_exclude_multiple() -> Result<()> {
     Ok(())
 }
 
-fn prepare_segment(segment: impl AsRef<Path>) -> Result<(TempDir, PathBuf)> {
+mod cache {
+    use super::*;
+    use test_log::test;
+
+    #[test]
+    fn focus_vs_unfocus() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+
+        // Make sure unfocused data has all the datasets
+        let mut full = Segment::at(&path, None).iter()?;
+        let chunk1 = full.next().unwrap().unwrap();
+        let chunk2 = full.next().unwrap().unwrap();
+        assert!(full.next().is_none());
+        assert_eq!(chunk1.arrays().len(), 4);
+        assert_eq!(chunk2.arrays().len(), 4);
+
+        // And now narrow down the reader to only one dataset
+        let focus = DataFocus::with_dataset("time");
+        let mut focused = Segment::at(&path, focus).iter()?;
+        let chunk1 = focused.next().unwrap().unwrap();
+        let chunk2 = focused.next().unwrap().unwrap();
+        assert!(focused.next().is_none());
+        assert_eq!(chunk1.arrays().len(), 1);
+        assert_eq!(chunk2.arrays().len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn focus_include_single() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+
+        let focus = DataFocus::with_dataset("time");
+        let segment = Segment::at(path, focus);
+        tracing::debug!(
+            ?segment,
+            path = %segment.path().display(),
+            cache_path = %segment.cache_path().display()
+        );
+
+        // std::thread::sleep(std::time::Duration::from_secs(180));
+
+        let mut focused = segment.iter()?;
+
+        // tracing::debug!(?focused);
+
+        let arrays1 = focused.next().unwrap().unwrap().into_arrays();
+        let arrays2 = focused.next().unwrap().unwrap().into_arrays();
+        assert!(focused.next().is_none());
+
+        assert_eq!(arrays1.len(), 1);
+        assert_eq!(arrays2.len(), 1);
+
+        assert_eq!(arrays1[0].len(), 5);
+        assert_eq!(arrays2[0].len(), 5);
+
+        assert_eq!(arrays1[0].data_type(), &DataType::Int64);
+        assert_eq!(arrays2[0].data_type(), &DataType::Int64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn no_focus_include_single() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+
+        // let focus = DataFocus::with_dataset("time");
+        let mut focused = Segment::at(path, None).iter()?;
+        let arrays1 = focused.next().unwrap().unwrap().into_arrays();
+        let arrays2 = focused.next().unwrap().unwrap().into_arrays();
+        assert!(focused.next().is_none());
+
+        // assert_eq!(arrays1.len(), 1);
+        // assert_eq!(arrays2.len(), 1);
+
+        // assert_eq!(arrays1[0].len(), 5);
+        // assert_eq!(arrays2[0].len(), 5);
+
+        // assert_eq!(arrays1[0].data_type(), &DataType::Int64);
+        // assert_eq!(arrays2[0].data_type(), &DataType::Int64);
+
+        Ok(())
+    }
+
+    #[test]
+    fn focus_include_multiple() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+
+        let focus = DataFocus::with_datasets(&["inputs", "outputs"]);
+        let mut focused = Segment::at(path, focus).iter()?;
+        let arrays1 = focused.next().unwrap().unwrap().into_arrays();
+        let arrays2 = focused.next().unwrap().unwrap().into_arrays();
+        assert!(focused.next().is_none());
+
+        assert_eq!(arrays1.len(), 2);
+        assert_eq!(arrays2.len(), 2);
+
+        assert_eq!(arrays1[0].len(), 5);
+        assert_eq!(arrays2[0].len(), 5);
+
+        assert_eq!(arrays1[0].data_type(), &DataType::Float32);
+        assert_eq!(arrays2[0].data_type(), &DataType::Float32);
+
+        Ok(())
+    }
+
+    #[test]
+    fn focus_exclude_single() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+        let focus = DataFocus::without_dataset("time");
+        let mut focused = Segment::at(path, focus).iter()?;
+        let arrays1 = focused.next().unwrap().unwrap().into_arrays();
+        let arrays2 = focused.next().unwrap().unwrap().into_arrays();
+        assert!(focused.next().is_none());
+
+        assert_eq!(arrays1.len(), 3);
+        assert_eq!(arrays2.len(), 3);
+
+        assert_eq!(arrays1[0].len(), 5);
+        assert_eq!(arrays1[1].len(), 5);
+        assert_eq!(arrays1[2].len(), 5);
+
+        assert_eq!(arrays2[0].len(), 5);
+        assert_eq!(arrays2[1].len(), 5);
+        assert_eq!(arrays2[2].len(), 5);
+
+        assert!(matches!(arrays1[0].data_type(), DataType::List(_)));
+        assert!(matches!(arrays1[1].data_type(), DataType::Float32));
+        assert!(matches!(arrays1[2].data_type(), DataType::Struct(_)));
+
+        assert!(matches!(arrays2[0].data_type(), DataType::List(_)));
+        assert!(matches!(arrays2[1].data_type(), DataType::Float32));
+        assert!(matches!(arrays2[2].data_type(), DataType::Struct(_)));
+
+        Ok(())
+    }
+
+    #[test]
+    fn focus_exclude_multiple() -> Result<()> {
+        let (_root, path) = prepare_segment("focus.arrow", false)?;
+        let focus = DataFocus::without_datasets(&["inputs", "outputs"]);
+        let mut focused = Segment::at(path, focus).iter()?;
+        let arrays1 = focused.next().unwrap().unwrap().into_arrays();
+        let arrays2 = focused.next().unwrap().unwrap().into_arrays();
+        assert!(focused.next().is_none());
+
+        assert_eq!(arrays1.len(), 2);
+        assert_eq!(arrays2.len(), 2);
+
+        assert_eq!(arrays1[0].len(), 5);
+        assert_eq!(arrays1[1].len(), 5);
+
+        assert_eq!(arrays2[0].len(), 5);
+        assert_eq!(arrays2[1].len(), 5);
+
+        assert!(matches!(arrays1[0].data_type(), DataType::Int64));
+        assert!(matches!(arrays1[1].data_type(), DataType::List(_)));
+        assert!(matches!(arrays2[0].data_type(), DataType::Int64));
+        assert!(matches!(arrays2[1].data_type(), DataType::List(_)));
+
+        Ok(())
+    }
+}
+
+fn prepare_segment(segment: impl AsRef<Path>, finalize_cache: bool) -> Result<(TempDir, PathBuf)> {
     let root = tempdir()?;
     let segment = root.path().join(segment);
     let arrow = Segment::at(root.path().join(&segment), None);
     let a = inferences_schema_a();
     let mut w = arrow.create(a.schema.clone(), Config::arrow())?;
     w.log_arrow(a.clone(), Some(a.chunk.clone()))?;
-    w.end()?;
+    if finalize_cache {
+        w.end()?;
+    }
 
     Ok((root, segment))
 }
