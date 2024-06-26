@@ -392,6 +392,10 @@ impl Partition {
         self.state.into_inner().close().await;
     }
 
+    pub(crate) async fn active_data(&self) -> Option<SegmentData> {
+        self.state.read().await.messages.active_segment_data().await
+    }
+
     #[cfg(test)]
     pub(crate) async fn compact(&self) {
         let mut state = self.state.write().await;
@@ -627,6 +631,22 @@ pub mod test {
     use chrono::TimeZone;
     use plateau_transport::SegmentChunk;
     use tempfile::{tempdir, TempDir};
+
+    impl Partition {
+        pub(crate) async fn ensure_index(&self, index: RecordIndex) -> Result<()> {
+            let state = self.state.read().await;
+            // we need a new watcher so that we don't require mutable access to state;
+            let mut new_watcher = state.commits.clone();
+            drop(state);
+
+            let _ = new_watcher
+                .wait_for(|committed| index <= *committed)
+                .await
+                .map_err(|_| anyhow::anyhow!("watch channel closed"));
+
+            Ok(())
+        }
+    }
 
     pub(crate) fn deindex(is: Vec<IndexedChunk>) -> Vec<Record> {
         is.into_iter()

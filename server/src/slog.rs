@@ -496,6 +496,7 @@ impl Slog {
     }
 
     pub(crate) async fn checkpoint(&self) -> bool {
+        trace!("checkpoint {:?}", self.root);
         self.state.write().await.checkpoint(false).await
     }
 

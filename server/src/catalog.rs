@@ -1,12 +1,13 @@
 //! The catalog indexes all currently attached topics.
 //! It is used to route reads and writes to the correct topic / partition.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use bytesize::ByteSize;
+use chrono::Utc;
 use futures::future::join_all;
 use metrics::gauge;
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ pub struct Config {
     pub storage: storage::Config,
     #[serde(default = "Catalog::default_max_open_topics")]
     pub max_open_topics: usize,
+    pub max_partition_bytes: ByteSize,
 }
 
 impl Default for Config {
@@ -44,6 +46,7 @@ impl Default for Config {
             partition: Default::default(),
             storage: Default::default(),
             max_open_topics: Catalog::default_max_open_topics(),
+            max_partition_bytes: ByteSize::mib(3500),
         }
     }
 }
@@ -55,9 +58,14 @@ pub struct Catalog {
     manifest: Manifest,
     root: PathBuf,
     topic_root: PathBuf,
-    topics: RwLock<HashMap<String, Topic>>,
-    last_checkpoint: RwLock<SystemTime>,
+    state: RwLock<State>,
     disk_monitor: DiskMonitor,
+}
+
+#[derive(Debug)]
+struct State {
+    topics: HashMap<String, Topic>,
+    last_checkpoint: SystemTime,
 }
 
 impl Catalog {
@@ -90,8 +98,10 @@ impl Catalog {
             manifest,
             root,
             topic_root,
-            topics: RwLock::new(HashMap::new()),
-            last_checkpoint: RwLock::new(SystemTime::now()),
+            state: RwLock::new(State {
+                topics: HashMap::new(),
+                last_checkpoint: SystemTime::now(),
+            }),
             disk_monitor,
         }
     }
@@ -116,13 +126,14 @@ impl Catalog {
     }
 
     pub async fn last_checkpoint(&self) -> SystemTime {
-        *self.last_checkpoint.read().await
+        self.state.read().await.last_checkpoint
     }
 
     pub async fn checkpoint(&self) {
         trace!("begin full catalog checkpoint");
         let start = SystemTime::now();
-        for (_, topic) in self.topics.read().await.iter() {
+        let state = self.state.read().await;
+        for (_, topic) in state.topics.iter() {
             topic.checkpoint().await
         }
         let end = SystemTime::now();
@@ -139,7 +150,9 @@ impl Catalog {
         } else {
             warn!("finished full catalog checkpoint; time skew");
         }
-        *self.last_checkpoint.write().await = end;
+
+        drop(state);
+        self.state.write().await.last_checkpoint = end;
     }
 
     pub async fn checkpoints(catalog: Arc<Self>) {
@@ -167,7 +180,7 @@ impl Catalog {
                 .get_oldest_segment(None)
                 .await
                 .expect("no partition to remove");
-            let topics = self.topics.read().await;
+            let topics = &self.state.read().await.topics;
             let topic = topics.get(oldest.topic()).expect("invalid topic");
             let partition = topic.get_partition(oldest.partition()).await;
             partition.remove_oldest().await;
@@ -176,7 +189,7 @@ impl Catalog {
     }
 
     pub async fn prune_topics(&self) {
-        let mut topics = self.topics.write().await;
+        let topics = &mut self.state.write().await.topics;
         while topics.len() > self.config.max_open_topics {
             let to_drop = topics.keys().next().expect("no topics left").clone();
             info!(
@@ -189,6 +202,39 @@ impl Catalog {
             if let Some(topic) = topics.remove(&to_drop) {
                 topic.close().await;
             }
+        }
+
+        let mut bytes = 0;
+        let mut ages = BTreeMap::default();
+        for (topic_name, topic) in topics.iter() {
+            for (partition_name, data) in topic.active_data().await {
+                ages.insert(*data.time.end(), (topic_name.clone(), partition_name));
+                bytes += data.size;
+            }
+        }
+
+        let max_bytes = self.config.max_partition_bytes.as_u64() as usize;
+        trace!(bytes, max_bytes);
+        while bytes > max_bytes {
+            let Some((time, (topic_name, partition_name))) = ages.pop_first() else {
+                error!("ran out of topics while trying to prune");
+                return;
+            };
+
+            // XXX - these errors should never happen as we hold the lock and just iterated above
+            let Some(topic) = topics.get(&topic_name) else {
+                error!("invalid topic {topic_name}");
+                continue;
+            };
+
+            let age = Utc::now().signed_duration_since(time).to_std();
+            info!("closing {topic_name}/{partition_name} (age {age:?}, {bytes} > {max_bytes})");
+            let Some(data) = topic.close_partition(&partition_name).await else {
+                error!("invalid partition {partition_name}");
+                continue;
+            };
+
+            bytes -= data.size;
         }
     }
 
@@ -212,7 +258,7 @@ impl Catalog {
     }
 
     pub async fn list_topics(&self) -> Vec<String> {
-        let mem_topics = self.topics.read().await;
+        let mem_topics = &self.state.read().await.topics;
         let mut topics: Vec<String> = mem_topics.keys().cloned().collect();
         let disk_topics: Vec<String> = self
             .manifest
@@ -226,13 +272,13 @@ impl Catalog {
     }
 
     pub async fn get_topic(&self, name: &str) -> RwLockReadGuard<'_, Topic> {
-        let read = self.topics.read().await;
-        let v = RwLockReadGuard::try_map(read, |m| m.get(name));
+        let read = self.state.read().await;
+        let v = RwLockReadGuard::try_map(read, |m| m.topics.get(name));
         match v {
             Ok(topic) => topic,
             Err(read) => {
                 drop(read);
-                let mut write = self.topics.write().await;
+                let mut write = self.state.write().await;
                 info!("creating new topic: {}", name);
                 let topic = Topic::attach(
                     self.topic_root.clone(),
@@ -241,9 +287,9 @@ impl Catalog {
                     self.config.partition.clone(),
                 )
                 .await;
-                write.insert(String::from(name), topic);
+                write.topics.insert(String::from(name), topic);
                 let read = write.downgrade();
-                RwLockReadGuard::map(read, |m| m.get(name).unwrap())
+                RwLockReadGuard::map(read, |m| m.topics.get(name).unwrap())
             }
         }
     }
@@ -279,13 +325,13 @@ impl Catalog {
 
     /// Default number of topics to keep in-memory.
     pub fn default_max_open_topics() -> usize {
-        16
+        128
     }
 
     pub async fn close(self) {
-        let mut topics = self.topics.write().await;
+        let mut state = self.state.write().await;
 
-        join_all(topics.drain().map(|(_, topic)| topic.close())).await;
+        join_all(state.topics.drain().map(|(_, topic)| topic.close())).await;
     }
 
     /// Close catalog (perform final checkpoint and drop all writers)
@@ -330,13 +376,32 @@ impl Catalog {
 
 #[cfg(test)]
 mod test {
+    use std::iter;
+
     use super::*;
     use crate::chunk::Record;
     use crate::segment::test::build_records;
     use crate::slog::RecordIndex;
     use anyhow::Result;
-    use chrono::{TimeZone, Utc};
+    use chrono::{TimeDelta, TimeZone, Timelike, Utc};
+    use futures::stream;
+    use futures::stream::StreamExt;
     use tempfile::{tempdir, TempDir};
+    use test_log::test;
+
+    impl Catalog {
+        async fn active_topics(&self) -> usize {
+            self.state.read().await.topics.len()
+        }
+
+        async fn active_partitions(&self) -> usize {
+            stream::iter(self.state.read().await.topics.iter())
+                .fold(0, |acc, (_, topic)| async move {
+                    acc + topic.active_data().await.len()
+                })
+                .await
+        }
+    }
 
     async fn catalog() -> (TempDir, Catalog) {
         catalog_config(Default::default()).await
@@ -348,7 +413,7 @@ mod test {
         (dir, Catalog::attach(root, config).await.unwrap())
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_independence() -> Result<()> {
         let (_root, catalog) = catalog().await;
 
@@ -385,7 +450,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_migration() -> Result<()> {
         let config = Config::default();
         let dir = tempdir().unwrap();
@@ -431,7 +496,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_retain() -> Result<()> {
         let (_root, mut catalog) = catalog().await;
         catalog.config.retain.max_bytes = ByteSize::b(8000);
@@ -471,7 +536,7 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
+    #[test(tokio::test)]
     async fn test_max_open_topics() -> Result<()> {
         let (_root, catalog) = catalog_config(Config {
             max_open_topics: 1,
@@ -499,7 +564,7 @@ mod test {
             catalog.checkpoint().await;
             catalog.retain().await;
             {
-                assert!(catalog.topics.read().await.len() <= 1);
+                assert!(catalog.state.read().await.topics.len() <= 1);
             }
         }
 
@@ -516,8 +581,75 @@ mod test {
             }
             catalog.prune_topics().await;
             {
-                assert!(catalog.topics.read().await.len() <= 1);
+                assert!(catalog.state.read().await.topics.len() <= 1);
             }
+        }
+
+        Ok(())
+    }
+
+    #[test(tokio::test)]
+    async fn test_partition_active_limit() -> Result<()> {
+        let (_root, catalog) = catalog_config(Config {
+            max_partition_bytes: ByteSize::b(150),
+            ..Default::default()
+        })
+        .await;
+
+        let large = "x".repeat(11);
+
+        let time = Utc::now()
+            .checked_sub_signed(TimeDelta::try_seconds(10).unwrap())
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+
+        let records: Vec<_> = iter::repeat(large)
+            .take(6)
+            .map(|message| Record {
+                time,
+                message: message.bytes().collect(),
+            })
+            .collect();
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            {
+                let topic = catalog.get_topic(&name).await;
+
+                let insert = topic.extend_records("default", &[record.clone()]).await?;
+                topic
+                    .ensure_index("default", RecordIndex(insert.end.0 - 1))
+                    .await?;
+            }
+            catalog.checkpoint().await;
+            catalog.retain().await;
+        }
+
+        // the third topic got closed due to the active byte limits
+        assert_eq!(catalog.active_partitions().await, 2);
+
+        for (ix, record) in records.iter().enumerate() {
+            let name = format!("topic-{}", ix % 3);
+            trace!("{name} {}", ix / 3);
+            {
+                let topic = catalog.get_topic(&name).await;
+                assert_eq!(
+                    topic
+                        .get_record_by_index("default", RecordIndex(ix / 3))
+                        .await,
+                    Some(record.clone()),
+                    "{name}/{}",
+                    ix / 3
+                );
+            }
+            catalog.prune_topics().await;
+
+            assert!(catalog.active_topics().await >= 2);
+
+            // The active segment for the third topic is persisted so the topic
+            // comes back but does not invoke the byte limit
+            assert_eq!(catalog.active_partitions().await, 2);
         }
 
         Ok(())
