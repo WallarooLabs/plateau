@@ -593,6 +593,7 @@ async fn large_appends() -> Result<()> {
             &TopicIterationQuery {
                 data_focus: DataFocus {
                     dataset: vec!["*".into()],
+                    dataset_separator: Some(".".into()),
                     max_bytes: Some(100 * 1024),
                     ..Default::default()
                 },
@@ -605,16 +606,16 @@ async fn large_appends() -> Result<()> {
     assert_eq!(
         json.value,
         json::json!([
-            {"tensor": null, "time": 0},
-            {"tensor": null, "time": 1},
-            {"tensor": null, "time": 2},
-            {"tensor": null, "time": 3},
-            {"tensor": null, "time": 4},
-            {"tensor": null, "time": 0},
-            {"tensor": null, "time": 1},
-            {"tensor": null, "time": 2},
-            {"tensor": null, "time": 3},
-            {"tensor": null, "time": 4},
+            {"out.tensor": null, "time": 0},
+            {"out.tensor": null, "time": 1},
+            {"out.tensor": null, "time": 2},
+            {"out.tensor": null, "time": 3},
+            {"out.tensor": null, "time": 4},
+            {"out.tensor": null, "time": 0},
+            {"out.tensor": null, "time": 1},
+            {"out.tensor": null, "time": 2},
+            {"out.tensor": null, "time": 3},
+            {"out.tensor": null, "time": 4},
         ])
     );
 
