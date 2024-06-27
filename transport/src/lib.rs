@@ -222,6 +222,17 @@ impl DataFocus {
             || self.dataset_separator.is_some()
             || self.max_bytes.is_some()
     }
+
+    pub fn size_check_array(&self, arr: &mut Box<dyn Array>) {
+        let too_many_bytes = self
+            .max_bytes
+            .map_or(false, |max| estimated_bytes_size(arr.as_ref()) > max);
+
+        if too_many_bytes {
+            let all_null = Bitmap::new_zeroed(arr.len());
+            *arr = arr.with_validity(Some(all_null));
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize, Serialize, IntoParams)]
@@ -634,21 +645,16 @@ impl SchemaChunk<ArrowSchema> {
             );
             let mut arr = self.get_array(split)?;
 
-            let too_many_bytes = focus
-                .max_bytes
-                .map_or(false, |max| estimated_bytes_size(arr.as_ref()) > max);
-
-            if too_many_bytes {
-                let all_null = Bitmap::new_zeroed(arr.len());
-                arr = arr.with_validity(Some(all_null));
-            }
-
             if !exclude.contains(path) {
                 if let Some(s) = focus.dataset_separator.as_ref() {
-                    gather_flat_arrays(&mut fields, &mut arrays, path, arr, s, &exclude);
+                    gather_flat_arrays(&mut fields, &mut arrays, path, arr, focus, s, &exclude);
                 } else {
-                    // TODO: nullable
-                    fields.push(Field::new(path, arr.data_type().clone(), false));
+                    focus.size_check_array(&mut arr);
+                    fields.push(Field::new(
+                        path,
+                        arr.data_type().clone(),
+                        arr.validity().is_some(),
+                    ));
                     arrays.push(arr);
                 }
             }
@@ -772,7 +778,8 @@ fn gather_flat_arrays(
     fields: &mut Vec<Field>,
     arrays: &mut Vec<Box<dyn Array>>,
     key: &str,
-    arr: Box<dyn Array>,
+    mut arr: Box<dyn Array>,
+    focus: &DataFocus,
     separator: &str,
     exclude: &HashSet<&String>,
 ) {
@@ -782,8 +789,12 @@ fn gather_flat_arrays(
             vec![s.fields().iter().zip(s.values().iter())]
         }
         None => {
-            // TODO nullable
-            fields.push(Field::new(key.to_string(), arr.data_type().clone(), false));
+            focus.size_check_array(&mut arr);
+            fields.push(Field::new(
+                key.to_string(),
+                arr.data_type().clone(),
+                arr.validity().is_some(),
+            ));
             arrays.push(arr.clone());
             vec![]
         }
@@ -808,10 +819,12 @@ fn gather_flat_arrays(
                     field_name.push_str(separator);
                     field_name.push_str(&field.name);
 
+                    let mut arr = arr.clone();
+                    focus.size_check_array(&mut arr);
                     fields.push(Field::new(
                         field_name,
                         field.data_type().clone(),
-                        field.is_nullable,
+                        field.is_nullable || arr.validity().is_some(),
                     ));
                     arrays.push(arr.clone());
                 }

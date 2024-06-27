@@ -77,17 +77,23 @@ pub fn inferences_large_extension(count: i64, inner_size: i64, shape: &str) -> S
         None,
     );
 
+    let out = StructArray::new(
+        DataType::Struct(vec![Field::new("tensor", tensor.data_type().clone(), true)]),
+        vec![tensor.boxed()],
+        None,
+    );
+
     let schema = Schema {
         fields: vec![
             Field::new("time", time.data_type().clone(), false),
-            Field::new("tensor", tensor.data_type().clone(), false),
+            Field::new("out", out.data_type().clone(), false),
         ],
         metadata: Metadata::default(),
     };
 
     SchemaChunk {
         schema,
-        chunk: Chunk::try_new(vec![time.boxed(), tensor.boxed()]).unwrap(),
+        chunk: Chunk::try_new(vec![time.boxed(), out.boxed()]).unwrap(),
     }
 }
 
