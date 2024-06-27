@@ -401,12 +401,7 @@ pub async fn topic_iterate(
         );
     }
 
-    chunk::to_reply(
-        content,
-        result.batch,
-        query.data_focus,
-        query.page_bytes.unwrap_or(max_page.max_bytes),
-    )
+    chunk::to_reply(content, result.batch, query.data_focus)
 }
 
 #[utoipa::path(
@@ -472,7 +467,6 @@ async fn partition_get_records(
         headers.get(ACCEPT).and_then(|header| header.to_str().ok()),
         result,
         query.data_focus,
-        max_page.max_bytes,
     )
 }
 

@@ -17,7 +17,6 @@ use axum::{
 
 use bytes::Bytes;
 use std::io::{Cursor, Write};
-use tracing::info;
 
 use plateau_transport::{
     headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, SchemaChunk,
@@ -106,7 +105,6 @@ pub(crate) fn to_reply(
     accept: Option<&str>,
     batch: LimitedBatch,
     focus: DataFocus,
-    max_bytes: usize,
 ) -> Result<Response, ErrorReply> {
     let mut iter = batch.chunks.into_iter();
     // sigh. this would probably be much easier to implement if/when we
@@ -226,24 +224,7 @@ pub(crate) fn to_reply(
                 );
                 arrow_json::write::write(&mut buf, &mut serializer).map_err(ErrorReply::Arrow)?;
 
-                let next_bytes = bytes.len() + buf.len().saturating_sub(2);
-                if next_bytes <= max_bytes {
-                    bytes.extend(&buf[1..buf.len().saturating_sub(1)]);
-                } else {
-                    info!(
-                        "truncating json response, bytes {next_bytes} > {max_bytes} ({} nulls)",
-                        chunk.len()
-                    );
-
-                    // we need to write a null for each row we are ignoring so
-                    // that the iterator indices remain accurate
-                    for ix in 0..chunk.len() {
-                        if ix > 0 {
-                            write!(&mut bytes, ",").map_err(|_| ErrorReply::Unknown)?;
-                        }
-                        write!(&mut bytes, "null").map_err(|_| ErrorReply::Unknown)?;
-                    }
-                }
+                bytes.extend(&buf[1..buf.len().saturating_sub(1)]);
             }
             write!(&mut bytes, "]").map_err(|_| ErrorReply::Unknown)?;
 
