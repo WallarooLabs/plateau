@@ -499,7 +499,7 @@ mod test {
     #[test(tokio::test)]
     async fn test_retain() -> Result<()> {
         let (_root, mut catalog) = catalog().await;
-        catalog.config.retain.max_bytes = ByteSize::b(8000);
+        catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
 
         let data = "x".to_string().repeat(500);
 
