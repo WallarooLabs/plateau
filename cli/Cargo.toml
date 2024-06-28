@@ -1,8 +1,11 @@
 [package]
 name = "plateau-cli"
-authors = ["Wallaroo Labs"]
-version = "0.3.1"
-edition = "2021"
+description = "plateau CLI interface"
+
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
 
 
 [dependencies]
