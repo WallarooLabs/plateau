@@ -4,7 +4,7 @@ members = ["client", "server", "transport", "cli", "bench", "plateau", "test"]
 
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["Wallaroo Labs"]
 repository = "https://github.com/WallarooLabs/plateau"
