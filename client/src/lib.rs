@@ -1267,7 +1267,7 @@ mod tests {
     async fn oversize_chunk_reports_max() {
         let chunk = example_chunk();
 
-        let server = http::TestServer::new_with_config(PlateauConfig {
+        let server = plateau_test::http::TestServer::new_with_config(PlateauConfig {
             http: http::Config {
                 max_append_bytes: 5,
                 ..http::Config::default()
