@@ -155,13 +155,13 @@ pub async fn serve(
 /// Currently, we assume that only one test server can run at a given time to
 /// prevent port conflicts.
 #[derive(Debug)]
-pub struct TestServer {
+pub struct TestServer1 {
     addr: SocketAddr,
     end_tx: oneshot::Sender<()>,
     pub catalog: Arc<Catalog>,
 }
 
-impl TestServer {
+impl TestServer1 {
     pub async fn new() -> Result<Self> {
         let config = PlateauConfig {
             http: Config {
