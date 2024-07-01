@@ -50,6 +50,20 @@ pub struct Config {
     pub max_page: RowLimit,
 }
 
+impl Config {
+    pub fn localhost() -> Self {
+        Self::with_socket(SocketAddr::from(([127, 0, 0, 1], 0)))
+    }
+
+    pub fn with_socket(bind: SocketAddr) -> Self {
+        Self::default().bind(bind)
+    }
+
+    pub fn bind(self, bind: SocketAddr) -> Self {
+        Self { bind, ..self }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
