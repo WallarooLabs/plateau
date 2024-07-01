@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -267,10 +268,10 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
 ///   size limits.
 /// - retries of failed batches on errors.
 /// - queue flushing at regular and configurable intervals.
-#[derive(Debug)]
-pub struct Transmission<E> {
+#[derive(Debug, Clone)]
+pub struct Transmission<E: Clone> {
     work_sender: mpsc::Sender<E>,
-    dispatch_task: task::JoinHandle<()>,
+    dispatch_task: Arc<Mutex<Option<task::JoinHandle<()>>>>,
 }
 
 impl<B: Clone + Batch + Send + 'static> Transmission<B> {
@@ -280,7 +281,11 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
         pending_capacity: usize,
     ) -> Self {
         let (work_sender, work_receiver) = mpsc::channel(pending_capacity);
-        let dispatch_task = runtime.spawn(Self::dispatch_work(work_receiver, sender));
+
+        let dispatch_task =
+            Arc::new(Mutex::new(Some(runtime.spawn(async move {
+                Self::dispatch_work(work_receiver, sender).await
+            }))));
 
         Self {
             work_sender,
@@ -290,7 +295,12 @@ impl<B: Clone + Batch + Send + 'static> Transmission<B> {
 
     pub async fn end(self) {
         drop(self.work_sender);
-        self.dispatch_task.await.unwrap();
+
+        let task = { self.dispatch_task.lock().unwrap().take() };
+
+        if let Some(task) = task {
+            task.await.unwrap();
+        }
     }
 
     pub fn send(&self, event: B) -> TransmissionResult<()> {
@@ -326,7 +336,6 @@ mod tests {
 
     use std::future::Future;
     use std::pin::Pin;
-    use std::sync::Arc;
     use std::task::{Context, Poll, Waker};
 
     use parking_lot::Mutex;
