@@ -604,13 +604,13 @@ pub mod test {
 
     pub(crate) async fn setup_with_config(
         config: PlateauConfig,
-    ) -> Result<(String, Client, http::TestServer)> {
+    ) -> Result<(String, Client, plateau_test::http::TestServer)> {
         fmt()
             .with_env_filter(EnvFilter::from_default_env())
             .try_init()
             .ok(); // called multiple times, so ignore errors
 
-        let server = http::TestServer::new_with_config(PlateauConfig {
+        let server = plateau_test::http::TestServer::new_with_config(PlateauConfig {
             http: http::Config {
                 bind: SocketAddr::from(([127, 0, 0, 1], 0)),
                 ..config.http

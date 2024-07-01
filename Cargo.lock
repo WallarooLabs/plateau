@@ -2454,6 +2454,7 @@ dependencies = [
  "httptest",
  "parking_lot 0.11.2",
  "plateau-server",
+ "plateau-test",
  "plateau-transport",
  "polars",
  "reqwest",
