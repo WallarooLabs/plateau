@@ -22,10 +22,7 @@ pub struct TestServer {
 impl TestServer {
     pub async fn new() -> anyhow::Result<Self> {
         let config = Config {
-            http: http::Config {
-                bind: SocketAddr::from(([127, 0, 0, 1], 0)),
-                ..http::Config::default()
-            },
+            http: http::Config::localhost(),
             ..Config::default()
         };
 
@@ -33,6 +30,13 @@ impl TestServer {
     }
 
     pub async fn new_with_config(config: Config) -> anyhow::Result<Self> {
+        Self::with_port_config(config).await
+    }
+
+    pub async fn localhost_with_config(config: Config) -> anyhow::Result<Self> {
+        let http = config.http.bind(SocketAddr::from(([127, 0, 0, 1], 0)));
+        let config = Config { http, ..config };
+
         Self::with_port_config(config).await
     }
 
@@ -73,5 +77,9 @@ impl TestServer {
     /// This simulates a "clean" plateau shutdown.
     pub async fn close(self) {
         Catalog::close_arc(self.stop().await).await;
+    }
+
+    pub fn client(&self) -> anyhow::Result<plateau_client::Client> {
+        plateau_client::Client::new(&self.base()).map_err(Into::into)
     }
 }

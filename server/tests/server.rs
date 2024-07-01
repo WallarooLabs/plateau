@@ -17,8 +17,8 @@ use plateau_client::{
 use plateau_server::chunk::Schema;
 use plateau_server::config::PlateauConfig;
 use plateau_server::{catalog, http, limit, partition};
+use plateau_test::http::TestServer;
 use plateau_test::inferences_large_extension;
-use plateau_test::TestServer;
 use plateau_transport::{
     arrow2,
     arrow2::bitmap::Bitmap,
@@ -363,7 +363,7 @@ async fn setup_with_config(config: http::Config) -> (Client, String, TestServer)
     (
         Client::new(),
         random_topic(),
-        TestServer::new_with_config(PlateauConfig {
+        TestServer::localhost_with_config(PlateauConfig {
             http: config,
             ..PlateauConfig::default()
         })
@@ -537,7 +537,7 @@ async fn max_request_header() -> Result<()> {
 async fn large_appends() -> Result<()> {
     let large = inferences_large_extension(5, 200_000, "[2, 1000, 100]");
 
-    let server = TestServer::new_with_config(PlateauConfig {
+    let server = TestServer::localhost_with_config(PlateauConfig {
         http: http::Config {
             max_append_bytes: 20,
             ..Default::default()
@@ -559,7 +559,7 @@ async fn large_appends() -> Result<()> {
 
     assert!(matches!(err, Err(ClientError::RequestTooLong(_, _))));
 
-    let server = TestServer::new_with_config(PlateauConfig {
+    let server = TestServer::localhost_with_config(PlateauConfig {
         catalog: catalog::Config {
             partition: partition::Config {
                 roll: limit::Rolling {

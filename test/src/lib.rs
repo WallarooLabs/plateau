@@ -14,10 +14,7 @@ use plateau_transport::arrow2::datatypes::Metadata;
 use plateau_transport::arrow2::datatypes::Schema;
 use plateau_transport::SchemaChunk;
 
-pub use self::server::TestServer;
-
 pub mod http;
-mod server;
 
 pub fn inferences_large(blob_size: usize) -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
