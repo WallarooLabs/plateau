@@ -16,6 +16,7 @@ use plateau_transport::SchemaChunk;
 
 pub use self::server::TestServer;
 
+pub mod http;
 mod server;
 
 pub fn inferences_large(blob_size: usize) -> SchemaChunk<Schema> {
