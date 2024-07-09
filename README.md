@@ -1,10 +1,21 @@
-plateau[^1] is a low-profile event and log aggregator
+plateau[^1] is a low-profile columnar data aggregator.
 
-## Features
+It is the "missing middle" between applications (such as ML workloads) that
+generate high throughput columnar data and data stores optimized for bulk
+storage operations like S3 and GCS.
 
-- Fast. Single-node throughput of up to 1M 128-byte records/s on common cloud
-  hardware.
-- Record grouping via "topic", write parallelism via "partition".
+It has three primary responsibilities:
+
+- Locally cache the most recently written columnar data.
+- Batch incoming data into chunks optimally sized for replication and long-term
+  storage.
+- Manage all locally stored data to consistently fit within a defined fixed
+  storage footprint.
+
+## Goals
+
+- Very high throughput, up to millions of rows / second on a single node.
+- Hierarchical record grouping via "topic", write parallelism via "partition".
 - Fixed-size per-topic retention policies with additional optional age-based
   expiration.
 - Graceful failure under load via predictable load shedding.
@@ -18,7 +29,7 @@ plateau is divided into two high-level components: the manifest and segment stor
 The manifest tracks high-level metadata about segments such as size, alongside
 time and logical index spans.
 
-The manifest tracks per-partition state of each topic. It optimizes record
+The manifest also records per-partition state of each topic. It optimizes record
 queries by indexing segment spans so that it queries only need to read relevant
 segments. It is also used for tracking and hitting retention targets.
 
@@ -44,8 +55,10 @@ thread. This also enables load shedding. If a background write is in progress
 and the current segment is full, incoming records are rejected until the write
 clears.
 
-Currently, the only supported segment storage type is bulk indexed Parquet
-files.
+Currently, there are two supported segment types:
+
+- Arrow feather files (default).
+- Bulk indexed Parquet files (legacy).
 
 ## Future Work
 
@@ -54,7 +67,7 @@ segment store. These could be selected transparently while using the same ingest
 and query API.
 
 plateau will also eventually support replication to bulk object storage (e.g.
-S3). Other types of replication may be added as needed.
+S3).
 
 The current design uses per-partition threads for simplicity. A future switch
 to an async I/O system could enable much higher partition counts.
@@ -62,6 +75,13 @@ to an async I/O system could enable much higher partition counts.
 plateau is currently only designed to run as a single node for speed and
 simplicity. At some point, it may gain redundant bulk storage and HA
 manifest plugins that will allow it to operate with high availability.
+
+## License
+
+Plateau is distributed under the terms of both the MIT license and the
+Apache License (Version 2.0). See [LICENSE-APACHE](LICENSE-APACHE) and
+[LICENSE-MIT](LICENSE-MIT) for details. Opening a pull request is
+assumed to signal agreement with these licensing terms.
 
 [^1]: plateau is named after the Plateau sawmill, which is by [some
 estimations](https://www.sawmilldatabase.com/productiontoplist.php?country_id=10)
