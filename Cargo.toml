@@ -8,6 +8,7 @@ version = "0.3.2"
 edition = "2021"
 authors = ["Wallaroo Labs"]
 repository = "https://github.com/WallarooLabs/plateau"
+license = "MIT OR Apache-2.0"
 
 
 [workspace.dependencies]
