@@ -12,5 +12,9 @@ RUN \
 
 FROM us-docker.pkg.dev/wallaroo-dev-253816/docker-hub-us/library/debian:bullseye-slim
 
+LABEL org.opencontainers.image.vendor="Wallaroo Labs"
+LABEL org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
+LABEL org.opencontainers.image.title="plateau"
+
 COPY --from=build --link /usr/src/plateau/target/x86_64-unknown-linux-musl/release/plateau .
 CMD ["./plateau"]
