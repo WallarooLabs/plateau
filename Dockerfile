@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 ARG RUST_VERSION
-FROM ghcr.io/wallaroolabs/rust:${RUST_VERSION} AS base
+# FROM ghcr.io/wallaroolabs/rust:${RUST_VERSION} AS base
+FROM clux/muslrust:${RUST_VERSION}-stable AS base
 
 FROM base AS build
 ARG BUILD_COMMIT

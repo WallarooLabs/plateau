@@ -40,6 +40,7 @@ image-plateau:
 	--label "org.opencontainers.image.created=$(TIME)" \
 	$(DOCKER_SCCACHE) \
 	--load \
+	--platform linux/arm64 \
 	--progress plain \
 	-f Dockerfile .
 
