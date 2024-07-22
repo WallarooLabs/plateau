@@ -178,6 +178,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+          labels: |
+            org.opencontainers.image.vendor="Wallaroo Labs"
+            org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
+            org.opencontainers.image.title="plateau"
 
       - name: Login to ghcr.io
         uses: docker/login-action@v3
