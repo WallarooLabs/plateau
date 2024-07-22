@@ -54,9 +54,6 @@ jobs:
             org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
             org.opencontainers.image.title="plateau"
 
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -114,9 +111,6 @@ jobs:
             org.opencontainers.image.vendor="Wallaroo Labs"
             org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
             org.opencontainers.image.title="plateau"
-
-      - name: Setup QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
