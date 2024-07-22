@@ -40,7 +40,8 @@ image-plateau:
 	--label "org.opencontainers.image.created=$(TIME)" \
 	$(DOCKER_SCCACHE) \
 	--load \
-	-f Dockerfile.plateau .
+	--progress plain \
+	-f Dockerfile .
 
 push-image: push-image-plateau
 
