@@ -26,8 +26,8 @@ use plateau_transport::{
 };
 use reqwest::{Client, Response};
 use serde_json as json;
+use test_log::tracing_subscriber::{fmt, EnvFilter};
 use tracing::trace;
-use tracing_subscriber::{fmt, EnvFilter};
 
 use plateau_transport::{DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW};
 
