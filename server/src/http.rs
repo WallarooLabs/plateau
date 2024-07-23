@@ -6,11 +6,10 @@ use std::time::SystemTime;
 
 use anyhow::Result;
 use axum::{
-    body::Body,
-    extract::{DefaultBodyLimit, FromRef, Path, State},
-    http::{header::ACCEPT, HeaderMap, Request},
+    extract::{DefaultBodyLimit, FromRef, Path, Request, State},
+    http::{header::ACCEPT, HeaderMap},
     routing::{get, post},
-    Json, Router, Server,
+    Json, Router,
 };
 
 use chrono::{DateTime, Utc};
@@ -20,7 +19,6 @@ use serde_json::json;
 use tokio::sync::oneshot;
 use tower_http::trace::TraceLayer;
 use tracing::info;
-use tracing::Instrument;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -119,7 +117,7 @@ pub async fn serve(
 
     let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
-    let filter = Router::new()
+    let router = Router::new()
         .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
         .route("/ok", get(healthcheck))
         .route("/topics", get(get_topics))
@@ -134,7 +132,7 @@ pub async fn serve(
         .route("/topic/:topic_name/records", post(topic_iterate_route))
         .route("/topic/:topic_name", get(topic_get_partitions))
         .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
+            TraceLayer::new_for_http().make_span_with(|request: &Request| {
                 tracing::span!(
                     target: "plateau::http",
                     tracing::Level::INFO,
@@ -147,17 +145,18 @@ pub async fn serve(
         )
         .with_state(AppState(catalog, Arc::clone(&config)));
 
-    let server = Server::bind(&config.http.bind).serve(filter.into_make_service());
-    let addr = server.local_addr();
-
-    let fut = server.with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
-    let span = tracing::info_span!("Server::run", ?addr);
-    tracing::info!(parent: &span, "listening on http://{}", addr);
+    let listener = tokio::net::TcpListener::bind(&config.http.bind)
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server =
+        axum::serve(listener, router).with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
+    tracing::info!("listening on http://{addr}");
 
     (
         addr,
         tx_shutdown,
-        Box::pin(async move { fut.instrument(span).await.unwrap_or(()) }),
+        Box::pin(async move { server.await.unwrap_or(()) }),
     )
 }
 

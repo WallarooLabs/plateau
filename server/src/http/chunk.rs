@@ -1,27 +1,28 @@
-use crate::arrow2::datatypes::Metadata;
-use crate::arrow2::io::ipc::{read, write};
-use crate::arrow2::io::json as arrow_json;
-use crate::Config;
+use std::io::{Cursor, Write};
+
+use axum::body::Body;
+use axum::extract::Request;
+use axum::http;
+use axum::RequestExt;
 use axum::{
-    async_trait,
-    body::{boxed, Full, HttpBody},
     extract::{
         rejection::{BytesRejection, FailedToBufferBody},
         FromRef, FromRequest,
     },
-    headers::ContentType,
-    http::{header::CONTENT_TYPE, Request, StatusCode},
     response::Response,
-    BoxError, RequestExt as _,
 };
-
+use axum_extra::headers::ContentType;
 use bytes::Bytes;
-use std::io::{Cursor, Write};
 
 use plateau_transport::{
     headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, SchemaChunk,
     SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
 };
+
+use crate::arrow2::datatypes::Metadata;
+use crate::arrow2::io::ipc::{read, write};
+use crate::arrow2::io::json as arrow_json;
+use crate::Config;
 
 use crate::{
     chunk::{new_schema_chunk, Schema},
@@ -33,45 +34,41 @@ const CONTENT_TYPE_PANDAS_RECORD: &str = "application/json; format=pandas-record
 
 pub(crate) struct SchemaChunkRequest(pub(crate) SchemaChunk<Schema>);
 
-#[async_trait]
-impl<S, B> FromRequest<S, B> for SchemaChunkRequest
+#[axum::async_trait]
+impl<S> FromRequest<S> for SchemaChunkRequest
 where
-    B: HttpBody + Send + 'static,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
     Config: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = ErrorReply;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let config = Config::from_ref(state);
         let max_append_bytes = config.http.max_append_bytes;
 
         let content_type = req
             .headers()
-            .get(CONTENT_TYPE)
+            .get(http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .ok_or(ErrorReply::CannotAccept(
                 ContentType::octet_stream().to_string(),
             ))?;
 
         if content_type == CONTENT_TYPE_ARROW {
-            let bytes = match req.with_limited_body() {
-                Ok(req) => req.extract::<Bytes, _>(),
-                Err(req) => req.extract::<Bytes, _>(),
-            }
-            .await
-            .map_err(|e| {
-                if let BytesRejection::FailedToBufferBody(FailedToBufferBody::LengthLimitError(_)) =
-                    e
-                {
-                    return ErrorReply::PayloadTooLarge(max_append_bytes);
-                }
+            let bytes = req
+                .with_limited_body()
+                .extract::<Bytes, _>()
+                .await
+                .map_err(|e| {
+                    if let BytesRejection::FailedToBufferBody(
+                        FailedToBufferBody::LengthLimitError(_),
+                    ) = e
+                    {
+                        return ErrorReply::PayloadTooLarge(max_append_bytes);
+                    }
 
-                ErrorReply::Arrow(ArrowError::from_external_error(e))
-            })?;
-
+                    ErrorReply::Arrow(ArrowError::from_external_error(e))
+                })?;
             deserialize_request(bytes).await
         } else {
             Err(ErrorReply::CannotAccept(content_type.to_string()))
@@ -145,15 +142,15 @@ pub(crate) fn to_reply(
                 let bytes = writer.into_inner().into_inner();
                 Response::builder()
                     .header("Content-Type", CONTENT_TYPE_ARROW)
-                    .status(StatusCode::OK)
-                    .body(boxed(Full::new(Bytes::from(bytes))))
+                    .status(http::StatusCode::OK)
+                    .body(Body::from(bytes))
                     .map_err(|_| ErrorReply::Unknown)
             }
             None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
                 Response::builder()
                     .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
-                    .status(StatusCode::OK)
-                    .body(boxed(Full::new(Bytes::from("[]"))))
+                    .status(http::StatusCode::OK)
+                    .body(Body::from("[]"))
                     .map_err(|_| ErrorReply::Unknown)
             }
             Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),
@@ -192,7 +189,7 @@ pub(crate) fn to_reply(
             let bytes = writer.into_inner().into_inner();
             Response::builder()
                 .header("Content-Type", CONTENT_TYPE_ARROW)
-                .status(StatusCode::OK)
+                .status(http::StatusCode::OK)
                 .header(
                     ITERATION_STATUS_HEADER,
                     focused_schema
@@ -200,7 +197,7 @@ pub(crate) fn to_reply(
                         .get("status")
                         .unwrap_or(&"{}".to_string()),
                 )
-                .body(boxed(Full::new(Bytes::from(bytes))))
+                .body(Body::from(bytes))
                 .map_err(|_| ErrorReply::Unknown)
         }
         None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
@@ -229,7 +226,7 @@ pub(crate) fn to_reply(
             write!(&mut bytes, "]").map_err(|_| ErrorReply::Unknown)?;
 
             Response::builder()
-                .header(CONTENT_TYPE, CONTENT_TYPE_PANDAS_RECORD)
+                .header(http::header::CONTENT_TYPE, CONTENT_TYPE_PANDAS_RECORD)
                 .header(
                     ITERATION_STATUS_HEADER,
                     focused_schema
@@ -237,8 +234,8 @@ pub(crate) fn to_reply(
                         .get("status")
                         .unwrap_or(&"{}".to_string()),
                 )
-                .status(StatusCode::OK)
-                .body(boxed(Full::new(Bytes::from(bytes))))
+                .status(http::StatusCode::OK)
+                .body(Body::from(bytes))
                 .map_err(|_| ErrorReply::Unknown)
         }
         Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),
