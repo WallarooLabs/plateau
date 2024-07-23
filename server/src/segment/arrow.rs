@@ -13,6 +13,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use plateau_transport::DataFocus;
 use plateau_transport::SegmentChunk;
 use tracing::{error, trace, warn};
 
@@ -43,6 +44,7 @@ pub struct Segment {
     path: PathBuf,
     recovery_path: PathBuf,
     recovered_path: PathBuf,
+    focus: DataFocus,
 }
 
 impl Segment {
@@ -52,13 +54,19 @@ impl Segment {
         anyhow::ensure!(ext != "recovered");
 
         let recovery_path = path.with_extension("recovery");
-        let recovered_path = path.with_extension("recovery");
+        let recovered_path = path.with_extension("recovered");
+        let focus = DataFocus::default();
 
         Ok(Self {
             path,
             recovery_path,
             recovered_path,
+            focus,
         })
+    }
+
+    pub fn focus(self, focus: DataFocus) -> Self {
+        Self { focus, ..self }
     }
 
     fn directory(&self) -> anyhow::Result<fs::File> {
@@ -68,15 +76,15 @@ impl Segment {
     }
 
     pub fn read(&self, cache: Option<cache::Data>) -> anyhow::Result<Reader> {
-        if self.recovered_path.exists() {
+        let reader = if self.recovered_path.exists() {
             trace!(?self.recovered_path, "reading from");
             Reader::open(&self.recovered_path)
         } else {
-            Reader::open(&self.path).or_else(|err| {
-                error!(%err, path = %self.path.display(), "error reading segment");
-                self.recover(cache).map(|(_, reader)| reader)
-            })
-        }
+            Reader::open(&self.path)
+                .inspect_err(|e| error!(%e, path = %self.path.display(), "error reading segment"))
+                .or_else(|_| self.recover(cache).map(|(_, reader)| reader))
+        }?;
+        Ok(reader.focus(self.focus.clone()))
     }
 
     fn recover(&self, cache: Option<cache::Data>) -> anyhow::Result<(usize, Reader)> {
@@ -231,8 +239,9 @@ pub struct Reader {
     dictionaries: Dictionaries,
     message_scratch: Vec<u8>,
     data_scratch: Vec<u8>,
-
     iter_range: Range<usize>,
+    focus: DataFocus,
+    projection: Option<Vec<usize>>,
 }
 
 impl Reader {
@@ -243,16 +252,30 @@ impl Reader {
         let message_scratch = vec![];
         let metadata = read_file_metadata(&mut file)?;
         let dictionaries = read_file_dictionaries(&mut file, &metadata, &mut data_scratch)?;
+        let iter_range = 0..metadata.blocks.len();
+        let focus = DataFocus::default();
+        let projection = None;
 
         Ok(Self {
-            iter_range: 0..metadata.blocks.len(),
-
             metadata,
             dictionaries,
             file,
             message_scratch,
             data_scratch,
+            iter_range,
+            focus,
+            projection,
         })
+    }
+
+    pub fn focus(self, focus: DataFocus) -> Self {
+        let projection = focus.projection(self.schema());
+
+        Self {
+            focus,
+            projection,
+            ..self
+        }
     }
 
     fn read_ix(&mut self, ix: usize) -> anyhow::Result<SegmentChunk> {
@@ -260,7 +283,7 @@ impl Reader {
             &mut self.file,
             &self.dictionaries,
             &self.metadata,
-            None,
+            self.projection.as_deref(),
             None,
             ix,
             &mut self.message_scratch,

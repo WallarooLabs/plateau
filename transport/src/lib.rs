@@ -9,11 +9,12 @@ use std::{
 
 use arrow2::bitmap::Bitmap;
 use arrow2::compute::aggregate::estimated_bytes_size;
+use arrow2::datatypes::Field;
+use arrow2::datatypes::Schema;
 use arrow2::{
     array::{Array, StructArray},
     chunk::Chunk,
     compute::concatenate::concatenate,
-    datatypes::Field,
     io::ipc::{read, write},
 };
 use regex::Regex;
@@ -216,6 +217,38 @@ pub struct DataFocus {
 }
 
 impl DataFocus {
+    pub fn with_dataset(dataset: impl ToString) -> Self {
+        let dataset = vec![dataset.to_string()];
+        Self {
+            dataset,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_datasets(datasets: &[impl ToString]) -> Self {
+        let dataset = datasets.iter().map(ToString::to_string).collect();
+        Self {
+            dataset,
+            ..Self::default()
+        }
+    }
+
+    pub fn without_dataset(dataset: impl ToString) -> Self {
+        let exclude = vec![dataset.to_string()];
+        Self {
+            exclude,
+            ..Self::default()
+        }
+    }
+
+    pub fn without_datasets(datasets: &[impl ToString]) -> Self {
+        let exclude = datasets.iter().map(ToString::to_string).collect();
+        Self {
+            exclude,
+            ..Self::default()
+        }
+    }
+
     pub fn is_some(&self) -> bool {
         !self.dataset.is_empty()
             || !self.exclude.is_empty()
@@ -231,6 +264,40 @@ impl DataFocus {
         if too_many_bytes {
             let all_null = Bitmap::new_zeroed(arr.len());
             *arr = arr.with_validity(Some(all_null));
+        }
+    }
+
+    pub fn is_everything(&self) -> bool {
+        self.dataset.first().is_some_and(|ds| ds == "*")
+    }
+
+    pub fn include(&self) -> HashSet<&String> {
+        self.dataset.iter().collect()
+    }
+
+    pub fn exclude(&self) -> HashSet<&String> {
+        self.exclude.iter().collect()
+    }
+
+    pub fn projection(&self, schema: &ArrowSchema) -> Option<Vec<usize>> {
+        if self.is_some() {
+            if self.is_everything() {
+                None
+            } else {
+                let include = self.include();
+                let exclude = self.exclude();
+                let projection = schema
+                    .fields
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, field)| !exclude.contains(&field.name))
+                    .filter(|(_, field)| include.is_empty() || include.contains(&field.name))
+                    .map(|(idx, _)| idx)
+                    .collect();
+                Some(projection)
+            }
+        } else {
+            None
         }
     }
 }
@@ -636,7 +703,7 @@ impl SchemaChunk<ArrowSchema> {
             }
         });
 
-        let exclude: HashSet<&String> = focus.exclude.iter().collect();
+        let exclude = focus.exclude();
 
         for path in paths {
             let split = focus.dataset_separator.as_ref().map_or_else(
@@ -752,7 +819,7 @@ impl SchemaChunk<ArrowSchema> {
     }
 }
 
-fn contains_null_type(schema: &arrow2::datatypes::Schema) -> bool {
+fn contains_null_type(schema: &Schema) -> bool {
     schema
         .fields
         .iter()

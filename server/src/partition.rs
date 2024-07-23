@@ -43,6 +43,7 @@ use futures::FutureExt;
 use futures::{future, stream};
 use metrics::{counter, gauge};
 use plateau_transport::arrow2::compute::comparison::lt_scalar;
+use plateau_transport::DataFocus;
 use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch, RwLock, RwLockReadGuard};
@@ -148,7 +149,7 @@ impl Partition {
         // rewind until we find a starting index based upon a good segment
         while index.is_none() {
             if let Some(ix) = current {
-                let segment = Slog::segment_from_name(root, slog_name, ix);
+                let segment = Slog::segment_from_name(root, slog_name, ix, None);
                 let data = manifest.get_segment_data(ix.to_id(id)).await;
                 let valid = segment.validate();
                 index = match data {
@@ -240,6 +241,7 @@ impl Partition {
         start: RecordIndex,
         limit: RowLimit,
         order: Ordering,
+        focus: DataFocus,
     ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
@@ -263,7 +265,7 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments, order)
+            .get_records_from_segments(limit, filter, segments, order, focus)
             .await
     }
 
@@ -272,6 +274,7 @@ impl Partition {
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
         limit: RowLimit,
+        focus: DataFocus,
     ) -> LimitedBatch {
         let state = self.state.read().await;
         let segments = self
@@ -296,14 +299,19 @@ impl Partition {
         };
 
         state
-            .get_records_from_segments(limit, filter, segments, Ordering::Forward)
+            .get_records_from_segments(limit, filter, segments, Ordering::Forward, focus)
             .await
     }
 
     #[cfg(test)]
     pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
         let record_response = self
-            .get_records(index, RowLimit::records(1), Ordering::Forward)
+            .get_records(
+                index,
+                RowLimit::records(1),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
 
         record_response
@@ -506,6 +514,7 @@ impl State {
         filter: impl Fn(&IndexedChunk) -> BooleanArray + Send + Sync,
         indices: impl StreamExt<Item = SegmentData> + Send + 'a,
         order: Ordering,
+        focus: DataFocus,
     ) -> LimitedBatch {
         // record queries can be thought of as filtering the entire record set
         // across all segments. doing so via simply reading everything would be
@@ -530,7 +539,7 @@ impl State {
                     // pagination, so compute those while we have the relevant
                     // ranges easily accessible in `SegmentData`.
                     self.messages
-                        .iter_segment(segment.index, order)
+                        .iter_segment(segment.index, order, focus.clone())
                         .into_stream()
                         .flat_map(stream::iter)
                         .scan(
@@ -692,6 +701,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -719,6 +729,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -746,6 +757,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -773,6 +785,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await
             .chunks
@@ -810,6 +823,7 @@ pub mod test {
                     max_bytes: 100_000,
                 },
                 Ordering::Reverse,
+                DataFocus::default(),
             )
             .await;
 
@@ -914,7 +928,8 @@ pub mod test {
                     part.get_records(
                         RecordIndex(start),
                         RowLimit::records(limit),
-                        Ordering::Forward
+                        Ordering::Forward,
+                        DataFocus::default(),
                     )
                     .await
                     .chunks
@@ -949,6 +964,7 @@ pub mod test {
                 RecordIndex(0),
                 parse_time(2)..=parse_time(3),
                 RowLimit::default(),
+                DataFocus::default(),
             )
             .await;
 
@@ -1048,7 +1064,12 @@ pub mod test {
         {
             let part = reattach(&dir, spec).await;
             let result = part
-                .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
+                .get_records(
+                    RecordIndex(0),
+                    RowLimit::default(),
+                    Ordering::Forward,
+                    DataFocus::default(),
+                )
                 .await;
 
             assert_eq!(SegmentChunk::from(result.chunks[0].clone()), chunk_a.chunk);
@@ -1072,7 +1093,12 @@ pub mod test {
 
             let start = RecordIndex(0);
             let result = part
-                .get_records(start, RowLimit::default(), Ordering::Forward)
+                .get_records(
+                    start,
+                    RowLimit::default(),
+                    Ordering::Forward,
+                    DataFocus::default(),
+                )
                 .await;
             assert_eq!(
                 format!("{:?}", SegmentChunk::from(result.chunks[0].clone())),
@@ -1109,7 +1135,9 @@ pub mod test {
             let order = Ordering::Forward;
 
             let start = RecordIndex(0);
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
@@ -1121,7 +1149,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(
                 result.chunks,
@@ -1139,7 +1169,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert!(result.status.is_open());
             assert_eq!(
                 result.chunks,
@@ -1147,7 +1179,9 @@ pub mod test {
             );
 
             let start = result.chunks.last().unwrap().end().unwrap() + 1;
-            let result = part.get_records(start, RowLimit::default(), order).await;
+            let result = part
+                .get_records(start, RowLimit::default(), order, DataFocus::default())
+                .await;
             assert!(result.status.is_open());
             assert_eq!(result.chunks, vec![]);
         }
@@ -1194,7 +1228,12 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(0), RowLimit::default(), Ordering::Forward)
+            .get_records(
+                RecordIndex(0),
+                RowLimit::default(),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         let msgs = result
             .chunks
@@ -1227,7 +1266,12 @@ pub mod test {
         part.commit().await.unwrap();
 
         let result = part
-            .get_records(RecordIndex(6), RowLimit::default(), Ordering::Reverse)
+            .get_records(
+                RecordIndex(6),
+                RowLimit::default(),
+                Ordering::Reverse,
+                DataFocus::default(),
+            )
             .await;
         let msgs = result
             .chunks
@@ -1274,7 +1318,12 @@ pub mod test {
             // iterate schema A
             let start = RecordIndex(part_len);
             let result = part
-                .get_records(start, RowLimit::default(), Ordering::Reverse)
+                .get_records(
+                    start,
+                    RowLimit::default(),
+                    Ordering::Reverse,
+                    DataFocus::default(),
+                )
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
             assert_eq!(result.schema.unwrap(), chunk_b.schema);
@@ -1305,6 +1354,7 @@ pub mod test {
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
                     Ordering::Reverse,
+                    DataFocus::default(),
                 )
                 .await;
             assert_eq!(result.status, BatchStatus::SchemaChanged);
@@ -1336,6 +1386,7 @@ pub mod test {
                     result.chunks.last().unwrap().end().unwrap(),
                     RowLimit::default(),
                     Ordering::Reverse,
+                    DataFocus::default(),
                 )
                 .await;
             assert!(result.status.is_open());
@@ -1391,7 +1442,7 @@ pub mod test {
         let root = PathBuf::from(dir.path());
 
         // first, corrupt the last file.
-        let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, last, None);
         debug!("corrupting {last:?}");
         let f = fs::File::options().write(true).open(segment.path())?;
         f.set_len(16)?;
@@ -1402,7 +1453,7 @@ pub mod test {
         manifest.remove_segment(ix.to_id(&spec.1)).await;
 
         // delete the next file entirely
-        let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());
+        let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap(), None);
         debug!("deleting {:?}", ix.prev().unwrap());
         segment.destroy()?;
 
@@ -1500,7 +1551,12 @@ pub mod test {
 
         // fetch from start fast-forwards to first valid index
         let result = t
-            .get_records(RecordIndex(0), RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                RecordIndex(0),
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let start_index = result.chunks.first().unwrap().start().unwrap();
@@ -1511,7 +1567,12 @@ pub mod test {
 
         // iterate through from start
         let result = t
-            .get_records(start_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                start_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1521,7 +1582,12 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.status, BatchStatus::RecordsExceeded);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
@@ -1531,14 +1597,24 @@ pub mod test {
         );
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_limit_unreached(&result.status);
         let next_index = result.chunks.iter().next_back().unwrap().end().unwrap() + 1;
         assert_eq!(deindex(result.chunks), vec![records[7].clone()]);
 
         let result = t
-            .get_records(next_index, RowLimit::records(2), Ordering::Forward)
+            .get_records(
+                next_index,
+                RowLimit::records(2),
+                Ordering::Forward,
+                DataFocus::default(),
+            )
             .await;
         assert_limit_unreached(&result.status);
         assert_eq!(deindex(result.chunks), vec![]);
@@ -1607,7 +1683,8 @@ pub mod test {
                             t.get_records_by_time(
                                 RecordIndex(start),
                                 query,
-                                RowLimit::records(limit)
+                                RowLimit::records(limit),
+                                DataFocus::default(),
                             )
                             .await
                             .chunks
@@ -1641,6 +1718,7 @@ pub mod test {
                     max_bytes: 250,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await;
 
@@ -1662,6 +1740,7 @@ pub mod test {
                     max_bytes: 1,
                 },
                 Ordering::Forward,
+                DataFocus::default(),
             )
             .await;
         assert_eq!(result.status, BatchStatus::BytesExceeded);

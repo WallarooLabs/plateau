@@ -18,7 +18,9 @@ use chrono::{DateTime, Utc};
 use futures::future::{join_all, FutureExt};
 use futures::stream;
 use futures::stream::StreamExt;
-use plateau_transport::{PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator};
+use plateau_transport::{
+    DataFocus, PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator,
+};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tracing::debug;
 
@@ -236,13 +238,17 @@ impl Topic {
         limit: RowLimit,
         order: Ordering,
         partition_filter: PartitionFilter,
+        focus: DataFocus,
     ) -> TopicRecordResponse {
+        let focus = &focus;
         self.get_records_from_all(
             starts,
             limit,
             order,
             |partition, start, partition_limit, order| async move {
-                partition.get_records(start, partition_limit, order).await
+                partition
+                    .get_records(start, partition_limit, order, focus.clone())
+                    .await
             },
             partition_filter,
         )
@@ -255,15 +261,17 @@ impl Topic {
         times: RangeInclusive<DateTime<Utc>>,
         limit: RowLimit,
         partition_filter: PartitionFilter,
+        focus: DataFocus,
     ) -> TopicRecordResponse {
         let times = &times;
+        let focus = &focus;
         self.get_records_from_all(
             starts,
             limit,
             Ordering::Forward,
             |partition, start, partition_limit, _order| async move {
                 partition
-                    .get_records_by_time(start, times.clone(), partition_limit)
+                    .get_records_by_time(start, times.clone(), partition_limit, focus.clone())
                     .await
             },
             partition_filter,
@@ -547,7 +555,13 @@ mod test {
         // fetching two records will spill from partition-0, which has only one
         // record in the given time range, to partition-1
         let result = topic
-            .get_records_by_time(HashMap::new(), span.clone(), RowLimit::records(2), None)
+            .get_records_by_time(
+                HashMap::new(),
+                span.clone(),
+                RowLimit::records(2),
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
         assert_eq!(result.iter, expected_it);
@@ -565,7 +579,13 @@ mod test {
         // next fetch will use partition with lowest index in iterator, partition-2
         let prior_it = result.iter;
         let result = topic
-            .get_records_by_time(prior_it, span.clone(), RowLimit::records(1), None)
+            .get_records_by_time(
+                prior_it,
+                span.clone(),
+                RowLimit::records(1),
+                None,
+                DataFocus::default(),
+            )
             .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 1, 1]).collect();
         assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
@@ -584,7 +604,13 @@ mod test {
         // final fetch will fetch both remaining records from partition-1 and partition-2
         let prior_it = result.iter;
         let result = topic
-            .get_records_by_time(prior_it, span.clone(), RowLimit::records(5), None)
+            .get_records_by_time(
+                prior_it,
+                span.clone(),
+                RowLimit::records(5),
+                None,
+                DataFocus::default(),
+            )
             .await;
         let expected_it: TopicIterator = names.clone().into_iter().zip([2, 2, 2]).collect();
         assert_limit_unreached(&result.batch.status);
@@ -603,7 +629,13 @@ mod test {
         // no more records left
         let prior_it = result.iter;
         let result = topic
-            .get_records_by_time(prior_it, span, RowLimit::records(1), None)
+            .get_records_by_time(
+                prior_it,
+                span,
+                RowLimit::records(1),
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_limit_unreached(&result.batch.status);
         assert_eq!(result.iter, expected_it);
@@ -641,7 +673,13 @@ mod test {
 
         // first, we zip through all schema-a chunks at the start
         let result = topic
-            .get_records(HashMap::new(), many_rows, Ordering::Forward, None)
+            .get_records(
+                HashMap::new(),
+                many_rows,
+                Ordering::Forward,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter, to_iter(&names, [15, 5, 20]));
         assert_eq!(result.batch.status, BatchStatus::SchemaChanged);
@@ -650,7 +688,13 @@ mod test {
         // we set a row limit here so we can test final iteration over all
         // partitions with schema-b later.
         let result = topic
-            .get_records(result.iter, RowLimit::records(5), Ordering::Forward, None)
+            .get_records(
+                result.iter,
+                RowLimit::records(5),
+                Ordering::Forward,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter, to_iter(&names, [15, 10, 20]));
         assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
@@ -658,7 +702,13 @@ mod test {
         // that same partition is still the min partition, but has
         // briefly changed back to schema-a
         let result = topic
-            .get_records(result.iter, many_rows, Ordering::Forward, None)
+            .get_records(
+                result.iter,
+                many_rows,
+                Ordering::Forward,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter, to_iter(&names, [15, 15, 20]));
         assert_eq!(result.batch.status, BatchStatus::SchemaChanged);
@@ -666,7 +716,13 @@ mod test {
         // now it has changed back to schema-b, and we can resume iterating
         // through all partitions.
         let result = topic
-            .get_records(result.iter, many_rows, Ordering::Forward, None)
+            .get_records(
+                result.iter,
+                many_rows,
+                Ordering::Forward,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter, to_iter(&names, [25, 25, 25]));
         assert!(result.batch.status.is_open());
@@ -699,7 +755,13 @@ mod test {
 
         // first, we zip through all schema-b chunks at the start
         let result = topic
-            .get_records(HashMap::new(), many_rows, Ordering::Reverse, None)
+            .get_records(
+                HashMap::new(),
+                many_rows,
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter["p1"], 15);
         assert_eq!(result.iter["p2"], 15);
@@ -709,7 +771,13 @@ mod test {
 
         // now we'll get the bulk of the schema-a chunks
         let result = topic
-            .get_records(result.iter, RowLimit::default(), Ordering::Reverse, None)
+            .get_records(
+                result.iter,
+                RowLimit::default(),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter["p1"], 0);
         assert_eq!(result.iter["p2"], 10);
@@ -719,7 +787,13 @@ mod test {
 
         // the final schema-b chunk
         let result = topic
-            .get_records(result.iter, RowLimit::default(), Ordering::Reverse, None)
+            .get_records(
+                result.iter,
+                RowLimit::default(),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter["p1"], 0);
         assert_eq!(result.iter["p2"], 5);
@@ -729,7 +803,13 @@ mod test {
 
         // and the final schema-a chunk
         let result = topic
-            .get_records(result.iter, RowLimit::default(), Ordering::Reverse, None)
+            .get_records(
+                result.iter,
+                RowLimit::default(),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(result.iter["p1"], 0);
         assert_eq!(result.iter["p2"], 0);
@@ -778,6 +858,7 @@ mod test {
                     RowLimit::records(fetch_count),
                     Ordering::Forward,
                     Some(filter.clone()),
+                    DataFocus::default(),
                 )
                 .await;
 
@@ -840,6 +921,7 @@ mod test {
                     RowLimit::records(fetch_count),
                     Ordering::Forward,
                     Some(filter.clone()),
+                    DataFocus::default(),
                 )
                 .await;
 
@@ -897,6 +979,7 @@ mod test {
                     RowLimit::records(fetch_count),
                     Ordering::Forward,
                     Some(filter.clone()),
+                    DataFocus::default(),
                 )
                 .await;
 
@@ -951,6 +1034,7 @@ mod test {
                     RowLimit::records(fetch_count),
                     Ordering::Forward,
                     Some(vec![PartitionSelector::from("regex:partition-.*")]),
+                    DataFocus::default(),
                 )
                 .await;
 
@@ -1000,7 +1084,13 @@ mod test {
         assert!(records.len() % fetch_count != 0);
         for _ in 0..records.len() {
             let result = topic
-                .get_records(it, RowLimit::records(fetch_count), Ordering::Forward, None)
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    Ordering::Forward,
+                    None,
+                    DataFocus::default(),
+                )
                 .await;
 
             if fetched.len() + fetch_count >= records.len() {
@@ -1041,7 +1131,13 @@ mod test {
         assert!(records.len() % fetch_count != 0);
         for _ in 0..records.len() {
             let result = topic
-                .get_records(it, RowLimit::records(fetch_count), Ordering::Reverse, None)
+                .get_records(
+                    it,
+                    RowLimit::records(fetch_count),
+                    Ordering::Reverse,
+                    None,
+                    DataFocus::default(),
+                )
                 .await;
 
             if fetched.len() + fetch_count >= records.len() {
@@ -1103,6 +1199,7 @@ mod test {
                 RowLimit::records(5),
                 Ordering::Forward,
                 None,
+                DataFocus::default(),
             )
             .await;
         assert_eq!(
@@ -1117,6 +1214,7 @@ mod test {
                 RowLimit::records(5),
                 Ordering::Reverse,
                 None,
+                DataFocus::default(),
             )
             .await;
         assert_eq!(
@@ -1149,7 +1247,13 @@ mod test {
 
         // verify second tranche
         let result = topic
-            .get_records(iter, RowLimit::records(5), Ordering::Reverse, None)
+            .get_records(
+                iter,
+                RowLimit::records(5),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(
             vec!["r14", "r13", "r12", "r11", "r10"],
@@ -1193,7 +1297,13 @@ mod test {
 
         // verify tranche spanning partitions
         let result = topic
-            .get_records(iter, RowLimit::records(7), Ordering::Reverse, None)
+            .get_records(
+                iter,
+                RowLimit::records(7),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(
             vec!["r9", "r8", "r7", "r6", "r5", "r4", "r3"],
@@ -1214,6 +1324,7 @@ mod test {
                 RowLimit::records(1000),
                 Ordering::Reverse,
                 None,
+                DataFocus::default(),
             )
             .await;
         assert_eq!(ITER_PARTITIONS + 1, result.iter.len());
@@ -1235,7 +1346,13 @@ mod test {
 
         // verify final tranche
         let result = topic
-            .get_records(iter, RowLimit::records(10), Ordering::Reverse, None)
+            .get_records(
+                iter,
+                RowLimit::records(10),
+                Ordering::Reverse,
+                None,
+                DataFocus::default(),
+            )
             .await;
         assert_eq!(vec!["r2", "r1", "r0"], batch_to_vec(result.batch));
 
@@ -1280,7 +1397,12 @@ mod test {
                 topic
                     .get_partition("partition-0")
                     .await
-                    .get_records(RecordIndex(0), RowLimit::records(1000), Ordering::Forward)
+                    .get_records(
+                        RecordIndex(0),
+                        RowLimit::records(1000),
+                        Ordering::Forward,
+                        DataFocus::default()
+                    )
                     .await
                     .chunks
             ),
