@@ -385,7 +385,7 @@ impl Topic {
             .await
     }
 
-    #[cfg(any(test, bench))]
+    #[cfg(test)]
     pub async fn commit(&self) -> Result<()> {
         for (_, part) in self.partitions.read().await.iter() {
             part.commit().await?
@@ -1297,100 +1297,5 @@ mod test {
         );
 
         Ok(())
-    }
-}
-
-#[cfg(nightly)]
-mod benches {
-    extern crate test;
-    use super::*;
-    use tempfile::{tempdir, TempDir};
-    use test::Bencher;
-
-    use crate::chunk::test::inferences_schema_a;
-    use rand::RngCore;
-
-    use tokio::runtime::Runtime;
-
-    const N_TOTAL_RECORDS: usize = 100;
-    const N_PAGE_SIZE: usize = 1;
-    const PARTITION_NAME: &str = "test";
-
-    fn run_async<F: core::future::Future>(func: F) -> F::Output {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(func)
-    }
-
-    async fn prep_dataset() -> TempDir {
-        let dir = tempdir().unwrap();
-        let root = PathBuf::from(dir.path());
-
-        let chunk = inferences_schema_a();
-        let manifest = Manifest::attach(root.join("manifest.sqlite")).await;
-        let topic = Topic::attach(
-            root.clone(),
-            manifest,
-            String::from("testing"),
-            PartitionConfig::default(),
-        )
-        .await;
-
-        for _ in 1..N_TOTAL_RECORDS {
-            let _ = topic.extend(PARTITION_NAME, chunk.clone()).await.unwrap();
-        }
-        topic.commit().await.unwrap();
-        dir
-    }
-
-    fn attach_and_iterate(b: &mut Bencher, rt: &Runtime, dir: &TempDir, order: &Ordering) {
-        let root = PathBuf::from(dir.path());
-
-        let manifest = rt.block_on(Manifest::attach(root.join("manifest.sqlite")));
-        let topic = rt.block_on(Topic::attach(
-            root.clone(),
-            manifest,
-            String::from("testing"),
-            PartitionConfig::default(),
-        ));
-        let mut rng = rand::rngs::OsRng;
-
-        b.iter(|| {
-            let offset = rng.next_u32() as usize % N_TOTAL_RECORDS;
-            let i = HashMap::from([(PARTITION_NAME.to_string(), offset)]);
-            rt.block_on(topic.get_records(i, RowLimit::records(N_PAGE_SIZE), order, None));
-        });
-    }
-
-    #[bench]
-    fn chunk_sizing_bench(b: &mut Bencher) {
-        let mut a = inferences_schema_a();
-        for _ in 1..1000 {
-            a.extend(inferences_schema_a()).unwrap();
-        }
-
-        let s = SchemaChunk {
-            schema: a.schema.clone(),
-            chunk: crate::arrow2::chunk::Chunk::new(a.chunk[..500].to_vec()),
-        };
-
-        b.iter(|| {
-            let _ = s.to_bytes();
-        })
-    }
-
-    #[bench]
-    fn forward_iteration_bench(b: &mut Bencher) {
-        let rt = Runtime::new().unwrap();
-        let dir = rt.block_on(prep_dataset());
-
-        attach_and_iterate(b, &rt, &dir, &Ordering::Forward);
-    }
-
-    #[bench]
-    fn reverse_iteration_bench(b: &mut Bencher) {
-        let rt = Runtime::new().unwrap();
-        let dir = rt.block_on(prep_dataset());
-
-        attach_and_iterate(b, &rt, &dir, &Ordering::Reverse);
     }
 }
