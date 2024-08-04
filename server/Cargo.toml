@@ -14,7 +14,6 @@ axum = { version = "0.6", features = ["headers"] }
 bytesize = { version = "1.1.0", features = ["serde"] }
 config = "0.14"
 futures = "0.3"
-itertools = "0.12"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.13"
 thiserror = "1"
@@ -25,10 +24,8 @@ humantime-serde = "1"
 serde_json = "1"
 serde_qs = { version = "0.12" }
 serde = { version = "1", features = ["derive"] }
-tempfile = "3"
 toml = "0.7"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio-stream = { version = "0.1", features = ["signal"] }
 chrono = "0.4"
 tokio = { version = "1", features = ["full"] }
@@ -40,23 +37,22 @@ sqlx = { version = "=0.7.3", features = [
   "runtime-tokio-rustls",
 ] }
 systemstat = "0.2"
-rand = "0.8"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "4", features = ["axum"] }
-uuid = "1.4"
-regex = "1.10"
 
 plateau-client = { workspace = true, features = ["replicate"] }
 plateau-transport.workspace = true
 
 
 [dev-dependencies]
-ctor = "0.2"
+itertools = "0.13"
 reqwest = { version = "0.11", default-features = false, features = [
   "json",
   "rustls-tls",
 ] }
+tempfile = "3"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "fast-rng"] }
 
 sample-test = "0.2.1"
