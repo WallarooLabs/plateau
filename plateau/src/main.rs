@@ -1,15 +1,13 @@
-use std::env;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::filter;
 
 use plateau_server::metrics;
 
-fn squawk() {
+fn squawk(log_level: &filter::EnvFilter) {
     let version = env!("CARGO_PKG_VERSION");
     let commit = option_env!("BUILD_COMMIT").unwrap_or("unknown");
     let build_time = env!("BUILD_TIME");
     let run_time = chrono::Utc::now().to_rfc2822();
     let pid = std::process::id();
-    let log_level = env::var("RUST_LOG").unwrap_or("unset".to_string());
 
     eprintln!(
         r#"
@@ -30,13 +28,15 @@ fn squawk() {
 
 #[tokio::main]
 async fn main() {
-    if env::var("RUST_LOG").is_err() {
-        env::set_var("RUST_LOG", "warn")
-    }
-    fmt().with_env_filter(EnvFilter::from_default_env()).init();
+    let filter = filter::EnvFilter::builder()
+        .with_default_directive(filter::LevelFilter::WARN.into())
+        .from_env_lossy();
+
+    squawk(&filter);
+
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     let config = plateau_server::config::binary_config().expect("error getting configuration");
-    squawk();
     config.log();
 
     metrics::start_metrics(config.metrics.clone());

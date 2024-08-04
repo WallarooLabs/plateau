@@ -9,6 +9,8 @@ fn main() {
         .contains("nightly")
     {
         println!("cargo:warning=Detected nightly toolchain, enabling experimental features");
+        println!("cargo::rustc-check-cfg=cfg(bench)");
+        println!("cargo::rustc-check-cfg=cfg(nightly)");
         println!("cargo:rustc-cfg=nightly");
         println!("cargo:rustc-cfg=bench");
     }

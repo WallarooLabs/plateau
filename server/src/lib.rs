@@ -1,7 +1,6 @@
-#![cfg_attr(nightly, feature(test))]
+use std::sync::Arc;
 
 use futures::{future, stream};
-use std::sync::Arc;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::wrappers::SignalStream;
 
