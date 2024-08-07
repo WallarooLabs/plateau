@@ -6,7 +6,7 @@ PLATEAU_IMAGE  			  = $(IMAGE_ROOT)/plateau
 DOCKER                    = docker buildx
 REVISION                  = $(shell git describe --match="" --always --abbrev=40 --dirty)
 TIME                      = $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
-RUST_VERSION              = 1.76.0
+RUST_VERSION              = 1.80.0
 
 test:
 	cargo test --workspace --features batch,polars,replicate -- --nocapture
