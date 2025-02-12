@@ -478,7 +478,7 @@ impl Manifest {
     }
 
     /// Get the total stored byte size of a given partition.
-    pub async fn get_size<'a>(&self, scope: Scope<'a>) -> usize {
+    pub async fn get_size(&self, scope: Scope<'_>) -> usize {
         let query = match scope {
             Scope::Global => sqlx::query("SELECT SUM(size) AS size FROM segments"),
             Scope::Partition(id) => sqlx::query(

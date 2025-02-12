@@ -280,6 +280,7 @@ impl SegmentIterator for ReadFormat {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 enum WriteFormat {
     Arrow(arrow::Writer),
     Parquet(parquet::Writer),

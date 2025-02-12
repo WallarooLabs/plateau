@@ -435,7 +435,7 @@ async fn topic_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
     let test_message = TEST_MESSAGE.repeat(100);
-    let test_message_bytelen = test_message.as_bytes().len();
+    let test_message_bytelen = test_message.len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
     let message_limit = plateau_server::DEFAULT_BYTE_LIMIT / test_message_bytelen;
     let lower = message_limit / 2;
@@ -970,7 +970,7 @@ async fn partition_status_byte_limited() {
     let (client, topic_name, server) = setup().await;
 
     let test_message = TEST_MESSAGE.repeat(100);
-    let test_message_bytelen = test_message.as_bytes().len();
+    let test_message_bytelen = test_message.len();
     // find the upper limit of messages we can store, accounting for the 10 records we already added
     let message_limit = plateau_server::DEFAULT_BYTE_LIMIT / test_message_bytelen;
     let lower = message_limit / 2;

@@ -226,7 +226,7 @@ impl DataFocus {
     pub fn size_check_array(&self, arr: &mut Box<dyn Array>) {
         let too_many_bytes = self
             .max_bytes
-            .map_or(false, |max| estimated_bytes_size(arr.as_ref()) > max);
+            .is_some_and(|max| estimated_bytes_size(arr.as_ref()) > max);
 
         if too_many_bytes {
             let all_null = Bitmap::new_zeroed(arr.len());

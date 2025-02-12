@@ -40,7 +40,7 @@ large_futures = "warn"
 future_incompatible = { level = "warn", priority = -1 }
 rust_2018_compatibility = { level = "warn", priority = -1 }
 rust_2021_compatibility = { level = "warn", priority = -1 }
-rust_2024_compatibility = { level = "warn", priority = -1 }
+# rust_2024_compatibility = { level = "warn", priority = -1 }
 rust_2018_idioms = { level = "warn", priority = -1 }
 unused = { level = "warn", priority = -1 }
 deprecated_in_future = "warn"
