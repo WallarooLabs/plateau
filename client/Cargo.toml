@@ -24,6 +24,8 @@ polars = { version = "0.36.2", optional = true, features = [
   "dtype-full",
 ] }
 
+hashbrown = { version = "0.14.5", features = ["raw"] }
+
 reqwest.workspace = true
 
 plateau-transport.workspace = true
