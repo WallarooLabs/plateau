@@ -12,6 +12,13 @@ license = "MIT OR Apache-2.0"
 
 
 [workspace.dependencies]
+reqwest = { version = "0.11", default-features = false, features = [
+  "json",
+  "rustls-tls",
+  "stream",
+  "trust-dns",
+] }
+
 plateau-cli = { path = "./cli" }
 plateau-client = { path = "./client" }
 plateau-server = { path = "./server" }

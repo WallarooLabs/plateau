@@ -10,12 +10,6 @@ authors.workspace = true
 [dependencies]
 backoff = { version = "0.4", features = ["tokio"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
-reqwest = { version = "0.11", default-features = false, features = [
-  "json",
-  "rustls-tls",
-  "stream",
-  "trust-dns",
-] }
 url = "2"
 thiserror = "1"
 serde = "1"
@@ -29,6 +23,8 @@ polars = { version = "0.36.2", optional = true, features = [
   "ipc",
   "dtype-full",
 ] }
+
+reqwest.workspace = true
 
 plateau-transport.workspace = true
 
