@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "arrow2"
 version = "0.17.4"
-source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/match-polars#6b11aebf8204942796a434e6e92dec90bb18b085"
+source = "git+https://github.com/WallarooLabs/arrow2?branch=fmurphy/bugfix-records-parsing#634b8c8a9d0461dba4c0ec308d76158d6f707cf1"
 dependencies = [
  "ahash",
  "arrow-format",
@@ -335,7 +335,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bench"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2418,7 +2418,7 @@ dependencies = [
 
 [[package]]
 name = "plateau"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "plateau-server",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-cli"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -2443,7 +2443,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-client"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2470,7 +2470,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-server"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2512,7 +2512,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-test"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "plateau-client",
@@ -2524,7 +2524,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-transport"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "arrow2",
