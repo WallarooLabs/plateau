@@ -18,7 +18,6 @@ config = "0.14"
 futures = "0.3"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.16"
-thiserror = "1"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
 humantime-serde = "1"
@@ -39,6 +38,8 @@ sqlx = { version = "=0.7.3", features = [
 systemstat = "0.2"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "4", features = ["axum"] }
+
+thiserror.workspace = true
 
 plateau-client = { workspace = true, features = ["replicate"] }
 plateau-transport.workspace = true
