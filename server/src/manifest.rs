@@ -521,7 +521,7 @@ impl Manifest {
         fn try_size(path: &Path, transform: Option<fn(&Path) -> anyhow::Result<PathBuf>>) -> usize {
             let transformed = transform.and_then(|f| f(path).ok());
 
-            let required = transformed.as_deref().map_or(true, |p| p.exists());
+            let required = transformed.as_deref().is_none_or(|p| p.exists());
             if !required {
                 return 0;
             };

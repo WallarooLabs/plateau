@@ -10,6 +10,7 @@ WORKDIR /usr/src/plateau
 COPY . .
 RUN \
     if [ "${TARGETARCH}" = "amd64" ]; then ARCH=x86_64; elif [ "${TARGETARCH}" = "arm64" ]; then ARCH=aarch64; else exit 1; fi && \
+    rustup target add ${ARCH}-unknown-linux-musl && \
     cargo build --release --target ${ARCH}-unknown-linux-musl -p plateau && \
     cp target/${ARCH}-unknown-linux-musl/release/plateau target/release/plateau
 

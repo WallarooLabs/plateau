@@ -28,9 +28,10 @@ arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/bug
   "io_flight",
 ] }
 strum = { version = "0.26", features = ["derive"] }
-thiserror = "1"
 regex = "1.10"
 utoipa = { version = "4", features = ["axum_extras"] }
+
+thiserror.workspace = true
 
 
 [features]
