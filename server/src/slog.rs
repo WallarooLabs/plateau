@@ -460,7 +460,7 @@ impl Slog {
     pub(crate) async fn active_schema_matches(&self, other: &Schema) -> bool {
         let active = &self.state.read().await.active;
 
-        let matches = active.as_ref().map_or(true, |s| &s.schema == other);
+        let matches = active.as_ref().is_none_or(|s| &s.schema == other);
         if !matches {
             trace!(
                 "schema mismatch: {:?} != {:?}",

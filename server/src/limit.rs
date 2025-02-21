@@ -133,7 +133,7 @@ impl LimitedBatch {
         self.schema
             .as_ref()
             .zip(other.schema.as_ref())
-            .map_or(true, |(a, b)| a.compatible(b))
+            .is_none_or(|(a, b)| a.compatible(b))
     }
 
     pub(crate) fn extend_one(&mut self, mut indexed: IndexedChunk) {
