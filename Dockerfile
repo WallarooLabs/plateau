@@ -14,7 +14,7 @@ RUN \
     cargo build --release --target ${ARCH}-unknown-linux-musl -p plateau && \
     cp target/${ARCH}-unknown-linux-musl/release/plateau target/release/plateau
 
-FROM us-docker.pkg.dev/wallaroo-dev-253816/docker-hub-us/library/debian:bullseye-slim
+FROM scratch
 
 LABEL org.opencontainers.image.vendor="Wallaroo Labs"
 LABEL org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
