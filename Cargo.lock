@@ -2237,16 +2237,6 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.22.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2be3cbd384d4e955b231c895ce10685e3d8260c5ccffae898c96c723b0772835"
-dependencies = [
- "ahash",
- "portable-atomic",
-]
-
-[[package]]
-name = "metrics"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a7deb012b3b2767169ff203fadb4c6b0b82b947512e5eb9e0b78c2e186ad9e3"
@@ -2268,7 +2258,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.7.1",
  "ipnet",
- "metrics 0.24.1",
+ "metrics",
  "metrics-util",
  "quanta",
  "thiserror 1.0.69",
@@ -2285,7 +2275,7 @@ dependencies = [
  "crossbeam-epoch",
  "crossbeam-utils",
  "hashbrown 0.15.2",
- "metrics 0.24.1",
+ "metrics",
  "quanta",
  "rand",
  "rand_xoshiro",
@@ -2796,7 +2786,7 @@ dependencies = [
  "futures",
  "humantime-serde",
  "itertools 0.13.0",
- "metrics 0.22.3",
+ "metrics",
  "metrics-exporter-prometheus",
  "parquet-format-safe",
  "parquet2",
