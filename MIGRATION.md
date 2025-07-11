@@ -16,15 +16,17 @@ For each crate, we will first:
   - `cp -r transport arrow-rs/transport`
   - Update arrow-rs/transport/Cargo.toml with the new name (`plateau-transport-arrow-rs`)
   - Update Cargo.toml to add `arrow-rs/transport`
-2. Make an immediate commit of the copied crate to establish a clean base for comparison. Example:
+2. Update this file to indicate this part of the migration is done.
+3. DO NOT MAKE ANY CHANGES UNTIL THE CLEAN BASELINE HAS BEEN COMMITTED.
+4. Make an immediate commit of the copied crate to establish a clean base for comparison. Example:
   - `git add Cargo.toml`
   - `git add arrow-rs/transport`
-  - `git commit "Initial copy transport => arrow-rs/transport`
-3. Update this file to indicate this part of the migration is done.
-4. Stop and wait for review.
+  - `git commit -m "Initial copy transport => arrow-rs/transport"`
+5. STOP and wait for review.
 
 Then, we will iterate until the crate is ready. We MUST NOT CHANGE OR REMOVE
-tests. We MUST NOT CHANGE THE ORDER OR NAMES of tests:
+tests (beyond getting them to work with arrow-rs). We MUST NOT CHANGE THE ORDER
+OR NAMES of tests:
 
 1. Update arrow2 to arrow-rs
 2. Fix any obvious compiler errors. Example:
@@ -34,7 +36,7 @@ tests. We MUST NOT CHANGE THE ORDER OR NAMES of tests:
   - `cargo test -p plateau-transport-arrow-rs`
 4. If all tests are passing, and all test (names) from the old crate exactly match the
    migrated crate (including order), update this doc to indicate the task is done.
-5. Stop and wait for review.
+5. STOP and wait for review.
 
 ## Dependency Order Analysis
 
