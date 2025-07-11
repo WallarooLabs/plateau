@@ -55,9 +55,9 @@ Based on the repository structure, the migration order is determined by dependen
 
 ### Phase 1: Base Libraries
 
-- [ ] **transport-arrow-rs**
-  - [ ] Create copy of transport
-  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+- [x] **transport-arrow-rs**
+  - [x] Create copy of transport
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
   
 ### Phase 2: Client Libraries
 
@@ -167,12 +167,35 @@ When converting JSON serialization code, pay special attention to:
 
 ### Common Patterns
 
-(This section will be updated as we progress through the migration)
+- **Package Structure**: Replace `arrow2` with `arrow` and its subpackages:
+  - `arrow-array`: Core array types and implementations
+  - `arrow-schema`: Schema, field, and data type definitions
+  - `arrow-buffer`: Memory management and buffer implementations
+  - `arrow-data`: The internal arrow data representation
+  - `arrow-select`: Selection and filtering operations (take, filter, etc.)
+  - `arrow-cast`: Type conversion operations
+  - `arrow-json`: JSON serialization/deserialization
+  - `arrow-ipc`: IPC (inter-process communication) format handling
 
-- **Type conversions**: Document common type conversion patterns
-- **API replacements**: Document common method replacements
-- **Error handling**: Note differences in error types and handling
-- **Performance considerations**: Document any performance implications
+- **Schema and Field API**: 
+  - `arrow2::datatypes::Schema` becomes `arrow_schema::Schema`
+  - Fields in arrow-rs are wrapped in `Arc` by default
+  - Fields collection is managed through `Fields` type rather than Vec<Field>
+  - Creating fields collections: `Fields::from(vec![field1, field2])` instead of direct Vec usage
+
+- **Array API**: 
+  - Arrays are typically wrapped in `Arc<dyn Array>` (alias: `ArrayRef`)
+  - Array creation patterns are different (`Int64Array::from_iter_values` vs `PrimitiveArray::from_vec`)
+  - Access to array data often requires downcast using `as_any().downcast_ref()`
+
+- **Record Batch**: 
+  - `Chunk<Box<dyn Array>>` becomes `RecordBatch`
+  - RecordBatch is created with `RecordBatch::try_new(schema, columns)`
+
+- **IPC Serialization**: 
+  - Use `arrow_ipc::writer::FileWriter` and `arrow_ipc::reader::FileReader` 
+  - Create writers with `try_new_with_options` rather than `new`
+  - Options are configured with `IpcWriteOptions` instead of `WriteOptions`
 
 ### Testing Considerations
 
