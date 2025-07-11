@@ -1,0 +1,42 @@
+[package]
+name = "plateau-transport"
+
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+
+[dependencies]
+anyhow = "1"
+serde = "1"
+serde_with = "3.7"
+rweb = { version = "0.15", features = ["openapi"], optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/match-polars", features = [
+  "compute_aggregate",
+  "compute_cast",
+  "compute_comparison",
+  "compute_concatenate",
+  "compute_filter",
+  "compute_sort",
+  "compute_take",
+  "io_parquet",
+  "io_ipc",
+  "io_ipc_read_async",
+  "io_json",
+  "io_flight",
+] }
+strum = { version = "0.26", features = ["derive"] }
+thiserror = "1"
+regex = "1.10"
+utoipa = { version = "4", features = ["axum_extras"] }
+
+
+[features]
+rweb = ["dep:rweb"]
+clap = ["dep:clap"]
+
+
+[lints]
+workspace = true
