@@ -1,16 +1,40 @@
 # Migration Plan: arrow2 to arrow-rs
 
-This document outlines the plan for migrating the Plateau repository from arrow2 to arrow-rs. The migration will be performed gradually, crate by crate, to ensure a smooth transition and easier code review.
+This document outlines the plan for migrating the Plateau repository from
+arrow2 to arrow-rs. The migration will be performed gradually, crate by crate,
+to ensure a smooth transition and easier code review.
+
+This will be a long and complex migration. We may be partially done while
+reading this doc. We should resume from where we left off, attempt to complete
+the currently pending task, and then wait for review.
 
 ## Migration Strategy
 
-For each crate, we will:
+For each crate, we will first:
 
-1. Create a copy of the crate with `-arrow-rs` suffix (e.g., `transport` → `transport-arrow-rs`).
-2. Make an immediate commit of the copied crate to establish a clean base for comparison.
-3. Update the new crate to use arrow-rs instead of arrow2.
-4. Ensure all tests pass and there are no warnings (`cargo test` and `cargo check`).
-5. Move on to the next crate in the dependency order.
+1. Create a copy of the crate with `-arrow-rs` suffix (e.g., `plateau-transport` => `plateau-transport-arrow-rs`). For example:
+  - `cp -r transport arrow-rs/transport`
+  - Update arrow-rs/transport/Cargo.toml with the new name (`plateau-transport-arrow-rs`)
+  - Update Cargo.toml to add `arrow-rs/transport`
+2. Make an immediate commit of the copied crate to establish a clean base for comparison. Example:
+  - `git add Cargo.toml`
+  - `git add arrow-rs/transport`
+  - `git commit "Initial copy transport => arrow-rs/transport`
+3. Update this file to indicate this part of the migration is done.
+4. Stop and wait for review.
+
+Then, we will iterate until the crate is ready. We MUST NOT CHANGE OR REMOVE
+tests. We MUST NOT CHANGE THE ORDER OR NAMES of tests:
+
+1. Update arrow2 to arrow-rs
+2. Fix any obvious compiler errors. Example:
+  - `cargo check -p plateau-transport-arrow-rs`
+3. Ensure that all tests from the old crate remain, in the same order, with the same names. Example:
+  - `cargo test -p plateau-transport`
+  - `cargo test -p plateau-transport-arrow-rs`
+4. If all tests are passing, and all test (names) from the old crate exactly match the
+   migrated crate (including order), update this doc to indicate the task is done.
+5. Stop and wait for review.
 
 ## Dependency Order Analysis
 
@@ -29,58 +53,51 @@ Based on the repository structure, the migration order is determined by dependen
 ### Phase 1: Base Libraries
 
 - [ ] **transport-arrow-rs**
-  - Create copy of transport
-  - Update arrow2 to arrow-rs
-  - Update all imports and API usage
-  - Verify tests and functionality
+  - [ ] Create copy of transport
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
   
 ### Phase 2: Client Libraries
 
 - [ ] **client-arrow-rs**
-  - Create copy of client
-  - Update dependencies to use transport-arrow-rs
-  - Update any direct arrow2 references
-  - Verify tests and functionality
+  - [ ] Create copy of client
+  - [ ] Update dependencies to use transport-arrow-rs
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
 ### Phase 3: Test Infrastructure
 
 - [ ] **test-arrow-rs**
-  - Create copy of test
-  - Update dependencies to use transport-arrow-rs and client-arrow-rs
-  - Update any direct arrow2 references
-  - Verify tests and functionality
+  - [ ] Create copy of test
+  - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
 ### Phase 4: Server Implementation
 
 - [ ] **server-arrow-rs**
-  - Create copy of server
-  - Update dependencies to use transport-arrow-rs and client-arrow-rs
-  - Update any direct arrow2 references (significant work expected here)
-  - Update references to parquet2 if necessary
-  - Verify tests and functionality
+  - [ ] Create copy of server
+  - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
+  - [ ] Update references to parquet2 if necessary
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
 ### Phase 5: CLI Tool
 
 - [ ] **cli-arrow-rs**
-  - Create copy of cli
-  - Update dependencies to use transport-arrow-rs and client-arrow-rs
-  - Update any direct arrow2 references
-  - Verify tests and functionality
+  - [ ] Create copy of cli
+  - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
 ### Phase 6: Benchmarking
 
 - [ ] **bench-arrow-rs**
-  - Create copy of bench
-  - Update dependencies to use server-arrow-rs and client-arrow-rs
-  - Update any direct arrow2 references
-  - Verify tests and functionality
+  - [ ] Create copy of bench
+  - [ ] Update dependencies to use server-arrow-rs and client-arrow-rs
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
 ### Phase 7: Main Application
 
 - [ ] **plateau-arrow-rs**
-  - Create copy of plateau
-  - Update dependencies to use server-arrow-rs
-  - Verify tests and functionality
+  - [ ] Create copy of plateau
+  - [ ] Update dependencies to use server-arrow-rs
+  - [ ] Verify tests and functionality
 
 ### Phase 8: Integration
 
@@ -89,6 +106,16 @@ Based on the repository structure, the migration order is determined by dependen
 - [ ] Final integration testing
 
 ## Migration Notes
+
+### Troubleshooting Docs
+
+We can pull the docs for any crate we're having issues with using these commands (e.g. for arrow2):
+
+```
+cargo doc -p arrow2 # can add multiple -p args here
+rm -rf doc
+cp -r target/doc/ doc
+```
 
 ### Key API Differences
 
