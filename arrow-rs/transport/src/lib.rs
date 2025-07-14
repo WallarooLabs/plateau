@@ -8,10 +8,10 @@ use std::{
     sync::Arc,
 };
 
+use arrow::compute::concat_batches;
 use arrow_array::{Array, RecordBatch, StructArray, UInt64Array};
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema as ArrowSchema, SchemaRef};
 use arrow_select::take::take;
-use arrow::compute::concat_batches;
 use regex::Regex;
 #[cfg(feature = "rweb")]
 use rweb::{openapi::Entity, Schema};
@@ -24,9 +24,9 @@ pub use arrow_array;
 pub use arrow_buffer;
 pub use arrow_cast;
 pub use arrow_data;
-pub use arrow_schema;
-pub use arrow_json;
 pub use arrow_ipc;
+pub use arrow_json;
+pub use arrow_schema;
 pub use arrow_select;
 
 use arrow_array::{FixedSizeListArray, ListArray, StringArray};
@@ -228,16 +228,19 @@ impl DataFocus {
         // Check if array size exceeds max bytes
         if let Some(max_bytes) = self.max_bytes {
             let estimated_size = estimate_array_size(arr.as_ref()).unwrap_or(0);
-            
+
             if estimated_size > max_bytes {
                 // Create a new array with all nulls
                 // This isn't a direct bitmap update like in arrow2, but accomplishes the same result
                 // by replacing the array with one that has the same length but all null values
-                
+
                 // We can't modify Arc<dyn Array> directly, so we create a new one with all nulls
                 // This approach is a bit different than arrow2's implementation which modifies the bitmap
-                eprintln!("Warning: Nulling array that exceeds max_bytes ({})", max_bytes);
-                
+                eprintln!(
+                    "Warning: Nulling array that exceeds max_bytes ({})",
+                    max_bytes
+                );
+
                 // In a real implementation, we would create a null array of the same type and length
                 // For now, we'll just log the warning - the test doesn't actually check the array contents
             }
@@ -462,7 +465,7 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
             let length = self.chunk.num_rows();
             let indices: Vec<u64> = (0..length as u64).rev().collect();
             let indices_array = Arc::new(UInt64Array::from_iter_values(indices));
-            
+
             // Create a new RecordBatch with reversed data
             let mut columns = Vec::with_capacity(self.chunk.num_columns());
             for column in self.chunk.columns() {
@@ -470,12 +473,9 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
                 let array = take(column.as_ref(), indices_array.as_ref(), Some(options)).unwrap();
                 columns.push(array);
             }
-            
+
             // Create new RecordBatch with reversed data
-            self.chunk = RecordBatch::try_new(
-                self.chunk.schema(), 
-                columns
-            ).unwrap();
+            self.chunk = RecordBatch::try_new(self.chunk.schema(), columns).unwrap();
         }
     }
 
@@ -484,13 +484,13 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
             Err(anyhow::anyhow!("schemas do not match"))
         } else {
             let batches = vec![self.chunk.clone(), other.chunk];
-            
+
             // Use concat_batches to combine the record batches
             match concat_batches(&self.chunk.schema(), &batches) {
                 Ok(new_batch) => {
                     self.chunk = new_batch;
                     Ok(())
-                },
+                }
                 Err(e) => Err(anyhow::anyhow!("Failed to concatenate batches: {}", e)),
             }
         }
@@ -538,37 +538,34 @@ impl MultiChunk {
     /// Subdivides each chunk into a maximum of [n] roughly equal-sized sub chunks.
     pub fn rechunk(&mut self, max_rows: usize) {
         let mut new_chunks = VecDeque::new();
-        
+
         for chunk in std::mem::take(&mut self.chunks) {
             let rows = chunk.num_rows();
-            
+
             if rows <= max_rows {
                 new_chunks.push_back(chunk);
                 continue;
             }
-            
+
             // Split into multiple chunks
             let starts = (0..rows).step_by(max_rows);
-            
+
             for start in starts {
                 let length = usize::min(max_rows, rows - start);
                 let mut column_arrays = Vec::with_capacity(chunk.num_columns());
-                
+
                 for column in chunk.columns() {
                     // Slice the array to get the subset
                     let array = column.slice(start, length);
                     column_arrays.push(array);
                 }
-                
-                let new_batch = RecordBatch::try_new(
-                    chunk.schema(),
-                    column_arrays,
-                ).unwrap();
-                
+
+                let new_batch = RecordBatch::try_new(chunk.schema(), column_arrays).unwrap();
+
                 new_chunks.push_back(new_batch);
             }
         }
-        
+
         self.chunks = new_chunks;
     }
 
@@ -605,16 +602,16 @@ impl SchemaChunk<SchemaRef> {
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
         let mut output = Vec::new();
         let options = arrow_ipc::writer::IpcWriteOptions::default();
-        
+
         let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
-            &mut output, 
-            self.schema.as_ref(), 
-            options
+            &mut output,
+            self.schema.as_ref(),
+            options,
         )?;
 
         writer.write(&self.chunk)?;
         writer.finish()?;
-        
+
         Ok(output)
     }
 
@@ -623,7 +620,7 @@ impl SchemaChunk<SchemaRef> {
         let cursor = Cursor::new(bytes);
         let reader = arrow_ipc::reader::FileReader::try_new(cursor, None)?;
         let schema = reader.schema();
-        
+
         if let Some(batch) = reader.into_iter().next() {
             let batch = batch?;
             Ok(Self {
@@ -631,7 +628,9 @@ impl SchemaChunk<SchemaRef> {
                 schema,
             })
         } else {
-            Err(ArrowError::ParseError("Empty file, no record batches found".to_string()))
+            Err(ArrowError::ParseError(
+                "Empty file, no record batches found".to_string(),
+            ))
         }
     }
 
@@ -640,10 +639,10 @@ impl SchemaChunk<SchemaRef> {
         // Create a RecordBatch from the StructArray
         let fields: Fields = s.fields().clone();
         let arrays = s.columns().to_vec();
-        
+
         let arrow_schema = Arc::new(ArrowSchema::new(fields));
         let batch = RecordBatch::try_new(arrow_schema.clone(), arrays).unwrap();
-        
+
         Self {
             chunk: batch,
             schema: arrow_schema,
@@ -683,14 +682,14 @@ impl SchemaChunk<SchemaRef> {
             if exclude.contains(&path) {
                 continue;
             }
-            
+
             let split = focus.dataset_separator.as_ref().map_or_else(
                 || vec![path.as_str()],
                 |s| path.split(s.as_str()).collect::<Vec<_>>(),
             );
-            
+
             let arr_result = self.get_array(split);
-            
+
             match arr_result {
                 Ok(mut arr) => {
                     if let Some(s) = focus.dataset_separator.as_ref() {
@@ -703,7 +702,7 @@ impl SchemaChunk<SchemaRef> {
                         fields.push(Field::new(path, data_type, is_nullable));
                         arrays.push(arr);
                     }
-                },
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -713,16 +712,16 @@ impl SchemaChunk<SchemaRef> {
             let s = arrays[0].as_any().downcast_ref::<StructArray>().unwrap();
             let fields = s.fields().clone();
             let columns = s.columns().to_vec();
-            
+
             // Create a schema with the original metadata
             let mut metadata = HashMap::new();
             for (key, value) in self.schema.metadata() {
                 metadata.insert(key.to_string(), value.to_string());
             }
             let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
-            
+
             let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-            
+
             return Ok(Self {
                 chunk: batch,
                 schema,
@@ -734,11 +733,14 @@ impl SchemaChunk<SchemaRef> {
         for (key, value) in self.schema.metadata() {
             metadata.insert(key.to_string(), value.to_string());
         }
-        let schema = Arc::new(ArrowSchema::new_with_metadata(Fields::from(fields), metadata));
-        
+        let schema = Arc::new(ArrowSchema::new_with_metadata(
+            Fields::from(fields),
+            metadata,
+        ));
+
         // Create a record batch from the arrays
         let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
-        
+
         Ok(Self {
             chunk: batch,
             schema,
@@ -765,21 +767,21 @@ impl SchemaChunk<SchemaRef> {
             Some(arr) => {
                 let fields = arr.fields().clone();
                 let columns = arr.columns().to_vec();
-                
+
                 // Create a new schema with the original metadata
                 let mut metadata = HashMap::new();
                 for (key, value) in self.schema.metadata() {
                     metadata.insert(key.to_string(), value.to_string());
                 }
                 let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
-                
+
                 let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-                
+
                 Ok(Self {
                     chunk: batch,
                     schema,
                 })
-            },
+            }
             None => Err(PathError::NotStruct(
                 key.into_iter().map(|s| s.to_string()).collect(),
             )),
@@ -810,26 +812,31 @@ impl SchemaChunk<SchemaRef> {
         let mut it = path.into_iter();
         let start = it.next().ok_or(PathError::Empty)?;
         let mut current_path = vec![start];
-        
-        let collect_path = 
+
+        let collect_path =
             |path: Vec<&'a str>| path.iter().map(|k| String::from(*k)).collect::<Vec<_>>();
-            
+
         let key_missing = |path| PathError::KeyMissing(collect_path(path));
-        
-        let col_index = self.schema.fields().iter()
+
+        let col_index = self
+            .schema
+            .fields()
+            .iter()
             .position(|f| f.name() == current_path[0])
             .ok_or_else(|| key_missing(std::mem::take(&mut current_path)))?;
-            
+
         let mut current = self.chunk.column(col_index).clone();
 
         for key in it {
             match current.as_ref().as_any().downcast_ref::<StructArray>() {
                 Some(arr) => {
                     current_path.push(key);
-                    let field_index = arr.fields().iter()
+                    let field_index = arr
+                        .fields()
+                        .iter()
                         .position(|f| f.name() == key)
                         .ok_or_else(|| key_missing(std::mem::take(&mut current_path)))?;
-                        
+
                     current = arr.column(field_index).clone();
                 }
                 None => return Err(PathError::NotStruct(collect_path(current_path))),
@@ -850,15 +857,11 @@ fn contains_null_type_field(field: &Field) -> bool {
     }
 
     match field.data_type() {
-        DataType::Struct(fields) => {
-            fields.iter().any(|f| contains_null_type_field(f))
+        DataType::Struct(fields) => fields.iter().any(|f| contains_null_type_field(f)),
+        DataType::Union(fields, _) => fields.iter().any(|(_, f)| contains_null_type_field(f)),
+        DataType::List(f) | DataType::LargeList(f) | DataType::FixedSizeList(f, _) => {
+            contains_null_type_field(f)
         }
-        DataType::Union(fields, _) => {
-            fields.iter().any(|(_, f)| contains_null_type_field(f))
-        }
-        DataType::List(f)
-        | DataType::LargeList(f)
-        | DataType::FixedSizeList(f, _) => contains_null_type_field(f),
         DataType::Map(f, _) => contains_null_type_field(f),
         DataType::Dictionary(_, value_type) => {
             matches!(*value_type.as_ref(), DataType::Null)
@@ -876,18 +879,22 @@ fn gather_flat_arrays(
     exclude: &HashSet<&String>,
 ) {
     let path = vec![key.to_string()];
-    
+
     // Handle the case where arr is not a struct
     if arr.as_any().downcast_ref::<StructArray>().is_none() {
         let is_nullable = is_nullable(arr.as_ref());
-        fields.push(Field::new(key.to_string(), arr.data_type().clone(), is_nullable));
+        fields.push(Field::new(
+            key.to_string(),
+            arr.data_type().clone(),
+            is_nullable,
+        ));
         arrays.push(arr);
         return;
     }
 
     // Now we know arr is a StructArray
     let mut stack = Vec::new();
-    
+
     if let Some(struct_arr) = arr.as_any().downcast_ref::<StructArray>() {
         // Create iterators over field/column pairs
         let iter = struct_arr.fields().iter().zip(struct_arr.columns().iter());
@@ -897,22 +904,29 @@ fn gather_flat_arrays(
             if let Some((field, column)) = iter.next() {
                 // There are more fields to process in this struct, push it back
                 stack.push((current_path.clone(), iter));
-                
+
                 let field_name = field.name();
                 let mut new_path = current_path.clone();
                 new_path.push(field_name.to_string());
-                
+
                 let path_str = new_path.join(separator);
                 if !exclude.contains(&path_str) {
                     if let Some(nested_struct) = column.as_any().downcast_ref::<StructArray>() {
                         // For nested structs, process their fields recursively
-                        let nested_iter = nested_struct.fields().iter().zip(nested_struct.columns().iter());
+                        let nested_iter = nested_struct
+                            .fields()
+                            .iter()
+                            .zip(nested_struct.columns().iter());
                         stack.push((new_path, nested_iter));
                     } else {
                         // For non-struct fields, add them to our result
                         let field_name = new_path.join(separator);
                         let is_nullable = is_nullable(column);
-                        fields.push(Field::new(field_name, column.data_type().clone(), is_nullable));
+                        fields.push(Field::new(
+                            field_name,
+                            column.data_type().clone(),
+                            is_nullable,
+                        ));
                         arrays.push(column.clone());
                     }
                 }
@@ -924,25 +938,25 @@ fn gather_flat_arrays(
 fn collect_keys(keys: &mut Vec<Vec<String>>, field: &Field, tables: bool) {
     let path = vec![field.name().to_string()];
     let mut stack = Vec::new();
-    
+
     if let DataType::Struct(nested_fields) = field.data_type() {
         // If we're collecting tables and this is a struct, add it
         if tables {
             keys.push(path.clone());
         }
-        
+
         // Push fields to process
         let fields_iter = nested_fields.iter();
         stack.push((path.clone(), fields_iter));
-        
+
         while let Some((current_path, mut iter)) = stack.pop() {
             if let Some(field) = iter.next() {
                 // More fields to process in this level, push back
                 stack.push((current_path.clone(), iter));
-                
+
                 let mut field_path = current_path.clone();
                 field_path.push(field.name().to_string());
-                
+
                 match field.data_type() {
                     DataType::Struct(nested_fields) => {
                         if tables {
@@ -1018,21 +1032,25 @@ mod tests {
         // Create grandchild struct
         let grandchild_fields = vec![Field::new("index", DataType::Int64, false)];
         let grandchild_struct = StructArray::new(
-            Fields::from(grandchild_fields.clone()), 
-            vec![index.clone()], 
-            None
+            Fields::from(grandchild_fields.clone()),
+            vec![index.clone()],
+            None,
         );
         let grandchild_struct_array = Arc::new(grandchild_struct.clone());
 
         // Create child struct
         let child_fields = vec![
-            Field::new("grandchild", DataType::Struct(Fields::from(grandchild_fields)), false),
+            Field::new(
+                "grandchild",
+                DataType::Struct(Fields::from(grandchild_fields)),
+                false,
+            ),
             Field::new("index", DataType::Int64, false),
         ];
         let child_struct = StructArray::new(
             Fields::from(child_fields.clone()),
             vec![Arc::new(grandchild_struct), index.clone()],
-            None
+            None,
         );
         let child_struct_array = Arc::new(child_struct.clone());
 
@@ -1047,19 +1065,15 @@ mod tests {
         let batch = RecordBatch::try_new(
             arrow_schema.clone(),
             vec![time.clone(), child_struct_array.clone()],
-        ).unwrap();
+        )
+        .unwrap();
 
         (
             SchemaChunk {
                 schema: arrow_schema,
                 chunk: batch,
             },
-            (
-                time,
-                child_struct_array,
-                grandchild_struct_array,
-                index,
-            ),
+            (time, child_struct_array, grandchild_struct_array, index),
         )
     }
 
@@ -1072,19 +1086,19 @@ mod tests {
             true,
         ));
         let schema = ArrowSchema::new(Fields::from(fields));
-        
+
         assert!(contains_null_type(&schema));
 
         let mut fields = Vec::new();
         fields.push(Field::new("column", DataType::Float64, false));
         let schema = ArrowSchema::new(Fields::from(fields));
-        
+
         assert!(!contains_null_type(&schema));
 
         let mut fields = Vec::new();
         fields.push(Field::new("column", DataType::Float64, true));
         let schema = ArrowSchema::new(Fields::from(fields));
-        
+
         assert!(!contains_null_type(&schema));
     }
 
@@ -1098,11 +1112,17 @@ mod tests {
 
         // Struct retrieval
         let result = test.get_array(["child"]).unwrap();
-        assert_eq!(result.as_ref().data_type(), child_struct.as_ref().data_type());
+        assert_eq!(
+            result.as_ref().data_type(),
+            child_struct.as_ref().data_type()
+        );
 
         // Nested struct retrieval
         let result = test.get_array(["child", "grandchild"]).unwrap();
-        assert_eq!(result.as_ref().data_type(), grandchild_struct.as_ref().data_type());
+        assert_eq!(
+            result.as_ref().data_type(),
+            grandchild_struct.as_ref().data_type()
+        );
 
         // Deeply nested field
         let result = test.get_array(["child", "grandchild", "index"]).unwrap();
@@ -1130,7 +1150,7 @@ mod tests {
 
         // Serialize to bytes
         let bytes = original.to_bytes().unwrap();
-        
+
         // Deserialize from bytes
         let test = SchemaChunk::from_bytes(&bytes).unwrap();
 
@@ -1183,49 +1203,57 @@ mod tests {
         let (test, (time, _child_struct, _grandchild_struct, _index)) = nested_chunk();
 
         // Test focusing on child field
-        let focused = test.focus(&DataFocus {
-            dataset: vec!["child".to_string()],
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let focused = test
+            .focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         // Get field name for debugging
         let field_name = focused.schema.field(0).name();
         println!("Field name: {field_name}");
-        
+
         // Instead of asserting equality, check if the field is one of the expected values
         assert!(field_name == "child" || field_name == "grandchild");
-        
+
         // Test focusing on time field
-        let focused_time = test.focus(&DataFocus {
-            dataset: vec!["time".to_string()],
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let focused_time = test
+            .focus(&DataFocus {
+                dataset: vec!["time".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         assert_eq!(focused_time.arrays(), vec![vec!["time"]]);
-        
+
         // Validate time array content
         let result = focused_time.get_array(["time"]).unwrap();
         assert_eq!(result.as_ref().data_type(), time.as_ref().data_type());
-        
+
         // Test flattening with separator
-        let flat_child = test.focus(&DataFocus {
-            dataset: vec!["child".to_string()],
-            dataset_separator: Some(".".to_string()),
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let flat_child = test
+            .focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         assert_eq!(
             flat_child.arrays(),
             vec![vec!["child.grandchild.index"], vec!["child.index"]]
         );
-        
+
         // Test multiple fields with separator
-        let flat_multiple = test.focus(&DataFocus {
-            dataset: vec!["time".to_string(), "child".to_string()],
-            dataset_separator: Some(".".to_string()),
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let flat_multiple = test
+            .focus(&DataFocus {
+                dataset: vec!["time".to_string(), "child".to_string()],
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         assert_eq!(
             flat_multiple.arrays(),
             vec![
@@ -1234,14 +1262,16 @@ mod tests {
                 vec!["child.index"]
             ]
         );
-        
+
         // Test wildcard with separator
-        let flat_all = test.focus(&DataFocus {
-            dataset: vec!["*".to_string()],
-            dataset_separator: Some(".".to_string()),
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let flat_all = test
+            .focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         assert_eq!(
             flat_all.arrays(),
             vec![
@@ -1250,45 +1280,48 @@ mod tests {
                 vec!["child.index"]
             ]
         );
-        
+
         // Test exclusion
-        let exclude_time = test.focus(&DataFocus {
-            dataset: vec!["*".to_string()],
-            dataset_separator: Some(".".to_string()),
-            exclude: vec!["time".to_string()],
-            ..Default::default()
-        }).unwrap();
-        
+        let exclude_time = test
+            .focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["time".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+
         assert_eq!(
             exclude_time.arrays(),
             vec![vec!["child.grandchild.index"], vec!["child.index"]]
         );
-        
+
         // Test excluding a nested path
-        let exclude_nested = test.focus(&DataFocus {
-            dataset: vec!["*".to_string()],
-            dataset_separator: Some(".".to_string()),
-            exclude: vec!["child.grandchild".to_string()],
-            ..Default::default()
-        }).unwrap();
-        
+        let exclude_nested = test
+            .focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["child.grandchild".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+
         assert_eq!(
             exclude_nested.arrays(),
             vec![vec!["time"], vec!["child.index"]]
         );
-        
+
         // Test excluding a parent path
-        let exclude_parent = test.focus(&DataFocus {
-            dataset: vec!["*".to_string()],
-            dataset_separator: Some(".".to_string()),
-            exclude: vec!["child".to_string()],
-            ..Default::default()
-        }).unwrap();
-        
-        assert_eq!(
-            exclude_parent.arrays(),
-            vec![vec!["time"]]
-        );
+        let exclude_parent = test
+            .focus(&DataFocus {
+                dataset: vec!["*".to_string()],
+                dataset_separator: Some(".".to_string()),
+                exclude: vec!["child".to_string()],
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(exclude_parent.arrays(), vec![vec!["time"]]);
     }
 
     #[test]
@@ -1298,31 +1331,35 @@ mod tests {
         // Add metadata to schema
         let mut metadata = HashMap::new();
         metadata.insert("testing".to_string(), "123".to_string());
-        
-        // Create a new schema with metadata 
+
+        // Create a new schema with metadata
         let new_schema = Arc::new(ArrowSchema::new_with_metadata(
             test.schema.fields().clone(),
-            metadata
+            metadata,
         ));
-        
+
         // Update test's schema
         test.schema = new_schema;
 
         // Focus on child and check metadata is preserved
-        let focused_child = test.focus(&DataFocus {
-            dataset: vec!["child".to_string()],
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let focused_child = test
+            .focus(&DataFocus {
+                dataset: vec!["child".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         let metadata_value = focused_child.schema.metadata().get("testing");
         assert_eq!(metadata_value, Some(&"123".to_string()));
 
         // Focus on multiple fields and check metadata is preserved
-        let focused_multiple = test.focus(&DataFocus {
-            dataset: vec!["child".to_string(), "time".to_string()],
-            ..DataFocus::default()
-        }).unwrap();
-        
+        let focused_multiple = test
+            .focus(&DataFocus {
+                dataset: vec!["child".to_string(), "time".to_string()],
+                ..DataFocus::default()
+            })
+            .unwrap();
+
         let metadata_value = focused_multiple.schema.metadata().get("testing");
         assert_eq!(metadata_value, Some(&"123".to_string()));
     }
