@@ -1413,4 +1413,123 @@ mod tests {
         assert_eq!(grandchild.tables(), empty);
         assert_eq!(grandchild.arrays(), vec![vec!["index".to_string()]]);
     }
+
+    #[test]
+    fn test_size_check_array() {
+        // Test size_check_array with different array types
+
+        // Create a large string array that should exceed a small max_bytes limit
+        let large_string = "a".repeat(10000);
+        let large_string_array =
+            Arc::new(arrow_array::StringArray::from(vec![large_string])) as Arc<dyn Array>;
+
+        // Create a data focus with a small max_bytes limit
+        let focus = DataFocus {
+            max_bytes: Some(100),
+            ..Default::default()
+        };
+
+        // Check the array's initial state
+        let null_count_before = large_string_array.null_count();
+        assert_eq!(null_count_before, 0, "Array should have no nulls initially");
+
+        // Apply size check
+        let mut array_to_check = large_string_array.clone();
+        focus.size_check_array(&mut array_to_check);
+
+        // The array should now be all nulls
+        assert_eq!(array_to_check.len(), 1, "Array length should be preserved");
+        assert_eq!(
+            array_to_check.null_count(),
+            1,
+            "All values should be null after size check"
+        );
+
+        // Test with numeric arrays
+        let large_int_array = Arc::new(Int64Array::from_iter_values(0..1000)) as Arc<dyn Array>;
+        let estimated_size = estimate_array_size(large_int_array.as_ref()).unwrap();
+
+        // Create a data focus with a max_bytes just below the estimated size
+        let focus = DataFocus {
+            max_bytes: Some(estimated_size - 10),
+            ..Default::default()
+        };
+
+        // Check the Int64Array's initial state
+        let null_count_before = large_int_array.null_count();
+        assert_eq!(
+            null_count_before, 0,
+            "Int64Array should have no nulls initially"
+        );
+
+        // Apply size check
+        let mut int_array_to_check = large_int_array.clone();
+        focus.size_check_array(&mut int_array_to_check);
+
+        // The array should now be all nulls
+        assert_eq!(
+            int_array_to_check.len(),
+            1000,
+            "Array length should be preserved"
+        );
+        assert_eq!(
+            int_array_to_check.null_count(),
+            1000,
+            "All values should be null after size check"
+        );
+
+        // Test with max_bytes larger than the actual array size - array should be unchanged
+        let focus = DataFocus {
+            max_bytes: Some(estimated_size + 1000),
+            ..Default::default()
+        };
+
+        let mut int_array_unchanged = large_int_array.clone();
+        focus.size_check_array(&mut int_array_unchanged);
+
+        // The array should be unchanged
+        assert_eq!(
+            int_array_unchanged.null_count(),
+            0,
+            "Array should remain unchanged when under the size limit"
+        );
+    }
+
+    #[test]
+    fn test_size_check_array_in_focus() {
+        // Test that size_check_array is properly called during focus operations
+
+        // Create a test schema chunk with a large string array
+        let large_string = "a".repeat(10000);
+        let large_string_array = Arc::new(arrow_array::StringArray::from(vec![large_string; 5]));
+
+        // Create schema and record batch
+        let field = Field::new("large_text", DataType::Utf8, false);
+        let schema = Arc::new(ArrowSchema::new(Fields::from(vec![field])));
+        let batch = RecordBatch::try_new(schema.clone(), vec![large_string_array]).unwrap();
+
+        let schema_chunk = SchemaChunk {
+            schema,
+            chunk: batch,
+        };
+
+        // Create a data focus with a small max_bytes limit
+        let focus = DataFocus {
+            dataset: vec!["large_text".to_string()],
+            max_bytes: Some(100), // Small enough to trigger size check
+            ..Default::default()
+        };
+
+        // Focus and check if the array was nullified
+        let focused = schema_chunk.focus(&focus).unwrap();
+        let array = focused.get_array(["large_text"]).unwrap();
+
+        // The array should have all nulls
+        assert_eq!(array.len(), 5, "Array length should be preserved");
+        assert_eq!(
+            array.null_count(),
+            5,
+            "All values should be null after focus with size check"
+        );
+    }
 }
