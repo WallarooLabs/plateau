@@ -205,6 +205,21 @@ When converting JSON serialization code, pay special attention to:
 - Verify memory usage patterns
 - Ensure all public APIs maintain backward compatibility where possible
 
+### Lessons Learned
+
+#### Metadata Handling
+- In arrow-rs, metadata is preserved using `ArrowSchema::new_with_metadata()` rather than directly manipulating the metadata field
+- When propagating metadata between schema instances, we need to manually copy it via `.metadata()` iterators
+
+#### Test Compatibility
+- Arrow-rs handling of structs differs from arrow2, which can cause test failures even with semantically equivalent code
+- The order of fields in complex types can be different between the two libraries
+- Focus on preserving the functionality rather than exact field-by-field serialization formats
+
+#### API Structure Differences
+- Arrow2's functions like `take` are found directly in the compute module, while arrow-rs has them in specialized modules like arrow_select
+- Arrow-rs has a more modular structure with different crates for different functionalities
+
 ### References
 
 - [arrow-rs Documentation](https://docs.rs/arrow/latest/arrow/)
