@@ -9,7 +9,11 @@ use std::{
 };
 
 use arrow::compute::concat_batches;
-use arrow_array::{Array, RecordBatch, StructArray, UInt64Array};
+use arrow::datatypes::Int16Type;
+use arrow_array::{
+    make_array, Array, ArrayRef, PrimitiveArray, RecordBatch, StructArray, UInt64Array,
+};
+use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema as ArrowSchema, SchemaRef};
 use arrow_select::take::take;
 use regex::Regex;
@@ -230,19 +234,8 @@ impl DataFocus {
             let estimated_size = estimate_array_size(arr.as_ref()).unwrap_or(0);
 
             if estimated_size > max_bytes {
-                // Create a new array with all nulls
-                // This isn't a direct bitmap update like in arrow2, but accomplishes the same result
-                // by replacing the array with one that has the same length but all null values
-
-                // We can't modify Arc<dyn Array> directly, so we create a new one with all nulls
-                // This approach is a bit different than arrow2's implementation which modifies the bitmap
-                eprintln!(
-                    "Warning: Nulling array that exceeds max_bytes ({})",
-                    max_bytes
-                );
-
-                // In a real implementation, we would create a null array of the same type and length
-                // For now, we'll just log the warning - the test doesn't actually check the array contents
+                let ad = ArrayData::new_null(arr.data_type(), arr.len());
+                *arr = make_array(ad);
             }
         }
     }
