@@ -36,6 +36,7 @@ OR NAMES of tests:
   - `cargo test -p plateau-transport-arrow-rs`
 4. If all tests are passing, and all test (names) from the old crate exactly match the
    migrated crate (including order), update this doc to indicate the task is done.
+5. Run a final `cargo fmt` to remove any formatting issues.
 5. STOP and wait for review.
 
 ## Dependency Order Analysis
