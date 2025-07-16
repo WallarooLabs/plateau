@@ -9,10 +9,8 @@ use std::{
 };
 
 use arrow::compute::concat_batches;
-use arrow::datatypes::Int16Type;
-use arrow_array::{
-    make_array, Array, ArrayRef, PrimitiveArray, RecordBatch, StructArray, UInt64Array,
-};
+
+use arrow_array::{make_array, Array, RecordBatch, StructArray, UInt64Array};
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema as ArrowSchema, SchemaRef};
 use arrow_select::take::take;
@@ -1002,7 +1000,7 @@ impl fmt::Display for PartitionId {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow_array::Int64Array;
+    use arrow_array::{Int32Array, Int64Array};
 
     fn nested_chunk() -> (
         SchemaChunk<SchemaRef>,
@@ -1407,8 +1405,8 @@ mod tests {
 
         // Create a large string array that should exceed a small max_bytes limit
         let large_string = "a".repeat(10000);
-        let large_string_array =
-            Arc::new(arrow_array::StringArray::from(vec![large_string])) as Arc<dyn Array>;
+        let string_array = Arc::new(StringArray::from(vec![large_string]));
+        let large_string_array: Arc<dyn Array> = string_array;
 
         // Create a data focus with a small max_bytes limit
         let focus = DataFocus {
@@ -1433,7 +1431,8 @@ mod tests {
         );
 
         // Test with numeric arrays
-        let large_int_array = Arc::new(Int64Array::from_iter_values(0..1000)) as Arc<dyn Array>;
+        let int_array = Arc::new(Int64Array::from_iter_values(0..1000));
+        let large_int_array: Arc<dyn Array> = int_array;
         let estimated_size = estimate_array_size(large_int_array.as_ref()).unwrap();
 
         // Create a data focus with a max_bytes just below the estimated size
@@ -1488,7 +1487,8 @@ mod tests {
 
         // Create a test schema chunk with a large string array
         let large_string = "a".repeat(10000);
-        let large_string_array = Arc::new(arrow_array::StringArray::from(vec![large_string; 5]));
+        let string_array = Arc::new(StringArray::from(vec![large_string; 5]));
+        let large_string_array: Arc<dyn Array> = string_array;
 
         // Create schema and record batch
         let field = Field::new("large_text", DataType::Utf8, false);
@@ -1546,7 +1546,8 @@ mod tests {
             DataType::Int32,
             false,
         )]));
-        let arr = Arc::new(arrow_array::Int32Array::from_iter_values(0..100));
+        let int_array = Arc::new(Int32Array::from_iter_values(0..100));
+        let arr: Arc<dyn Array> = int_array;
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
 
         assert_rechunk_invariants(batch.slice(0, 10), 5);
