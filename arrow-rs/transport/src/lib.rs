@@ -543,15 +543,7 @@ impl MultiChunk {
 
             for start in starts {
                 let length = usize::min(max_rows, rows - start);
-                let mut column_arrays = Vec::with_capacity(chunk.num_columns());
-
-                for column in chunk.columns() {
-                    // Slice the array to get the subset
-                    let array = column.slice(start, length);
-                    column_arrays.push(array);
-                }
-
-                let new_batch = RecordBatch::try_new(chunk.schema(), column_arrays).unwrap();
+                let new_batch = chunk.slice(start, length);
 
                 new_chunks.push_back(new_batch);
             }
