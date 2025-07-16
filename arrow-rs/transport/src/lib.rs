@@ -1525,4 +1525,40 @@ mod tests {
             "All values should be null after focus with size check"
         );
     }
+
+    #[test]
+    fn test_rechunk() {
+        fn assert_rechunk_invariants(batch: RecordBatch, max_rows: usize) {
+            let original_rows = batch.num_rows();
+            let mut multi_chunk = MultiChunk {
+                schema: batch.schema(),
+                chunks: [batch.clone()].into(),
+            };
+
+            multi_chunk.rechunk(max_rows);
+
+            let rechunked_rows = multi_chunk.len();
+            assert_eq!(
+                original_rows, rechunked_rows,
+                "row count should be preserved"
+            );
+
+            let concatenated = concat_batches(&batch.schema(), &multi_chunk.chunks).unwrap();
+            assert_eq!(batch, concatenated, "data should be preserved");
+        }
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "a",
+            DataType::Int32,
+            false,
+        )]));
+        let arr = Arc::new(arrow_array::Int32Array::from_iter_values(0..100));
+        let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
+
+        assert_rechunk_invariants(batch.slice(0, 10), 5);
+        assert_rechunk_invariants(batch.slice(0, 10), 10);
+        assert_rechunk_invariants(batch.slice(0, 10), 11);
+        assert_rechunk_invariants(batch.slice(0, 10), 3);
+        assert_rechunk_invariants(batch.slice(0, 0), 100);
+    }
 }
