@@ -690,9 +690,8 @@ impl SchemaChunk<SchemaRef> {
                     } else {
                         // Apply size check if needed
                         focus.size_check_array(&mut arr);
-                        let is_nullable = is_nullable(arr.as_ref());
                         let data_type = arr.data_type().clone();
-                        fields.push(Field::new(path, data_type, is_nullable));
+                        fields.push(Field::new(path, data_type, arr.nulls().is_some()));
                         arrays.push(arr);
                     }
                 }
@@ -875,7 +874,7 @@ fn gather_flat_arrays(
 
     // Handle the case where arr is not a struct
     if arr.as_any().downcast_ref::<StructArray>().is_none() {
-        let is_nullable = is_nullable(arr.as_ref());
+        let is_nullable = arr.nulls().is_some();
         fields.push(Field::new(
             key.to_string(),
             arr.data_type().clone(),
@@ -914,7 +913,7 @@ fn gather_flat_arrays(
                     } else {
                         // For non-struct fields, add them to our result
                         let field_name = new_path.join(separator);
-                        let is_nullable = is_nullable(column);
+                        let is_nullable = arr.nulls().is_some();
                         fields.push(Field::new(
                             field_name,
                             column.data_type().clone(),
@@ -969,11 +968,6 @@ fn collect_keys(keys: &mut Vec<Vec<String>>, field: &Field, tables: bool) {
         // If not a struct and we're collecting non-tables
         keys.push(path);
     }
-}
-
-// Helper function to check if an array has potential nulls
-fn is_nullable(arr: &dyn Array) -> bool {
-    arr.null_count() > 0 || arr.data_type() == &DataType::Null
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
