@@ -110,6 +110,10 @@ Based on the repository structure, the migration order is determined by dependen
 
 ## Migration Notes
 
+### Best Practices
+
+- Use `ArrayRef` instead of `Arc<dyn Array>` when working with arrays. The `ArrayRef` type is a type alias for `Arc<dyn Array>` and is the recommended way to work with arrays in arrow-rs.
+
 ### Troubleshooting Docs
 
 We can pull the docs for any crate we're having issues with using these commands (e.g. for arrow2):

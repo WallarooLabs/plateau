@@ -10,7 +10,7 @@ use std::{
 
 use arrow::compute::concat_batches;
 
-use arrow_array::{make_array, Array, RecordBatch, StructArray, UInt64Array};
+use arrow_array::{make_array, Array, ArrayRef, RecordBatch, StructArray, UInt64Array};
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema as ArrowSchema, SchemaRef};
 use arrow_select::take::take;
@@ -226,7 +226,7 @@ impl DataFocus {
             || self.max_bytes.is_some()
     }
 
-    pub fn size_check_array(&self, arr: &mut Arc<dyn Array>) {
+    pub fn size_check_array(&self, arr: &mut ArrayRef) {
         // Check if array size exceeds max bytes
         if let Some(max_bytes) = self.max_bytes {
             let estimated_size = estimate_array_size(arr.as_ref()).unwrap_or(0);
@@ -791,14 +791,14 @@ impl SchemaChunk<SchemaRef> {
     pub fn get_array<'a>(
         &self,
         path: impl IntoIterator<Item = &'a str>,
-    ) -> Result<Arc<dyn Array>, PathError> {
+    ) -> Result<ArrayRef, PathError> {
         Ok(self.get_key_array(path)?.1)
     }
 
     fn get_key_array<'a>(
         &self,
         path: impl IntoIterator<Item = &'a str>,
-    ) -> Result<(Vec<&'a str>, Arc<dyn Array>), PathError> {
+    ) -> Result<(Vec<&'a str>, ArrayRef), PathError> {
         let mut it = path.into_iter();
         let start = it.next().ok_or(PathError::Empty)?;
         let mut current_path = vec![start];
@@ -862,9 +862,9 @@ fn contains_null_type_field(field: &Field) -> bool {
 
 fn gather_flat_arrays(
     fields: &mut Vec<Field>,
-    arrays: &mut Vec<Arc<dyn Array>>,
+    arrays: &mut Vec<ArrayRef>,
     key: &str,
-    arr: Arc<dyn Array>,
+    arr: ArrayRef,
     separator: &str,
     exclude: &HashSet<&String>,
 ) {
@@ -1004,12 +1004,7 @@ mod tests {
 
     fn nested_chunk() -> (
         SchemaChunk<SchemaRef>,
-        (
-            Arc<dyn Array>,
-            Arc<dyn Array>,
-            Arc<dyn Array>,
-            Arc<dyn Array>,
-        ),
+        (ArrayRef, ArrayRef, ArrayRef, ArrayRef),
     ) {
         let time = Arc::new(Int64Array::from_iter_values([0, 1, 2, 3, 4]));
         let index = Arc::new(Int64Array::from_iter_values([0, 1, 2, 3, 4]));
@@ -1406,7 +1401,7 @@ mod tests {
         // Create a large string array that should exceed a small max_bytes limit
         let large_string = "a".repeat(10000);
         let string_array = Arc::new(StringArray::from(vec![large_string]));
-        let large_string_array: Arc<dyn Array> = string_array;
+        let large_string_array: ArrayRef = string_array;
 
         // Create a data focus with a small max_bytes limit
         let focus = DataFocus {
@@ -1432,7 +1427,7 @@ mod tests {
 
         // Test with numeric arrays
         let int_array = Arc::new(Int64Array::from_iter_values(0..1000));
-        let large_int_array: Arc<dyn Array> = int_array;
+        let large_int_array: ArrayRef = int_array;
         let estimated_size = estimate_array_size(large_int_array.as_ref()).unwrap();
 
         // Create a data focus with a max_bytes just below the estimated size
@@ -1488,7 +1483,7 @@ mod tests {
         // Create a test schema chunk with a large string array
         let large_string = "a".repeat(10000);
         let string_array = Arc::new(StringArray::from(vec![large_string; 5]));
-        let large_string_array: Arc<dyn Array> = string_array;
+        let large_string_array: ArrayRef = string_array;
 
         // Create schema and record batch
         let field = Field::new("large_text", DataType::Utf8, false);
@@ -1547,7 +1542,7 @@ mod tests {
             false,
         )]));
         let int_array = Arc::new(Int32Array::from_iter_values(0..100));
-        let arr: Arc<dyn Array> = int_array;
+        let arr: ArrayRef = int_array;
         let batch = RecordBatch::try_new(schema, vec![arr]).unwrap();
 
         assert_rechunk_invariants(batch.slice(0, 10), 5);
