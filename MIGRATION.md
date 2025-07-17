@@ -62,7 +62,7 @@ Based on the repository structure, the migration order is determined by dependen
 ### Phase 2: Client Libraries
 
 - [ ] **client-arrow-rs**
-  - [ ] Create copy of client
+  - [x] Create copy of client
   - [ ] Update dependencies to use transport-arrow-rs
   - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
