@@ -3019,7 +3019,7 @@ dependencies = [
  "parking_lot 0.11.2",
  "plateau-server",
  "plateau-test",
- "plateau-transport",
+ "plateau-transport-arrow-rs",
  "polars",
  "reqwest",
  "serde",

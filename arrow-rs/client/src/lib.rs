@@ -2,20 +2,17 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::{pin::Pin, str::FromStr};
+use std::{pin::Pin, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
-use plateau_transport::headers::ITERATION_STATUS_HEADER;
-use plateau_transport::CONTENT_TYPE_JSON;
-pub use plateau_transport::{
-    self as transport, arrow2,
-    arrow2::io::ipc,
-    arrow2::io::ipc::read::stream_async::{read_stream_metadata_async, AsyncStreamReader},
-    estimate_array_size, estimate_size, is_variable_len, ArrowError, ArrowSchema, ChunkError,
-    DataFocus, Insert, InsertQuery, Inserted, MultiChunk, PartitionFilter, PartitionSelector,
-    Partitions, RecordQuery, RecordStatus, Records, SchemaChunk, Span, TopicIterationOrder,
+use plateau_transport_arrow_rs::headers::ITERATION_STATUS_HEADER;
+use plateau_transport_arrow_rs::CONTENT_TYPE_JSON;
+use plateau_transport_arrow_rs::{
+    arrow_ipc,
+    arrow_schema::{ArrowError, Schema},
+    Insert, InsertQuery, Inserted, MultiChunk, Partitions, RecordQuery, Records, SchemaChunk,
     TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
     CONTENT_TYPE_ARROW,
 };
@@ -92,13 +89,11 @@ pub const DEFAULT_MAX_BATCH_BYTES: usize = 10240000;
 
 /// Plateau client. Creation options:
 /// ```
-/// use plateau_client::Client;
-///
 /// // Client pointed at 'localhost:3030'.
-/// let client = Client::default();
+/// let client = plateau_client_arrow_rs::Client::default();
 ///
 /// // Client pointed at an alternate URL.
-/// let client = Client::new("plateau.my-wallaroo-cluster.dev:1234");
+/// let client = plateau_client_arrow_rs::Client::new("plateau.my-wallaroo-cluster.dev:1234");
 /// ```
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -167,7 +162,7 @@ async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
     if response.status() == 413 {
         let max = response
             .headers()
-            .get(plateau_transport::headers::MAX_REQUEST_SIZE_HEADER)
+            .get(plateau_transport_arrow_rs::headers::MAX_REQUEST_SIZE_HEADER)
             .and_then(|h| h.to_str().ok())
             .and_then(|s| usize::from_str(s).ok());
         return Err(Error::RequestTooLong(body_len, MaxRequestSize(max)));
@@ -426,62 +421,90 @@ impl Insertion for Insert {
     }
 }
 
-impl Insertion for SchemaChunk<ArrowSchema> {
+impl Insertion for SchemaChunk<Schema> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let bytes = self.to_bytes().map_err(Error::ArrowSerialize)?;
+        let mut buf = Vec::new();
+        let options = arrow_ipc::writer::IpcWriteOptions::default();
+
+        let mut writer =
+            arrow_ipc::writer::FileWriter::try_new_with_options(&mut buf, &self.schema, options)
+                .map_err(Error::ArrowSerialize)?;
+
+        writer.write(&self.chunk).map_err(Error::ArrowSerialize)?;
+        writer.finish().map_err(Error::ArrowSerialize)?;
+
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
-            .header(CONTENT_LENGTH, bytes.len())
-            .body(bytes))
+            .header(CONTENT_LENGTH, buf.len())
+            .body(buf))
+    }
+}
+
+impl Insertion for SchemaChunk<std::sync::Arc<Schema>> {
+    fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
+        let mut buf = Vec::new();
+        let options = arrow_ipc::writer::IpcWriteOptions::default();
+
+        let mut writer =
+            arrow_ipc::writer::FileWriter::try_new_with_options(&mut buf, &self.schema, options)
+                .map_err(Error::ArrowSerialize)?;
+
+        writer.write(&self.chunk).map_err(Error::ArrowSerialize)?;
+        writer.finish().map_err(Error::ArrowSerialize)?;
+
+        Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
+            .header(CONTENT_LENGTH, buf.len())
+            .body(buf))
     }
 }
 
 impl Insertion for MultiChunk {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let bytes = io::Cursor::new(vec![]);
-        let options = ipc::write::WriteOptions { compression: None };
+        let mut buf = Vec::new();
+        let options = arrow_ipc::writer::IpcWriteOptions::default();
 
-        let mut writer = ipc::write::FileWriter::new(bytes, self.schema.clone(), None, options);
+        let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
+            &mut buf,
+            self.schema.as_ref(),
+            options,
+        )
+        .map_err(Error::ArrowSerialize)?;
 
-        writer.start().map_err(Error::ArrowSerialize)?;
         for chunk in &self.chunks {
-            writer.write(chunk, None).map_err(Error::ArrowSerialize)?;
+            writer.write(chunk).map_err(Error::ArrowSerialize)?;
         }
         writer.finish().map_err(Error::ArrowSerialize)?;
 
-        let bytes = writer.into_inner().into_inner();
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
-            .header(CONTENT_LENGTH, bytes.len())
-            .body(bytes))
+            .header(CONTENT_LENGTH, buf.len())
+            .body(buf))
     }
 }
 
-impl Insertion for Vec<SchemaChunk<ArrowSchema>> {
+impl Insertion for Vec<SchemaChunk<Arc<Schema>>> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let bytes = io::Cursor::new(vec![]);
-        let options = ipc::write::WriteOptions { compression: None };
+        let mut buf = Vec::new();
+        let options = arrow_ipc::writer::IpcWriteOptions::default();
 
         let schema = self.first().map(|d| &d.schema).ok_or_else(|| {
             Error::ArrowSerialize(ArrowError::InvalidArgumentError(
                 "cannot send empty request".to_string(),
             ))
         })?;
-        let mut writer = ipc::write::FileWriter::new(bytes, schema.clone(), None, options);
+        let mut writer =
+            arrow_ipc::writer::FileWriter::try_new_with_options(&mut buf, schema, options)
+                .map_err(Error::ArrowSerialize)?;
 
-        writer.start().map_err(Error::ArrowSerialize)?;
         for data in self.iter() {
             if &data.schema != schema {
                 return Err(Error::SchemaMismatch);
             }
-            writer
-                .write(&data.chunk, None)
-                .map_err(Error::ArrowSerialize)?;
+            writer.write(&data.chunk).map_err(Error::ArrowSerialize)?;
         }
         writer.finish().map_err(Error::ArrowSerialize)?;
 
-        let bytes = writer.into_inner().into_inner();
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
-            .header(CONTENT_LENGTH, bytes.len())
-            .body(bytes))
+            .header(CONTENT_LENGTH, buf.len())
+            .body(buf))
     }
 }
 
@@ -538,21 +561,21 @@ impl InsertionQueue for MultiChunk {
         self.chunks
             .front()
             .map(|chunk| {
-                let bytes = io::Cursor::new(vec![]);
-                let options = ipc::write::WriteOptions { compression: None };
+                let mut buf = Vec::new();
+                let options = arrow_ipc::writer::IpcWriteOptions::default();
 
-                let mut writer =
-                    ipc::write::FileWriter::new(bytes, self.schema.clone(), None, options);
+                let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
+                    &mut buf,
+                    self.schema.as_ref(),
+                    options,
+                )
+                .map_err(Error::ArrowSerialize)?;
 
-                writer.start().map_err(Error::ArrowSerialize)?;
-                let rows = chunk.len();
-                writer.write(chunk, None).map_err(Error::ArrowSerialize)?;
+                let rows = chunk.num_rows();
+                writer.write(chunk).map_err(Error::ArrowSerialize)?;
                 writer.finish().map_err(Error::ArrowSerialize)?;
 
-                Ok(QueueChunk {
-                    bytes: writer.into_inner().into_inner(),
-                    rows,
-                })
+                Ok(QueueChunk { bytes: buf, rows })
             })
             .transpose()
     }
@@ -562,7 +585,7 @@ impl InsertionQueue for MultiChunk {
     }
 
     fn can_reshape(&self) -> bool {
-        self.chunks.front().is_some_and(|c| c.len() > 1)
+        self.chunks.front().is_some_and(|c| c.num_rows() > 1)
     }
 
     fn reshape(&mut self, max_rows: usize) {
@@ -570,11 +593,22 @@ impl InsertionQueue for MultiChunk {
     }
 }
 
+// Helper function to convert SchemaChunk to MultiChunk for tests
+fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<std::sync::Arc<Schema>>) -> MultiChunk {
+    let mut chunks = VecDeque::new();
+    chunks.push_back(schema_chunk.chunk);
+
+    MultiChunk {
+        schema: schema_chunk.schema,
+        chunks,
+    }
+}
+
 pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
-    let mut cursor = io::Cursor::new(bytes);
-    let metadata = ipc::read::read_file_metadata(&mut cursor).map_err(Error::ArrowDeserialize)?;
-    let schema = metadata.schema.clone();
-    let reader = ipc::read::FileReader::new(cursor, metadata, None, None);
+    let cursor = io::Cursor::new(bytes);
+    let reader =
+        arrow_ipc::reader::FileReader::try_new(cursor, None).map_err(Error::ArrowDeserialize)?;
+    let schema = reader.schema();
     let chunks = reader
         .collect::<Result<VecDeque<_>, _>>()
         .map_err(Error::ArrowDeserialize)?;
@@ -582,10 +616,21 @@ pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
     Ok(MultiChunk { schema, chunks })
 }
 
-pub fn bytes_into_schemachunks(bytes: Bytes) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+pub fn bytes_into_schemachunks(
+    bytes: Bytes,
+) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
     let multi = bytes_into_multichunk(bytes)?;
 
-    Ok(multi.to_schemachunks())
+    let schemachunks = multi
+        .chunks
+        .into_iter()
+        .map(|chunk| SchemaChunk {
+            schema: multi.schema.clone(),
+            chunk,
+        })
+        .collect();
+
+    Ok(schemachunks)
 }
 
 #[cfg(feature = "polars")]
@@ -704,14 +749,14 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Iterate<Vec<SchemaChunk<ArrowSchema>>> for Client {
+impl Iterate<Vec<SchemaChunk<std::sync::Arc<Schema>>>> for Client {
     /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
     async fn iterate_path<'a>(
         &self,
         path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
-    ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+    ) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
         let bytes = process_request(
             self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
@@ -916,7 +961,7 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
+impl Retrieve<Vec<SchemaChunk<std::sync::Arc<Schema>>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
     /// [`SchemaChunk<Schema>`] format.
     async fn get_records(
@@ -924,7 +969,7 @@ impl Retrieve<Vec<SchemaChunk<ArrowSchema>>> for Client {
         topic_name: impl AsRef<str> + Send,
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
-    ) -> Result<Vec<SchemaChunk<ArrowSchema>>, Error> {
+    ) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
         let bytes = process_request(
             self.retrieve_request(topic_name, partition_name, params)?
                 .header("accept", CONTENT_TYPE_ARROW),
@@ -973,35 +1018,60 @@ mod tests {
         Expectation, Server,
     };
     use plateau_server::{http, Config as PlateauConfig};
-    use plateau_transport::{
-        arrow2::{
-            array::PrimitiveArray,
-            chunk::Chunk,
-            datatypes::{Field, Metadata},
-        },
-        Topic,
-    };
+    use plateau_transport_arrow_rs::{DataFocus, RecordStatus, Span, Topic, TopicIterationOrder};
     use tokio_util::io::ReaderStream;
 
     use super::*;
 
-    fn example_chunk() -> SchemaChunk<ArrowSchema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let outputs = PrimitiveArray::<f32>::from_values(vec![0.6, 0.4, 0.2, 0.8, 0.8]);
+    fn example_chunk() -> SchemaChunk<std::sync::Arc<Schema>> {
+        use plateau_transport_arrow_rs::arrow_array::RecordBatch;
+        use plateau_transport_arrow_rs::arrow_array::{Float32Array, Int64Array};
+        use plateau_transport_arrow_rs::arrow_schema::{DataType, Field, Schema};
+        use std::sync::Arc;
 
-        let schema = ArrowSchema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
+        let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
+        let inputs = Arc::new(Float32Array::from_iter_values(vec![
+            1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+        let outputs = Arc::new(Float32Array::from_iter_values(vec![
+            0.6, 0.4, 0.2, 0.8, 0.8,
+        ]));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("inputs", DataType::Float32, false),
+            Field::new("outputs", DataType::Float32, false),
+        ]));
+
+        let record_batch =
+            RecordBatch::try_new(schema.clone(), vec![time, inputs, outputs]).unwrap();
 
         SchemaChunk {
             schema,
-            chunk: Chunk::try_new(vec![time.boxed(), inputs.boxed(), outputs.boxed()]).unwrap(),
+            chunk: record_batch,
+        }
+    }
+
+    trait ToBytes {
+        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError>;
+    }
+
+    // Implement ToBytes trait for SchemaChunk<Arc<Schema>>
+    impl ToBytes for SchemaChunk<std::sync::Arc<Schema>> {
+        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
+            let mut buf = Vec::new();
+            let options = arrow_ipc::writer::IpcWriteOptions::default();
+
+            let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
+                &mut buf,
+                &self.schema,
+                options,
+            )?;
+
+            writer.write(&self.chunk)?;
+            writer.finish()?;
+
+            Ok(buf)
         }
     }
 
@@ -1289,7 +1359,7 @@ mod tests {
             .await;
 
         assert_eq!(
-            "RequestTooLong(\"1035\", MaxRequestSize(Some(5)))",
+            "RequestTooLong(\"1266\", MaxRequestSize(Some(5)))",
             format!("{:?}", response.err().unwrap())
         );
     }
@@ -1381,7 +1451,7 @@ mod tests {
         })
         .await?;
 
-        let queue = MultiChunk::from(inferences_large());
+        let queue = schema_chunk_to_multi_chunk(inferences_large());
 
         let topic = "replicate";
         let partition = "a";
@@ -1393,7 +1463,7 @@ mod tests {
             panic!("unexpected result {result:?}")
         };
 
-        assert_eq!(size, "2635");
+        assert_eq!(size, "2978");
         assert_eq!(request_size, MaxRequestSize(Some(1000)));
 
         Ok(())
@@ -1404,61 +1474,59 @@ mod tests {
         use super::*;
 
         // TODO: This is copied from the server, refactor to share amongst other tests.
-        use plateau_server::chunk::Schema;
 
-        fn inferences_schema_a() -> SchemaChunk<Schema> {
-            use crate::arrow2::array::ListArray;
-            use crate::arrow2::array::StructArray;
-            use crate::arrow2::datatypes::DataType;
-            use plateau_transport::arrow2::array::Array;
-
-            let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-            let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-            let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-            let inner = PrimitiveArray::<f64>::from_values(vec![
-                2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
-            ]);
-
-            let offsets = vec![0, 2, 2, 4, 6, 8];
-            let tensor = ListArray::new(
-                DataType::List(Box::new(Field::new(
-                    "inner",
-                    inner.data_type().clone(),
-                    false,
-                ))),
-                offsets.try_into().unwrap(),
-                inner.boxed(),
-                None,
-            );
-
-            let outputs = StructArray::new(
-                DataType::Struct(vec![
-                    Field::new("mul", mul.data_type().clone(), false),
-                    Field::new("tensor", tensor.data_type().clone(), false),
-                ]),
-                vec![mul.clone().boxed(), tensor.clone().boxed()],
-                None,
-            );
-
-            let schema = Schema {
-                fields: vec![
-                    Field::new("time", time.data_type().clone(), false),
-                    Field::new("tensor", tensor.data_type().clone(), false),
-                    Field::new("inputs", inputs.data_type().clone(), false),
-                    Field::new("outputs", outputs.data_type().clone(), false),
-                ],
-                metadata: Metadata::default(),
+        fn inferences_schema_a() -> SchemaChunk<std::sync::Arc<Schema>> {
+            use plateau_transport_arrow_rs::arrow_array::types::Float64Type;
+            use plateau_transport_arrow_rs::arrow_array::RecordBatch;
+            use plateau_transport_arrow_rs::arrow_array::{
+                Float32Array, Float64Array, Int64Array, ListArray, StructArray,
             };
+            use plateau_transport_arrow_rs::arrow_schema::{DataType, Field, Schema};
+            use std::sync::Arc;
+
+            let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
+            let inputs = Arc::new(Float32Array::from_iter_values(vec![
+                1.0, 2.0, 3.0, 4.0, 5.0,
+            ]));
+            let mul = Arc::new(Float32Array::from_iter_values(vec![
+                2.0, 2.0, 2.0, 2.0, 2.0,
+            ]));
+
+            // Create a nested array for tensor
+            let tensor = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
+                Some(&[2.0, 2.0][..]),
+                Some(&[][..]),
+                Some(&[4.0, 4.0][..]),
+                Some(&[6.0, 6.0][..]),
+                Some(&[8.0, 8.0][..]),
+            ]));
+
+            // Create a struct for outputs
+            let struct_fields = vec![
+                Field::new("mul", DataType::Float32, false),
+                Field::new("tensor", tensor.data_type().clone(), false),
+            ];
+            let outputs = Arc::new(StructArray::from(vec![
+                (Field::new("mul", DataType::Float32, false), mul),
+                (
+                    Field::new("tensor", tensor.data_type().clone(), false),
+                    tensor.clone(),
+                ),
+            ]));
+
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("time", DataType::Int64, false),
+                Field::new("tensor", tensor.data_type().clone(), false),
+                Field::new("inputs", DataType::Float32, false),
+                Field::new("outputs", DataType::Struct(struct_fields), false),
+            ]));
+
+            let record_batch =
+                RecordBatch::try_new(schema.clone(), vec![time, tensor, inputs, outputs]).unwrap();
 
             SchemaChunk {
                 schema,
-                chunk: Chunk::try_new(vec![
-                    time.boxed(),
-                    tensor.boxed(),
-                    inputs.boxed(),
-                    outputs.boxed(),
-                ])
-                .unwrap(),
+                chunk: record_batch,
             }
         }
 
