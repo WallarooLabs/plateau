@@ -774,6 +774,100 @@ pub mod test {
     }
 
     #[tokio::test]
+    async fn page_size_discovery() -> Result<()> {
+        let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
+        let (target_url, client_target, _target) = setup_with_config(PlateauConfig {
+            http: http::Config {
+                // Set higher limit to ensure our test data fits
+                max_append_bytes: 5000,
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await?;
+
+        let data: Vec<_> = (0..10).map(|_| inferences_large()).collect();
+
+        let topic = "replicate";
+        let partition = "a";
+
+        let source_id = PartitionId::new(topic, partition);
+        let target_id = PartitionId::new(topic, "b");
+
+        client_source
+            .append_records(topic, partition, &Default::default(), data.clone())
+            .await?;
+
+        let hosts = vec![
+            ReplicateHost {
+                id: "edge".to_string(),
+                url: source_url.clone(),
+            },
+            ReplicateHost {
+                id: "mothership".to_string(),
+                url: target_url.clone(),
+            },
+        ];
+
+        let partitions = vec![ReplicatePartition {
+            source: HostPartition {
+                host_id: "edge".to_string(),
+                partition_id: source_id.clone(),
+            },
+            target: HostPartition {
+                host_id: "mothership".to_string(),
+                partition_id: target_id.clone(),
+            },
+            page_size: Some(15),
+        }];
+
+        let replicate = Replicate {
+            hosts,
+            topics: Default::default(),
+            partitions,
+            config: Default::default(),
+        };
+
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+        replicator.pump().await?;
+
+        assert_eq!(
+            client_target
+                .get_partitions(target_id.topic())
+                .await?
+                .partitions
+                .get(target_id.partition())
+                .cloned(),
+            Some(Span { start: 0, end: 50 })
+        );
+
+        // now let's simulate some more writes
+        client_source
+            .append_records(topic, partition, &Default::default(), data[0..6].to_vec())
+            .await?;
+
+        // and a brand new replicator run
+        let mut replicator = ReplicationWorker::from_replicate(replicate.clone()).await?;
+
+        replicator.pump().await?;
+
+        assert_eq!(
+            client_target
+                .get_partitions(target_id.topic())
+                .await?
+                .partitions
+                .get(target_id.partition())
+                .cloned(),
+            Some(Span {
+                start: 0,
+                end: 50 + 30
+            })
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_topic_replication() -> Result<()> {
         let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
         let (target_url, client_target, _target) = setup_with_config(Default::default()).await?;
