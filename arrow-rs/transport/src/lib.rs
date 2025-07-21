@@ -476,7 +476,7 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
             let batches = vec![self.chunk.clone(), other.chunk];
 
             // Use concat_batches to combine the record batches
-            match concat_batches(&self.chunk.schema(), &batches) {
+            match concat_batches(self.chunk.schema_ref(), &batches) {
                 Ok(new_batch) => {
                     self.chunk = new_batch;
                     Ok(())
