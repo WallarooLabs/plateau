@@ -583,13 +583,7 @@ impl SchemaChunk<SchemaRef> {
     /// Serialize this [SchemaChunk] into Arrow IPC bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
         let mut output = Vec::new();
-        let options = arrow_ipc::writer::IpcWriteOptions::default();
-
-        let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
-            &mut output,
-            self.schema.as_ref(),
-            options,
-        )?;
+        let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut output, self.schema.as_ref())?;
 
         writer.write(&self.chunk)?;
         writer.finish()?;
