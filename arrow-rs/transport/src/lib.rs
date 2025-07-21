@@ -454,8 +454,7 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
         if self.chunk.num_rows() > 0 {
             // build a simple descending index for take operations
             let length = self.chunk.num_rows();
-            let indices: Vec<u64> = (0..length as u64).rev().collect();
-            let indices_array = Arc::new(UInt64Array::from_iter_values(indices));
+            let indices_array = Arc::new(UInt64Array::from_iter_values((0..length as u64).rev()));
 
             // Create a new RecordBatch with reversed data
             let mut columns = Vec::with_capacity(self.chunk.num_columns());
