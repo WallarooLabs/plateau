@@ -597,17 +597,10 @@ impl SchemaChunk<SchemaRef> {
         let reader = arrow_ipc::reader::FileReader::try_new(cursor, None)?;
         let schema = reader.schema();
 
-        if let Some(batch) = reader.into_iter().next() {
-            let batch = batch?;
-            Ok(Self {
-                chunk: batch,
-                schema,
-            })
-        } else {
-            Err(ArrowError::ParseError(
-                "Empty file, no record batches found".to_string(),
-            ))
-        }
+        reader
+            .next()
+            .ok_or_else(|| ArrowError::ParseError("Empty file, no record batches found".to_string()))?
+            .map(|chunk| Self { chunk, schema })
     }
 
     /// Convert a [StructArray] into a [SchemaChunk]
