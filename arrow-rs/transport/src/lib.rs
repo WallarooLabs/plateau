@@ -689,10 +689,7 @@ impl SchemaChunk<SchemaRef> {
             let columns = s.columns().to_vec();
 
             // Create a schema with the original metadata
-            let mut metadata = HashMap::new();
-            for (key, value) in self.schema.metadata() {
-                metadata.insert(key.to_string(), value.to_string());
-            }
+            let metadata = self.schema.metadata().clone();
             let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
 
             let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
