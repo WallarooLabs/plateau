@@ -657,21 +657,15 @@ impl SchemaChunk<SchemaRef> {
                 |s| path.split(s.as_str()).collect::<Vec<_>>(),
             );
 
-            let arr_result = self.get_array(split);
-
-            match arr_result {
-                Ok(mut arr) => {
-                    if let Some(s) = focus.dataset_separator.as_ref() {
-                        gather_flat_arrays(&mut fields, &mut arrays, &path, arr, s, &exclude);
-                    } else {
-                        // Apply size check if needed
-                        focus.size_check_array(&mut arr);
-                        let data_type = arr.data_type().clone();
-                        fields.push(Field::new(path, data_type, arr.nulls().is_some()));
-                        arrays.push(arr);
-                    }
-                }
-                Err(e) => return Err(e),
+            let mut arr = self.get_array(split)?;
+            if let Some(s) = focus.dataset_separator.as_ref() {
+                gather_flat_arrays(&mut fields, &mut arrays, &path, arr, s, &exclude);
+            } else {
+                // Apply size check if needed
+                focus.size_check_array(&mut arr);
+                let data_type = arr.data_type().clone();
+                fields.push(Field::new(path, data_type, arr.nulls().is_some()));
+                arrays.push(arr);
             }
         }
 
