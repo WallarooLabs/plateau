@@ -705,13 +705,9 @@ impl SchemaChunk<SchemaRef> {
         }
 
         // Create a schema from the fields, preserving the original metadata
-        let mut metadata = HashMap::new();
-        for (key, value) in self.schema.metadata() {
-            metadata.insert(key.to_string(), value.to_string());
-        }
         let schema = Arc::new(ArrowSchema::new_with_metadata(
             Fields::from(fields),
-            metadata,
+            self.schema.metadata.clone(),
         ));
 
         // Create a record batch from the arrays
@@ -747,11 +743,10 @@ impl SchemaChunk<SchemaRef> {
                 let columns = arr.columns().to_vec();
 
                 // Create a new schema with the original metadata
-                let mut metadata = HashMap::new();
-                for (key, value) in self.schema.metadata() {
-                    metadata.insert(key.to_string(), value.to_string());
-                }
-                let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
+                let schema = Arc::new(ArrowSchema::new_with_metadata(
+                    fields,
+                    self.schema.metadata.clone(),
+                ));
 
                 // SAFETY: arr is a valid struct array, so it has at least one
                 // column and all of its columns have the same length
@@ -771,7 +766,7 @@ impl SchemaChunk<SchemaRef> {
     /// List keys for all nested arrow non-struct arrays within this [SchemaChunk].
     pub fn arrays(&self) -> Vec<Vec<String>> {
         let mut keys = vec![];
-        for field in self.schema.fields().iter() {
+        for field in &self.schema.fields {
             collect_keys(&mut keys, field, false);
         }
         keys
