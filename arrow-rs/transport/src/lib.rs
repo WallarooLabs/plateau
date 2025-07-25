@@ -594,12 +594,14 @@ impl SchemaChunk<SchemaRef> {
     /// Deserialize a [SchemaChunk] from Arrow IPC bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ArrowError> {
         let cursor = Cursor::new(bytes);
-        let reader = arrow_ipc::reader::FileReader::try_new(cursor, None)?;
+        let mut reader = arrow_ipc::reader::FileReader::try_new(cursor, None)?;
         let schema = reader.schema();
 
         reader
             .next()
-            .ok_or_else(|| ArrowError::ParseError("Empty file, no record batches found".to_string()))?
+            .ok_or_else(|| {
+                ArrowError::ParseError("Empty file, no record batches found".to_string())
+            })?
             .map(|chunk| Self { chunk, schema })
     }
 
