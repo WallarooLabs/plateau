@@ -14,11 +14,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   REGISTRY_IMAGE: ghcr.io/wallaroolabs/plateau
-  RUST_VERSION: 1.80.0
+  RUST_VERSION: 1.84.1
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: "8x32g"
     steps:
     - uses: actions/checkout@v4
     - name: Announce Rust

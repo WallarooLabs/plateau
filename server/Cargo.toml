@@ -16,9 +16,8 @@ bytesize = { version = "1.1.0", features = ["serde"] }
 chrono = "0.4"
 config = "0.14"
 futures = "0.3"
-metrics = "0.22"
-metrics-exporter-prometheus = "0.13"
-thiserror = "1"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
 humantime-serde = "1"
@@ -40,16 +39,14 @@ systemstat = "0.2"
 utoipa = { version = "4", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
+thiserror.workspace = true
+
 plateau-client = { workspace = true, features = ["replicate"] }
 plateau-transport.workspace = true
 
 
 [dev-dependencies]
 itertools = "0.13"
-reqwest = { version = "0.11", default-features = false, features = [
-  "json",
-  "rustls-tls",
-] }
 tempfile = "3"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 uuid = { version = "1.10", features = ["v4"] }
@@ -57,6 +54,8 @@ uuid = { version = "1.10", features = ["v4"] }
 sample-test = "0.2.1"
 sample-std = "0.2.1"
 sample-arrow2 = "0.17.2"
+
+reqwest.workspace = true
 
 plateau-client.workspace = true
 plateau-test.workspace = true
