@@ -450,6 +450,9 @@ pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone + PartialEq> {
 }
 
 impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
+    /// Reverse all arrays in this `SchemaChunk`.
+    ///
+    /// Panics if indices cannot be converted to u64 / usize.
     pub fn reverse_inner(&mut self) {
         if self.chunk.num_rows() > 0 {
             // build a simple descending index for take operations
@@ -460,11 +463,14 @@ impl<S: Borrow<ArrowSchema> + Clone + PartialEq> SchemaChunk<S> {
             let mut columns = Vec::with_capacity(self.chunk.num_columns());
             for column in self.chunk.columns() {
                 let options = arrow_select::take::TakeOptions::default();
+                // SAFETY: indices should all be valid, but will fail if there are casting issues
                 let array = take(column.as_ref(), indices_array.as_ref(), Some(options)).unwrap();
                 columns.push(array);
             }
 
             // Create new RecordBatch with reversed data
+            // SAFETY: self.chunk was already a valid RecordBatch. Lengths of
+            // inner arrays do not change.
             self.chunk = RecordBatch::try_new(self.chunk.schema(), columns).unwrap();
         }
     }
@@ -606,12 +612,16 @@ impl SchemaChunk<SchemaRef> {
     }
 
     /// Convert a [StructArray] into a [SchemaChunk]
+    ///
+    /// NOTE: this ignores top-level (whole-struct) nulls
     pub fn from_struct(s: &StructArray) -> Self {
         // Create a RecordBatch from the StructArray
         let fields: Fields = s.fields().clone();
         let arrays = s.columns().to_vec();
 
         let arrow_schema = Arc::new(ArrowSchema::new(fields));
+        // SAFETY: s is a valid StructArray, so its inner arrays all have the
+        // same length (and it has at least one array), see StructArray::try_new
         let batch = RecordBatch::try_new(arrow_schema.clone(), arrays).unwrap();
 
         Self {
@@ -671,22 +681,27 @@ impl SchemaChunk<SchemaRef> {
             }
         }
 
-        // Handle the case where we extracted a single struct array
-        if arrays.len() == 1 && arrays[0].as_any().downcast_ref::<StructArray>().is_some() {
-            let s = arrays[0].as_any().downcast_ref::<StructArray>().unwrap();
-            let fields = s.fields().clone();
-            let columns = s.columns().to_vec();
+        if arrays.is_empty() {
+            return Err(PathError::Empty);
+        } else if arrays.len() == 1 {
+            // Handle the case where we extracted a single struct array
+            if let Some(s) = arrays[0].as_any().downcast_ref::<StructArray>() {
+                let fields = s.fields().clone();
+                let columns = s.columns().to_vec();
 
-            // Create a schema with the original metadata
-            let metadata = self.schema.metadata().clone();
-            let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
+                // Create a schema with the original metadata
+                let metadata = self.schema.metadata().clone();
+                let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
 
-            let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+                // SAFETY: s is a valid StructArray, so its inner arrays all have the
+                // same length (and it has at least one array), see StructArray::try_new
+                let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
 
-            return Ok(Self {
-                chunk: batch,
-                schema,
-            });
+                return Ok(Self {
+                    chunk: batch,
+                    schema,
+                });
+            }
         }
 
         // Create a schema from the fields, preserving the original metadata
@@ -700,6 +715,8 @@ impl SchemaChunk<SchemaRef> {
         ));
 
         // Create a record batch from the arrays
+        // SAFETY: see above is_empty() check. all arrays were pulled from the same chunk,
+        // and should therefore have the same size.
         let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
 
         Ok(Self {
@@ -736,6 +753,8 @@ impl SchemaChunk<SchemaRef> {
                 }
                 let schema = Arc::new(ArrowSchema::new_with_metadata(fields, metadata));
 
+                // SAFETY: arr is a valid struct array, so it has at least one
+                // column and all of its columns have the same length
                 let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
 
                 Ok(Self {
