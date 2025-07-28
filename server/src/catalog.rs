@@ -376,8 +376,6 @@ impl Catalog {
 
 #[cfg(test)]
 mod test {
-
-
     use super::*;
     use crate::chunk::Record;
     use crate::segment::test::build_records;
