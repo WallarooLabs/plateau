@@ -195,7 +195,7 @@ impl Segment {
                 return if parquet {
                     trace!("{:?} in parquet format", self.path);
                     let segment = parquet::Segment::new(self.path.clone())?;
-                    Ok(ReadFormat::Parquet(segment.read(cache)?))
+                    Ok(ReadFormat::Parquet(Box::new(segment.read(cache)?)))
                 } else if arrow {
                     trace!("{:?} in arrow format", self.path);
                     let segment = arrow::Segment::new(self.path.clone())?;
@@ -244,7 +244,7 @@ impl Segment {
 
 enum ReadFormat {
     Arrow(arrow::Reader),
-    Parquet(parquet::Reader),
+    Parquet(Box<parquet::Reader>),
     OnlyCache(Schema, std::iter::Once<Result<SegmentChunk>>),
 }
 
