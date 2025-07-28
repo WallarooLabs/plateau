@@ -87,7 +87,7 @@ pub fn basic_load_gen(
 ) -> Vec<WorkerTask> {
     let mut tasks = vec![];
     for topic in 0..topics {
-        let name = format!("pipeline-{}", topic);
+        let name = format!("pipeline-{topic}");
 
         tasks.extend([
             Box::new(HealthCheckJob {

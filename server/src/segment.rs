@@ -655,7 +655,7 @@ pub mod test {
 
             for count in &all_counts[0..ix] {
                 let new_parts: Vec<_> = std::iter::once(chunk.clone())
-                    .chain(std::iter::repeat(a.chunk.clone()).take(*count))
+                    .chain(std::iter::repeat_n(a.chunk.clone(), *count))
                     .collect();
                 chunk = crate::chunk::concatenate(&new_parts)?;
                 w.update_cache(chunk.clone())?;
@@ -687,7 +687,7 @@ pub mod test {
 
             for count in &all_counts[0..ix] {
                 let new_parts: Vec<_> = std::iter::once(chunk.clone())
-                    .chain(std::iter::repeat(a.chunk.clone()).take(*count))
+                    .chain(std::iter::repeat_n(a.chunk.clone(), *count))
                     .collect();
                 chunk = crate::chunk::concatenate(&new_parts)?;
                 w.update_cache(chunk.clone())?;

@@ -852,8 +852,7 @@ pub mod test {
             assert_eq!(
                 part.get_record_by_index(RecordIndex(ix)).await,
                 Some(record.clone()),
-                "mismatch at {}",
-                ix
+                "mismatch at {ix}"
             );
         }
         assert_eq!(
@@ -973,7 +972,7 @@ pub mod test {
         let records: Vec<_> = (0..(3 * 10))
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
-                message: format!("record-{}", ix).into_bytes(),
+                message: format!("record-{ix}").into_bytes(),
             })
             .collect();
 
@@ -993,8 +992,7 @@ pub mod test {
                 assert_eq!(
                     part.get_record_by_index(RecordIndex(ix)).await,
                     Some(record.clone()),
-                    "record {}",
-                    ix
+                    "record {ix}"
                 );
             }
             assert_eq!(
@@ -1087,7 +1085,7 @@ pub mod test {
         let records: Vec<_> = (0..(3 * 10))
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
-                message: format!("record-{}", ix).into_bytes(),
+                message: format!("record-{ix}").into_bytes(),
             })
             .collect();
 
@@ -1248,7 +1246,7 @@ pub mod test {
         let records: Vec<_> = (0..30)
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
-                message: format!("record-{}", ix).into_bytes(),
+                message: format!("record-{ix}").into_bytes(),
             })
             .collect();
 
@@ -1370,7 +1368,7 @@ pub mod test {
         let mut records: Vec<_> = (0..(3 * 10))
             .map(|ix| Record {
                 time: Utc.timestamp_opt(0, 0).unwrap(),
-                message: format!("record-{}", ix).into_bytes(),
+                message: format!("record-{ix}").into_bytes(),
             })
             .collect();
 
@@ -1413,8 +1411,7 @@ pub mod test {
             assert_eq!(
                 part.get_record_by_index(RecordIndex(ix)).await,
                 Some(record.clone()),
-                "record {}",
-                ix
+                "record {ix}"
             );
         }
         assert_eq!(
@@ -1436,8 +1433,7 @@ pub mod test {
             assert_eq!(
                 part.get_record_by_index(RecordIndex(ix)).await,
                 Some(record.clone()),
-                "record {}",
-                ix
+                "record {ix}"
             );
         }
         assert_eq!(

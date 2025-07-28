@@ -237,11 +237,11 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
                     .get_records(topic_name, partition_name, &params)
                     .await?;
 
-                print!("\n{}", response);
+                print!("\n{response}");
 
                 let df = response.unnest(["out", "in", "metadata"])?;
 
-                print!("\n{:?}", df);
+                print!("\n{df:?}");
             }
             #[cfg(feature = "polars")]
             OutputFormat::Polars { path } => {
@@ -282,7 +282,7 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
                     &Some(HashMap::from([(partition_name, position)])),
                 )
                 .await?;
-            print!("{}", response);
+            print!("{response}");
         }
         #[cfg(feature = "polars")]
         Command::IterateUnlimited { topic_name, params } => {
@@ -290,7 +290,7 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
                 client.iterate_topic_unlimited(&topic_name, &params).await?;
 
             print!("{:#?}", response.schema());
-            print!("{}", response);
+            print!("{response}");
         }
         Command::Insert {
             topic_name,

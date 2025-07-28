@@ -59,7 +59,7 @@ impl CliDisplay for Records {
             }
         }
         for record in &self.records {
-            writeln!(f, "{}", record)?;
+            writeln!(f, "{record}")?;
         }
         Ok(())
     }
@@ -78,7 +78,7 @@ fn write_iterator(
         } else {
             write!(f, ", ")?;
         }
-        write!(f, "\"{}\": {}", k, v)?;
+        write!(f, "\"{k}\": {v}")?;
     }
     write!(f, " }}")
 }
@@ -86,7 +86,7 @@ fn write_iterator(
 impl CliDisplay for TopicIterationReply {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for record in &self.records {
-            writeln!(f, "{}", record)?;
+            writeln!(f, "{record}")?;
         }
         match self.status.status {
             RecordStatus::All => {
@@ -121,7 +121,7 @@ impl CliDisplay for SchemaChunk<ArrowSchema> {
         for field in &self.schema.fields {
             write!(f, "\x1b[1m{}:\x1b[0m ", field.name)?;
             match self.get_array([field.name.as_ref()]) {
-                Ok(arr) => writeln!(f, "{:?}", arr),
+                Ok(arr) => writeln!(f, "{arr:?}"),
                 Err(_) => writeln!(f, "unknown type (not an array)"),
             }?;
         }
