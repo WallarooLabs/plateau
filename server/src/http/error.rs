@@ -25,9 +25,9 @@ impl axum::response::IntoResponse for ErrorReply {
     fn into_response(self) -> axum::response::Response {
         let (code, message) = match self {
             Self::EmptyBody => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
-            Self::Arrow(e) => (StatusCode::BAD_REQUEST, format!("arrow error: {}", e)),
-            Self::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {}", e)),
-            Self::Path(e) => (StatusCode::BAD_REQUEST, format!("invalid path: {}", e)),
+            Self::Arrow(e) => (StatusCode::BAD_REQUEST, format!("arrow error: {e}")),
+            Self::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {e}")),
+            Self::Path(e) => (StatusCode::BAD_REQUEST, format!("invalid path: {e}")),
             Self::InvalidQuery => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
             Self::InvalidSchema => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
             Self::NullTypes => (
@@ -41,11 +41,11 @@ impl axum::response::IntoResponse for ErrorReply {
             ),
             Self::CannotAccept(content) => (
                 StatusCode::BAD_REQUEST,
-                format!("cannot parse Content-Type '{}'", content),
+                format!("cannot parse Content-Type '{content}'"),
             ),
             Self::CannotEmit(content) => (
                 StatusCode::BAD_REQUEST,
-                format!("cannot emit requested '{}' Accept format", content),
+                format!("cannot emit requested '{content}' Accept format"),
             ),
             Self::NoHeartbeat => (
                 StatusCode::INTERNAL_SERVER_ERROR,

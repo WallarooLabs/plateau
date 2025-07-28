@@ -624,7 +624,7 @@ mod test {
             vec![&chunk_a, &chunk_b, &chunk_a, &chunk_b, &chunk_b],
             vec![&chunk_a, &chunk_a, &chunk_a, &chunk_a, &chunk_b],
         ];
-        let names: Vec<_> = (1..4).map(|ix| format!("partition-{}", ix)).collect();
+        let names: Vec<_> = (1..4).map(|ix| format!("partition-{ix}")).collect();
 
         fn to_iter(names: &[String], v: [usize; 3]) -> HashMap<String, usize> {
             names.iter().cloned().zip(v).collect()
@@ -686,7 +686,7 @@ mod test {
             vec![&chunk_a, &chunk_b, &chunk_a, &chunk_b, &chunk_b],
             vec![&chunk_a, &chunk_a, &chunk_a, &chunk_a, &chunk_b],
         ];
-        let names: Vec<_> = (1..4).map(|ix| format!("p{}", ix)).collect();
+        let names: Vec<_> = (1..4).map(|ix| format!("p{ix}")).collect();
 
         for (name, chunks) in names.iter().zip(chunk_allocation.into_iter()) {
             for chunk in chunks {
@@ -744,7 +744,7 @@ mod test {
     async fn test_filter_some_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
         let records_per_part = 103;
-        let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{}", ix))));
+        let records = timed_records((0..records_per_part).map(|ix| (ix, format!("record-{ix}"))));
 
         // Create 3 partitions
         for record in &records {
@@ -865,11 +865,11 @@ mod test {
     #[tokio::test]
     async fn test_filter_all_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
-        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{ix}"))));
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -919,11 +919,11 @@ mod test {
     #[tokio::test]
     async fn test_filter_regex_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
-        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{ix}"))));
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -931,7 +931,7 @@ mod test {
         }
         // Create an extra partition that won't be captured by the regex.
         let uncap_records =
-            timed_records((0..103).map(|ix| (ix, format!("uncaptured-record-{}", ix))));
+            timed_records((0..103).map(|ix| (ix, format!("uncaptured-record-{ix}"))));
         topic
             .extend_records("uncaptured-partition", &uncap_records)
             .await?;
@@ -980,11 +980,11 @@ mod test {
     #[tokio::test]
     async fn test_full_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
-        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{ix}"))));
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -1021,11 +1021,11 @@ mod test {
     #[tokio::test]
     async fn test_full_reverse_iteration() -> Result<()> {
         let (_tmpdir, topic) = scratch().await;
-        let records = timed_records((0..103).map(|ix| (ix, format!("record-{}", ix))));
+        let records = timed_records((0..103).map(|ix| (ix, format!("record-{ix}"))));
 
         let parts = 7;
         assert!(records.len() % parts != 0);
-        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{}", ix)).collect();
+        let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
                 .extend_records(&names[ix % parts], &[record.clone()])
@@ -1072,7 +1072,7 @@ mod test {
         // p3: r3, r7, r11, r15, r19
         let n = n_records / n_partitions;
         let data: Vec<_> = (0..ITER_RECORDS)
-            .map(|i| (format!("r{}", i), format!("p{}", i / n % n_partitions)))
+            .map(|i| (format!("r{i}"), format!("p{}", i / n % n_partitions)))
             .collect();
 
         for (record, part) in data {
