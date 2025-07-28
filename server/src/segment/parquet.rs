@@ -262,6 +262,7 @@ fn recover(
             segment.metadata()?.len()
         );
 
+        #[allow(clippy::unbuffered_bytes)]
         let rest: Vec<u8> = checkpoint.bytes().collect::<Result<_, _>>()?;
 
         segment.set_len(offset)?;
