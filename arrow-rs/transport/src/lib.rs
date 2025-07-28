@@ -1044,24 +1044,21 @@ mod tests {
 
     #[test]
     fn test_null_detection() {
-        let mut fields = Vec::new();
-        fields.push(Field::new(
+        let fields = vec![Field::new(
             "column",
             DataType::List(Arc::new(Field::new("inner_field", DataType::Null, false))),
             true,
-        ));
+        )];
         let schema = ArrowSchema::new(Fields::from(fields));
 
         assert!(contains_null_type(&schema));
 
-        let mut fields = Vec::new();
-        fields.push(Field::new("column", DataType::Float64, false));
+        let fields = vec![Field::new("column", DataType::Float64, false)];
         let schema = ArrowSchema::new(Fields::from(fields));
 
         assert!(!contains_null_type(&schema));
 
-        let mut fields = Vec::new();
-        fields.push(Field::new("column", DataType::Float64, true));
+        let fields = vec![Field::new("column", DataType::Float64, true)];
         let schema = ArrowSchema::new(Fields::from(fields));
 
         assert!(!contains_null_type(&schema));
