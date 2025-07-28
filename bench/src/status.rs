@@ -87,7 +87,7 @@ impl Task for HealthCheck {
         }
 
         if self.errors == 0 {
-            (1, format!("[ok]    ✓ {:?}", result))
+            (1, format!("[ok]    ✓ {result:?}"))
         } else {
             (0, format!("[ok]    ✗ {} {:?}", self.errors, result))
         }

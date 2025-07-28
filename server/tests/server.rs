@@ -151,6 +151,7 @@ pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
     }
 }
 
+#[allow(clippy::manual_repeat_n)]
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {
     let time = PrimitiveArray::<i64>::from_values(std::iter::repeat(0).take(count));
     let records =

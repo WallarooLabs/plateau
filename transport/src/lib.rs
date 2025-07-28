@@ -116,7 +116,7 @@ pub fn estimate_array_size(arr: &dyn Array) -> Result<usize, ChunkError> {
                     .map(|inner| estimate_array_size(inner.as_ref()))
                     .sum()
             }),
-        t => Err(ChunkError::Unsupported(format!("{:?}", t))),
+        t => Err(ChunkError::Unsupported(format!("{t:?}"))),
     }
 }
 

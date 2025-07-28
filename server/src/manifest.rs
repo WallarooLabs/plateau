@@ -903,8 +903,7 @@ mod test {
                     .collect::<Vec<_>>()
                     .await,
                 segments.into_iter().map(SegmentIndex).collect::<Vec<_>>(),
-                "query {:?}",
-                times
+                "query {times:?}"
             );
         }
 

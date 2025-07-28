@@ -376,8 +376,6 @@ impl Catalog {
 
 #[cfg(test)]
 mod test {
-    use std::iter;
-
     use super::*;
     use crate::chunk::Record;
     use crate::segment::test::build_records;
@@ -518,7 +516,7 @@ mod test {
 
         let records = build_records((0..10).map(|_| (100, data.clone())));
         for ix in 0..5 {
-            let name = format!("topic-{}", ix);
+            let name = format!("topic-{ix}");
             let topic = catalog.get_topic(&name).await;
             let partition = topic.get_partition("default").await;
             partition.extend_records(&records).await?;
@@ -604,8 +602,7 @@ mod test {
             .with_nanosecond(0)
             .unwrap();
 
-        let records: Vec<_> = iter::repeat(large)
-            .take(6)
+        let records: Vec<_> = std::iter::repeat_n(large, 6)
             .map(|message| Record {
                 time,
                 message: message.bytes().collect(),

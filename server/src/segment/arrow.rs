@@ -418,7 +418,7 @@ pub mod test {
 
         let large: String = (0..100 * 1024).map(|_| "x").collect();
         let records: Vec<_> =
-            build_records((0..20).map(|ix| (ix, format!("message-{}-{}", ix, large))));
+            build_records((0..20).map(|ix| (ix, format!("message-{ix}-{large}"))));
 
         let mut w = Writer::create_path(&path, &legacy_schema())?;
         w.write_chunk(SchemaChunk::try_from(LegacyRecords(records[0..10].to_vec()))?.chunk)?;
