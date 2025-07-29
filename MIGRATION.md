@@ -61,10 +61,12 @@ Based on the repository structure, the migration order is determined by dependen
   
 ### Phase 2: Client Libraries
 
-- [ ] **client-arrow-rs**
+- [x] **client-arrow-rs**
   - [x] Create copy of client
-  - [ ] Update dependencies to use transport-arrow-rs
-  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+  - [x] Update dependencies to use transport-arrow-rs
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
+  - [x] Update `Arc<Schema>` to `SchemaRef` for better compatibility with arrow-rs
+  - [x] Qualify all `plateau_transport_arrow_rs` imports as `transport` for easier copying
 
 ### Phase 3: Test Infrastructure
 
@@ -223,6 +225,21 @@ When converting JSON serialization code, pay special attention to:
 #### API Structure Differences
 - Arrow2's functions like `take` are found directly in the compute module, while arrow-rs has them in specialized modules like arrow_select
 - Arrow-rs has a more modular structure with different crates for different functionalities
+
+#### SchemaRef Instead of Arc<Schema>
+- In arrow-rs, it's recommended to use the `SchemaRef` type alias instead of `Arc<Schema>`
+- This makes the code more consistent with arrow-rs conventions and clearer when reading
+- The type alias `SchemaRef` is simply `Arc<Schema>`, but using it makes the intent clearer
+
+#### Transport Qualification for Easier Copying
+- Using a consistent qualifier (like `transport`) for imported types from `plateau_transport_arrow_rs` makes it easier to maintain and copy code
+- This approach also helps avoid name conflicts when types are imported from multiple sources
+- When migrating from one implementation to another, consistent import qualifications reduce the number of changes needed
+
+#### Data Serialization Size Differences
+- The serialization format used by arrow-rs may result in slightly larger binary representations compared to arrow2
+- When replicating tests that depend on specific byte sizes (like the page_size_discovery test), you may need to adjust size limits to accommodate these differences
+- Pay attention to tests that have specific size boundaries or limits, as they might need adjustment during migration
 
 ### References
 

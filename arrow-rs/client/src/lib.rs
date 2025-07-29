@@ -2,16 +2,17 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io;
-use std::{pin::Pin, str::FromStr, sync::Arc};
+use std::{pin::Pin, str::FromStr};
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
-use plateau_transport_arrow_rs::headers::ITERATION_STATUS_HEADER;
-use plateau_transport_arrow_rs::CONTENT_TYPE_JSON;
-use plateau_transport_arrow_rs::{
+use plateau_transport_arrow_rs as transport;
+use transport::headers::ITERATION_STATUS_HEADER;
+use transport::CONTENT_TYPE_JSON;
+use transport::{
     arrow_ipc,
-    arrow_schema::{ArrowError, Schema},
+    arrow_schema::{ArrowError, Schema, SchemaRef},
     Insert, InsertQuery, Inserted, MultiChunk, Partitions, RecordQuery, Records, SchemaChunk,
     TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
     CONTENT_TYPE_ARROW,
@@ -162,7 +163,7 @@ async fn process_request(r: RequestBuilder) -> Result<Response, Error> {
     if response.status() == 413 {
         let max = response
             .headers()
-            .get(plateau_transport_arrow_rs::headers::MAX_REQUEST_SIZE_HEADER)
+            .get(transport::headers::MAX_REQUEST_SIZE_HEADER)
             .and_then(|h| h.to_str().ok())
             .and_then(|s| usize::from_str(s).ok());
         return Err(Error::RequestTooLong(body_len, MaxRequestSize(max)));
@@ -439,7 +440,7 @@ impl Insertion for SchemaChunk<Schema> {
     }
 }
 
-impl Insertion for SchemaChunk<std::sync::Arc<Schema>> {
+impl Insertion for SchemaChunk<SchemaRef> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let mut buf = Vec::new();
         let options = arrow_ipc::writer::IpcWriteOptions::default();
@@ -480,7 +481,7 @@ impl Insertion for MultiChunk {
     }
 }
 
-impl Insertion for Vec<SchemaChunk<Arc<Schema>>> {
+impl Insertion for Vec<SchemaChunk<SchemaRef>> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let mut buf = Vec::new();
         let options = arrow_ipc::writer::IpcWriteOptions::default();
@@ -594,7 +595,8 @@ impl InsertionQueue for MultiChunk {
 }
 
 // Helper function to convert SchemaChunk to MultiChunk for tests
-fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<std::sync::Arc<Schema>>) -> MultiChunk {
+#[allow(dead_code)] // Used by tests
+fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<SchemaRef>) -> MultiChunk {
     let mut chunks = VecDeque::new();
     chunks.push_back(schema_chunk.chunk);
 
@@ -618,7 +620,7 @@ pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
 
 pub fn bytes_into_schemachunks(
     bytes: Bytes,
-) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
+) -> Result<Vec<SchemaChunk<SchemaRef>>, Error> {
     let multi = bytes_into_multichunk(bytes)?;
 
     let schemachunks = multi
@@ -749,14 +751,14 @@ impl Iterate<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Iterate<Vec<SchemaChunk<std::sync::Arc<Schema>>>> for Client {
+impl Iterate<Vec<SchemaChunk<SchemaRef>>> for Client {
     /// Iterate over a topic, returning records in [`SchemaChunk<Schema>`] format.
     async fn iterate_path<'a>(
         &self,
         path: impl AsRef<str> + Send,
         params: &TopicIterationQuery,
         position: impl Into<Option<&'a TopicIterator>> + Send,
-    ) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
+    ) -> Result<Vec<SchemaChunk<SchemaRef>>, Error> {
         let bytes = process_request(
             self.iteration_request(path, params, position)?
                 .header("accept", CONTENT_TYPE_ARROW),
@@ -961,7 +963,7 @@ impl Retrieve<Pin<Box<dyn ArrowStream>>> for Client {
 }
 
 #[async_trait]
-impl Retrieve<Vec<SchemaChunk<std::sync::Arc<Schema>>>> for Client {
+impl Retrieve<Vec<SchemaChunk<SchemaRef>>> for Client {
     /// Retrieve a set of records from a specifid topic and partition, returning results in
     /// [`SchemaChunk<Schema>`] format.
     async fn get_records(
@@ -969,7 +971,7 @@ impl Retrieve<Vec<SchemaChunk<std::sync::Arc<Schema>>>> for Client {
         topic_name: impl AsRef<str> + Send,
         partition_name: impl AsRef<str> + Send,
         params: &RecordQuery,
-    ) -> Result<Vec<SchemaChunk<std::sync::Arc<Schema>>>, Error> {
+    ) -> Result<Vec<SchemaChunk<SchemaRef>>, Error> {
         let bytes = process_request(
             self.retrieve_request(topic_name, partition_name, params)?
                 .header("accept", CONTENT_TYPE_ARROW),
@@ -1023,10 +1025,10 @@ mod tests {
 
     use super::*;
 
-    fn example_chunk() -> SchemaChunk<std::sync::Arc<Schema>> {
-        use plateau_transport_arrow_rs::arrow_array::RecordBatch;
-        use plateau_transport_arrow_rs::arrow_array::{Float32Array, Int64Array};
-        use plateau_transport_arrow_rs::arrow_schema::{DataType, Field, Schema};
+    fn example_chunk() -> SchemaChunk<SchemaRef> {
+        use transport::arrow_array::RecordBatch;
+        use transport::arrow_array::{Float32Array, Int64Array};
+        use transport::arrow_schema::{DataType, Field, Schema};
         use std::sync::Arc;
 
         let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
@@ -1052,12 +1054,13 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     trait ToBytes {
         fn to_bytes(&self) -> Result<Vec<u8>, ArrowError>;
     }
 
-    // Implement ToBytes trait for SchemaChunk<Arc<Schema>>
-    impl ToBytes for SchemaChunk<std::sync::Arc<Schema>> {
+    // Implement ToBytes trait for SchemaChunk<SchemaRef>
+    impl ToBytes for SchemaChunk<SchemaRef> {
         fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
             let mut buf = Vec::new();
             let options = arrow_ipc::writer::IpcWriteOptions::default();
@@ -1475,13 +1478,13 @@ mod tests {
 
         // TODO: This is copied from the server, refactor to share amongst other tests.
 
-        fn inferences_schema_a() -> SchemaChunk<std::sync::Arc<Schema>> {
-            use plateau_transport_arrow_rs::arrow_array::types::Float64Type;
-            use plateau_transport_arrow_rs::arrow_array::RecordBatch;
-            use plateau_transport_arrow_rs::arrow_array::{
+        fn inferences_schema_a() -> SchemaChunk<SchemaRef> {
+            use transport::arrow_array::types::Float64Type;
+            use transport::arrow_array::RecordBatch;
+            use transport::arrow_array::{
                 Float32Array, Float64Array, Int64Array, ListArray, StructArray,
             };
-            use plateau_transport_arrow_rs::arrow_schema::{DataType, Field, Schema};
+            use transport::arrow_schema::{DataType, Field, Schema};
             use std::sync::Arc;
 
             let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
