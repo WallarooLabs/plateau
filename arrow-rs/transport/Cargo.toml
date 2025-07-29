@@ -1,0 +1,41 @@
+[package]
+name = "plateau-transport-arrow-rs"
+
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+
+[dependencies]
+anyhow = "1"
+serde = "1"
+serde_with = "3.7"
+rweb = { version = "0.15", features = ["openapi"], optional = true }
+clap = { version = "4.5", features = ["derive"], optional = true }
+arrow = { version = "55.2.0", features = [
+  "ipc",
+  "csv",
+  "json",
+] }
+arrow-array = "55.2.0"
+arrow-schema = "55.2.0"
+arrow-select = "55.2.0"
+arrow-data = "55.2.0"
+arrow-buffer = "55.2.0"
+arrow-cast = "55.2.0"
+arrow-json = "55.2.0"
+arrow-ipc = "55.2.0"
+strum = { version = "0.26", features = ["derive"] }
+thiserror = "1"
+regex = "1.10"
+utoipa = { version = "4", features = ["axum_extras"] }
+
+
+[features]
+rweb = ["dep:rweb"]
+clap = ["dep:clap"]
+
+
+[lints]
+workspace = true
