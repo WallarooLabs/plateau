@@ -3008,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-client-arrow-rs"
-version = "0.5.1"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",

@@ -8,15 +8,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
 use plateau_transport_arrow_rs as transport;
-use transport::headers::ITERATION_STATUS_HEADER;
-use transport::CONTENT_TYPE_JSON;
-use transport::{
-    arrow_ipc,
-    arrow_schema::{ArrowError, Schema, SchemaRef},
-    Insert, InsertQuery, Inserted, MultiChunk, Partitions, RecordQuery, Records, SchemaChunk,
-    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
-    CONTENT_TYPE_ARROW,
-};
 pub use reqwest;
 use reqwest::Body;
 use reqwest::{
@@ -25,6 +16,17 @@ use reqwest::{
 };
 use thiserror::Error;
 use tracing::{trace, warn};
+use transport::headers::ITERATION_STATUS_HEADER;
+#[cfg(feature = "polars")]
+use transport::RecordStatus;
+use transport::CONTENT_TYPE_JSON;
+use transport::{
+    arrow_ipc,
+    arrow_schema::{ArrowError, Schema, SchemaRef},
+    Insert, InsertQuery, Inserted, MultiChunk, Partitions, RecordQuery, Records, SchemaChunk,
+    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
+    CONTENT_TYPE_ARROW,
+};
 
 #[cfg(feature = "health")]
 use tokio::time;
@@ -594,18 +596,6 @@ impl InsertionQueue for MultiChunk {
     }
 }
 
-// Helper function to convert SchemaChunk to MultiChunk for tests
-#[allow(dead_code)] // Used by tests
-fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<SchemaRef>) -> MultiChunk {
-    let mut chunks = VecDeque::new();
-    chunks.push_back(schema_chunk.chunk);
-
-    MultiChunk {
-        schema: schema_chunk.schema,
-        chunks,
-    }
-}
-
 pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
     let cursor = io::Cursor::new(bytes);
     let reader =
@@ -618,9 +608,7 @@ pub fn bytes_into_multichunk(bytes: Bytes) -> Result<MultiChunk, Error> {
     Ok(MultiChunk { schema, chunks })
 }
 
-pub fn bytes_into_schemachunks(
-    bytes: Bytes,
-) -> Result<Vec<SchemaChunk<SchemaRef>>, Error> {
+pub fn bytes_into_schemachunks(bytes: Bytes) -> Result<Vec<SchemaChunk<SchemaRef>>, Error> {
     let multi = bytes_into_multichunk(bytes)?;
 
     let schemachunks = multi
@@ -1026,10 +1014,10 @@ mod tests {
     use super::*;
 
     fn example_chunk() -> SchemaChunk<SchemaRef> {
+        use std::sync::Arc;
         use transport::arrow_array::RecordBatch;
         use transport::arrow_array::{Float32Array, Int64Array};
         use transport::arrow_schema::{DataType, Field, Schema};
-        use std::sync::Arc;
 
         let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
         let inputs = Arc::new(Float32Array::from_iter_values(vec![
@@ -1083,6 +1071,17 @@ mod tests {
             .url_str("/")
             .parse()
             .expect("failure to parse test server URL")
+    }
+
+    // Helper function to convert SchemaChunk to MultiChunk for tests
+    fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<SchemaRef>) -> MultiChunk {
+        let mut chunks = VecDeque::new();
+        chunks.push_back(schema_chunk.chunk);
+
+        MultiChunk {
+            schema: schema_chunk.schema,
+            chunks,
+        }
     }
 
     #[tokio::test]
@@ -1479,13 +1478,13 @@ mod tests {
         // TODO: This is copied from the server, refactor to share amongst other tests.
 
         fn inferences_schema_a() -> SchemaChunk<SchemaRef> {
+            use std::sync::Arc;
             use transport::arrow_array::types::Float64Type;
             use transport::arrow_array::RecordBatch;
             use transport::arrow_array::{
                 Float32Array, Float64Array, Int64Array, ListArray, StructArray,
             };
             use transport::arrow_schema::{DataType, Field, Schema};
-            use std::sync::Arc;
 
             let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
             let inputs = Arc::new(Float32Array::from_iter_values(vec![

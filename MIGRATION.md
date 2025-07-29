@@ -217,10 +217,10 @@ When converting JSON serialization code, pay special attention to:
 - In arrow-rs, metadata is preserved using `ArrowSchema::new_with_metadata()` rather than directly manipulating the metadata field
 - When propagating metadata between schema instances, we need to manually copy it via `.metadata()` iterators
 
-#### Test Compatibility
-- Arrow-rs handling of structs differs from arrow2, which can cause test failures even with semantically equivalent code
-- The order of fields in complex types can be different between the two libraries
-- Focus on preserving the functionality rather than exact field-by-field serialization formats
+#### Import Qualification
+- When migrating code, it's important to consistently qualify imports, especially when dealing with modules that might have the same name in different paths
+- In our case, we used `plateau_transport_arrow_rs as transport` to create a consistent qualifier, which helps avoid confusion between old and new module paths
+- This pattern makes the migration process smoother and reduces the risk of mixing imports from different module versions
 
 #### API Structure Differences
 - Arrow2's functions like `take` are found directly in the compute module, while arrow-rs has them in specialized modules like arrow_select

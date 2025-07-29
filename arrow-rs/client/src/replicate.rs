@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use plateau_transport_arrow_rs as transport;
-use transport::{MultiChunk, PartitionId, RecordQuery};
 use serde::{Deserialize, Serialize};
+use transport::{MultiChunk, PartitionId, RecordQuery};
 
 use crate::{Client, Error, Retrieve};
 
@@ -88,9 +88,8 @@ impl ReplicatePartitionJob {
         if !next_page.is_empty() {
             // In arrow-rs, we can't modify schema metadata directly since it's in an Arc
             // Instead, we'll create a new schema with the same fields but without the metadata entries
-            let new_schema = transport::arrow_schema::Schema::new(
-                next_page.schema.fields().clone(),
-            );
+            let new_schema =
+                transport::arrow_schema::Schema::new(next_page.schema.fields().clone());
             let new_schema = std::sync::Arc::new(new_schema);
             next_page.schema = new_schema;
 
@@ -520,27 +519,26 @@ pub mod test {
     // Import SchemaRef from our client's lib.rs which has it exposed
     use crate::SchemaRef;
 
+    use std::sync::Arc;
     use transport::arrow_array::RecordBatch;
     use transport::arrow_schema::ArrowError;
-    use std::sync::Arc;
 
     #[allow(dead_code)]
     trait ToBytes {
         fn to_bytes(&self) -> Result<Vec<u8>, ArrowError>;
     }
-    
+
     // Implement ToBytes trait for SchemaChunk<SchemaRef>
     impl ToBytes for SchemaChunk<SchemaRef> {
         fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
             let mut buf = Vec::new();
             let options = transport::arrow_ipc::writer::IpcWriteOptions::default();
 
-            let mut writer =
-                transport::arrow_ipc::writer::FileWriter::try_new_with_options(
-                    &mut buf,
-                    self.schema.as_ref(),
-                    options,
-                )?;
+            let mut writer = transport::arrow_ipc::writer::FileWriter::try_new_with_options(
+                &mut buf,
+                self.schema.as_ref(),
+                options,
+            )?;
 
             writer.write(&self.chunk)?;
             writer.finish()?;
@@ -567,9 +565,7 @@ pub mod test {
         let string_field = Arc::new(Field::new("item", DataType::Utf8, true));
         let string_array = Arc::new(StringArray::from(Vec::<Option<String>>::new()));
         let list_offsets =
-            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![
-                0, 0, 0, 0, 0,
-            ]);
+            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![0, 0, 0, 0, 0]);
         let failures = Arc::new(ListArray::new(
             string_field.clone(),
             list_offsets,
@@ -623,9 +619,7 @@ pub mod test {
         // Create the list offsets - point to where each list starts/ends
         // [0, 1, 2, 4, 5, 6] - List 1 has 1 item, List 2 has 1 item, List 3 has 2 items, etc.
         let list_offsets =
-            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![
-                1, 1, 2, 1, 1,
-            ]);
+            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![1, 1, 2, 1, 1]);
 
         let failures = Arc::new(ListArray::new(
             string_field.clone(),
