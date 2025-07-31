@@ -521,31 +521,8 @@ pub mod test {
 
     use std::sync::Arc;
     use transport::arrow_array::RecordBatch;
-    use transport::arrow_schema::ArrowError;
 
-    #[allow(dead_code)]
-    trait ToBytes {
-        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError>;
-    }
-
-    // Implement ToBytes trait for SchemaChunk<SchemaRef>
-    impl ToBytes for SchemaChunk<SchemaRef> {
-        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
-            let mut buf = Vec::new();
-            let options = transport::arrow_ipc::writer::IpcWriteOptions::default();
-
-            let mut writer = transport::arrow_ipc::writer::FileWriter::try_new_with_options(
-                &mut buf,
-                self.schema.as_ref(),
-                options,
-            )?;
-
-            writer.write(&self.chunk)?;
-            writer.finish()?;
-
-            Ok(buf)
-        }
-    }
+    // We use SchemaChunk::to_bytes directly instead of a custom trait implementation
 
     pub(crate) fn inferences_schema_b() -> SchemaChunk<SchemaRef> {
         use transport::{

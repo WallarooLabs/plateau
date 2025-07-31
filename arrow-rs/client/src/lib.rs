@@ -444,15 +444,8 @@ impl Insertion for SchemaChunk<Schema> {
 
 impl Insertion for SchemaChunk<SchemaRef> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        let mut buf = Vec::new();
-        let options = arrow_ipc::writer::IpcWriteOptions::default();
-
-        let mut writer =
-            arrow_ipc::writer::FileWriter::try_new_with_options(&mut buf, &self.schema, options)
-                .map_err(Error::ArrowSerialize)?;
-
-        writer.write(&self.chunk).map_err(Error::ArrowSerialize)?;
-        writer.finish().map_err(Error::ArrowSerialize)?;
+        // Use the standard to_bytes method from SchemaChunk
+        let buf = self.to_bytes().map_err(Error::ArrowSerialize)?;
 
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
             .header(CONTENT_LENGTH, buf.len())
@@ -1042,29 +1035,7 @@ mod tests {
         }
     }
 
-    #[allow(dead_code)]
-    trait ToBytes {
-        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError>;
-    }
-
-    // Implement ToBytes trait for SchemaChunk<SchemaRef>
-    impl ToBytes for SchemaChunk<SchemaRef> {
-        fn to_bytes(&self) -> Result<Vec<u8>, ArrowError> {
-            let mut buf = Vec::new();
-            let options = arrow_ipc::writer::IpcWriteOptions::default();
-
-            let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
-                &mut buf,
-                &self.schema,
-                options,
-            )?;
-
-            writer.write(&self.chunk)?;
-            writer.finish()?;
-
-            Ok(buf)
-        }
-    }
+    // We use SchemaChunk::to_bytes directly instead of a custom trait implementation
 
     fn test_client(server: &Server) -> Client {
         server
@@ -1480,11 +1451,9 @@ mod tests {
         fn inferences_schema_a() -> SchemaChunk<SchemaRef> {
             use std::sync::Arc;
             use transport::arrow_array::types::Float64Type;
-            use transport::arrow_array::RecordBatch;
-            use transport::arrow_array::{
-                Float32Array, Float64Array, Int64Array, ListArray, StructArray,
-            };
-            use transport::arrow_schema::{DataType, Field, Schema};
+            use transport::arrow_array::{Array, RecordBatch};
+            use transport::arrow_array::{ArrayRef, Float32Array, Int64Array, ListArray, StructArray};
+            use transport::arrow_schema::{DataType, Field, Fields, Schema};
 
             let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
             let inputs = Arc::new(Float32Array::from_iter_values(vec![
@@ -1496,23 +1465,31 @@ mod tests {
 
             // Create a nested array for tensor
             let tensor = Arc::new(ListArray::from_iter_primitive::<Float64Type, _, _>(vec![
-                Some(&[2.0, 2.0][..]),
-                Some(&[][..]),
-                Some(&[4.0, 4.0][..]),
-                Some(&[6.0, 6.0][..]),
-                Some(&[8.0, 8.0][..]),
+                Some(vec![Some(2.0), Some(2.0)]),
+                Some(vec![]),
+                Some(vec![Some(4.0), Some(4.0)]),
+                Some(vec![Some(6.0), Some(6.0)]),
+                Some(vec![Some(8.0), Some(8.0)]),
             ]));
 
             // Create a struct for outputs
-            let struct_fields = vec![
+            let struct_fields = Fields::from(vec![
                 Field::new("mul", DataType::Float32, false),
                 Field::new("tensor", tensor.data_type().clone(), false),
-            ];
+            ]);
+
+            // Create struct array using the correct method
+            // In arrow-rs, we need to provide the arrays as ArrayRef
+            let mul_ref: ArrayRef = mul;
+            let tensor_ref: ArrayRef = tensor.clone();
             let outputs = Arc::new(StructArray::from(vec![
-                (Field::new("mul", DataType::Float32, false), mul),
                 (
-                    Field::new("tensor", tensor.data_type().clone(), false),
-                    tensor.clone(),
+                    Arc::new(Field::new("mul", DataType::Float32, false)),
+                    mul_ref,
+                ),
+                (
+                    Arc::new(Field::new("tensor", tensor.data_type().clone(), false)),
+                    tensor_ref,
                 ),
             ]));
 
