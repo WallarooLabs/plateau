@@ -1041,17 +1041,6 @@ mod tests {
             .expect("failure to parse test server URL")
     }
 
-    // Helper function to convert SchemaChunk to MultiChunk for tests
-    fn schema_chunk_to_multi_chunk(schema_chunk: SchemaChunk<SchemaRef>) -> MultiChunk {
-        let mut chunks = VecDeque::new();
-        chunks.push_back(schema_chunk.chunk);
-
-        MultiChunk {
-            schema: schema_chunk.schema,
-            chunks,
-        }
-    }
-
     #[tokio::test]
     async fn topics() {
         let server = Server::run();
@@ -1421,7 +1410,7 @@ mod tests {
         })
         .await?;
 
-        let queue = schema_chunk_to_multi_chunk(inferences_large());
+        let queue = MultiChunk::from(inferences_large());
 
         let topic = "replicate";
         let partition = "a";
