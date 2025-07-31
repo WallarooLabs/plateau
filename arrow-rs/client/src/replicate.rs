@@ -11,6 +11,7 @@
 //! [`tokio::task`] via [`ReplicationWorker::run_forever`].
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
 use plateau_transport_arrow_rs as transport;
 use serde::{Deserialize, Serialize};
@@ -88,9 +89,13 @@ impl ReplicatePartitionJob {
         if !next_page.is_empty() {
             // In arrow-rs, we can't modify schema metadata directly since it's in an Arc
             // Instead, we'll create a new schema with the same fields but without the metadata entries
+            let mut clean = next_page.schema.metadata.clone();
+            clean.remove("span");
+            clean.remove("status");
             let new_schema =
-                transport::arrow_schema::Schema::new(next_page.schema.fields().clone());
-            let new_schema = std::sync::Arc::new(new_schema);
+                transport::arrow_schema::Schema::new(next_page.schema.fields().clone())
+                    .with_metadata(clean);
+            let new_schema = Arc::new(new_schema);
             next_page.schema = new_schema;
 
             let insert = self
@@ -548,12 +553,18 @@ pub mod test {
             None,
         ));
 
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("time", DataType::Int64, false),
-            Field::new("inputs", DataType::Utf8, false),
-            Field::new("outputs", DataType::Float32, false),
-            Field::new("failures", DataType::List(string_field), false),
-        ]));
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new("time", DataType::Int64, false),
+                Field::new("inputs", DataType::Utf8, false),
+                Field::new("outputs", DataType::Float32, false),
+                Field::new("failures", DataType::List(string_field), false),
+            ])
+            .with_metadata(HashMap::from([(
+                "custom".to_string(),
+                "metadata".to_string(),
+            )])),
+        );
 
         let record_batch =
             RecordBatch::try_new(schema.clone(), vec![time, inputs, outputs, failures]).unwrap();
@@ -697,6 +708,19 @@ pub mod test {
                 .get(target_id.partition())
                 .cloned(),
             Some(Span { start: 0, end: 50 })
+        );
+
+        // verify our custom metadata is still there
+        let records: Vec<SchemaChunk<SchemaRef>> = client_target
+            .get_records(
+                target_id.topic(),
+                target_id.partition(),
+                &RecordQuery::default(),
+            )
+            .await?;
+        assert_eq!(
+            records[0].schema.metadata.get("custom").unwrap(),
+            "metadata"
         );
 
         // now let's simulate some more writes
