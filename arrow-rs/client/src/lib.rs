@@ -444,7 +444,6 @@ impl Insertion for SchemaChunk<Schema> {
 
 impl Insertion for SchemaChunk<SchemaRef> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
-        // Use the standard to_bytes method from SchemaChunk
         let buf = self.to_bytes().map_err(Error::ArrowSerialize)?;
 
         Ok(r.header(CONTENT_TYPE, CONTENT_TYPE_ARROW)
@@ -1035,8 +1034,6 @@ mod tests {
         }
     }
 
-    // We use SchemaChunk::to_bytes directly instead of a custom trait implementation
-
     fn test_client(server: &Server) -> Client {
         server
             .url_str("/")
@@ -1452,7 +1449,9 @@ mod tests {
             use std::sync::Arc;
             use transport::arrow_array::types::Float64Type;
             use transport::arrow_array::{Array, RecordBatch};
-            use transport::arrow_array::{ArrayRef, Float32Array, Int64Array, ListArray, StructArray};
+            use transport::arrow_array::{
+                ArrayRef, Float32Array, Int64Array, ListArray, StructArray,
+            };
             use transport::arrow_schema::{DataType, Field, Fields, Schema};
 
             let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));

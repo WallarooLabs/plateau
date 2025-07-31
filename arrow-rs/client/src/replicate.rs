@@ -522,8 +522,6 @@ pub mod test {
     use std::sync::Arc;
     use transport::arrow_array::RecordBatch;
 
-    // We use SchemaChunk::to_bytes directly instead of a custom trait implementation
-
     pub(crate) fn inferences_schema_b() -> SchemaChunk<SchemaRef> {
         use transport::{
             arrow_array::{Float32Array, Int64Array, ListArray, StringArray},
@@ -531,9 +529,9 @@ pub mod test {
         };
 
         let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
-        let inputs = Arc::new(StringArray::from_iter_values(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        ));
+        let inputs = Arc::new(StringArray::from_iter_values(vec![
+            "one", "two", "three", "four", "five",
+        ]));
         let outputs = Arc::new(Float32Array::from_iter_values(vec![
             1.0, 2.0, 3.0, 4.0, 5.0,
         ]));
@@ -573,9 +571,9 @@ pub mod test {
         };
 
         let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
-        let inputs = Arc::new(StringArray::from_iter_values(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        ));
+        let inputs = Arc::new(StringArray::from_iter_values(vec![
+            "one", "two", "three", "four", "five",
+        ]));
         let outputs = Arc::new(Float32Array::from_iter_values(vec![
             1.0, 2.0, 3.0, 4.0, 5.0,
         ]));
