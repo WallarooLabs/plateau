@@ -1,6 +1,17 @@
 [workspace]
 resolver = "2"
-members = ["client", "server", "transport", "cli", "bench", "plateau", "test", "arrow-rs/transport", "arrow-rs/client"]
+members = [
+  "client",
+  "data",
+  "server",
+  "transport",
+  "cli",
+  "bench",
+  "plateau",
+  "test",
+  "arrow-rs/transport",
+  "arrow-rs/client"
+]
 
 
 [workspace.package]
@@ -22,6 +33,7 @@ thiserror = "2.0"
 
 plateau-cli = { path = "./cli" }
 plateau-client = { path = "./client" }
+plateau-data = { path = "./data" }
 plateau-server = { path = "./server" }
 plateau-test = { path = "./test" }
 plateau-transport = { path = "./transport" }

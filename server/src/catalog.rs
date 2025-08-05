@@ -18,7 +18,7 @@ use tokio::{
 use tokio_stream::wrappers::IntervalStream;
 use tracing::{debug, error, info, trace, warn};
 
-use crate::limit::Retention;
+use crate::data::{Ordering, Retention};
 use crate::manifest::Manifest;
 use crate::manifest::Scope;
 use crate::partition;

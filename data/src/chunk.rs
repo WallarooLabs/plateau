@@ -9,13 +9,12 @@ use crate::arrow2::{
     compute::{self, filter::filter_chunk},
     datatypes::{DataType, Field, Metadata},
 };
-use crate::manifest::Ordering;
 use chrono::{DateTime, TimeZone, Utc};
 use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
 
-use crate::slog::RecordIndex;
+use crate::{Ordering, RecordIndex};
 
 // currently unstable; don't need a const fn
 pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
@@ -194,12 +193,13 @@ pub fn legacy_schema() -> Schema {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct IndexedChunk {
-    pub(crate) inner_schema: Schema,
-    pub(crate) chunk: SegmentChunk,
+pub struct IndexedChunk {
+    pub inner_schema: Schema,
+    pub chunk: SegmentChunk,
 }
+
 impl IndexedChunk {
-    pub(crate) fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>, order: Ordering) -> Self {
+    pub fn from_start(ix: RecordIndex, data: SchemaChunk<Schema>, order: Ordering) -> Self {
         assert!(!data.chunk.arrays().is_empty());
         let start = ix.0 as i32;
         let size = data.chunk.len() as i32;
@@ -219,7 +219,7 @@ impl IndexedChunk {
     /// Formats each message within an [IndexedChunk] as a series of Strings,
     /// prefixed with the chunk index. If the record is not a [LegacyRecord]
     /// or col 1 is not Utf8, returns an empty Vec.
-    pub(crate) fn display_vec(&self) -> Vec<String> {
+    pub fn display_vec(&self) -> Vec<String> {
         let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
         if self.inner_schema.fields[1].data_type == DataType::Utf8 {
             let idx = (*self.chunk.arrays()[l])
@@ -242,7 +242,7 @@ impl IndexedChunk {
 
     /// The absolute index of the first record in the chunk. For a chunk fetched/iterated
     /// using [Ordering::Reverse], this will be the high index, otherwise it will be the low index.
-    pub(crate) fn start(&self) -> Option<RecordIndex> {
+    pub fn start(&self) -> Option<RecordIndex> {
         self.indices()
             .values()
             .iter()
@@ -252,14 +252,14 @@ impl IndexedChunk {
 
     /// The absolute index of the last record in the chunk. For a chunk fetched/iterated
     /// using [Ordering::Reverse], this will be the low index, otherwise it will be the high index.
-    pub(crate) fn end(&self) -> Option<RecordIndex> {
+    pub fn end(&self) -> Option<RecordIndex> {
         self.indices()
             .values()
             .last()
             .map(|i| RecordIndex(*i as usize))
     }
 
-    pub(crate) fn indices(&self) -> &PrimitiveArray<i32> {
+    pub fn indices(&self) -> &PrimitiveArray<i32> {
         self.chunk
             .arrays()
             .last()
@@ -269,14 +269,14 @@ impl IndexedChunk {
             .unwrap()
     }
 
-    pub(crate) fn times(&self) -> &PrimitiveArray<i64> {
+    pub fn times(&self) -> &PrimitiveArray<i64> {
         self.chunk.arrays()[0]
             .as_any()
             .downcast_ref::<PrimitiveArray<i64>>()
             .unwrap()
     }
 
-    pub(crate) fn slice(&mut self, offset: usize, len: usize) {
+    pub fn slice(&mut self, offset: usize, len: usize) {
         let mut arrays = std::mem::replace(&mut self.chunk, Chunk::new(vec![])).into_arrays();
 
         for arr in arrays.iter_mut() {
@@ -286,10 +286,7 @@ impl IndexedChunk {
         self.chunk = Chunk::new(arrays);
     }
 
-    pub(crate) fn filter(
-        &self,
-        filter: &BooleanArray,
-    ) -> Result<Self, crate::arrow2::error::Error> {
+    pub fn filter(&self, filter: &BooleanArray) -> Result<Self, crate::arrow2::error::Error> {
         Ok(Self {
             inner_schema: self.inner_schema.clone(),
             chunk: filter_chunk(&self.chunk, filter)?,
@@ -297,7 +294,7 @@ impl IndexedChunk {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_legacy(self, order: Ordering) -> Vec<Record> {
+    pub fn into_legacy(self, order: Ordering) -> Vec<Record> {
         chunk_into_legacy(self.chunk, order)
     }
 }
@@ -346,141 +343,9 @@ pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
 pub mod test {
     use super::*;
     use crate::arrow2::array::{ListArray, MutableListArray, StructArray, TryExtend};
-    use plateau_transport::estimate_size;
+    use crate::transport::estimate_size;
 
-    pub fn inferences_schema_a() -> SchemaChunk<Schema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-        let inner = PrimitiveArray::<f64>::from_values(vec![
-            2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
-        ]);
-
-        // TODO: we need fixed size list array support, which currently is not
-        // in arrow2's parquet io module.
-        /*
-        let outputs = FixedSizeListArray::new(
-            DataType::FixedSizeList(
-                Box::new(Field::new("inner", inner.data_type().clone(), false)),
-                2,
-            ),
-            inner.to_boxed(),
-            None,
-        );
-        */
-        let offsets = vec![0, 2, 2, 4, 6, 8];
-        let tensor = ListArray::new(
-            DataType::List(Box::new(Field::new(
-                "inner",
-                inner.data_type().clone(),
-                false,
-            ))),
-            offsets.try_into().unwrap(),
-            inner.boxed(),
-            None,
-        );
-
-        let outputs = StructArray::new(
-            DataType::Struct(vec![
-                Field::new("mul", mul.data_type().clone(), false),
-                Field::new("tensor", tensor.data_type().clone(), false),
-            ]),
-            vec![mul.clone().boxed(), tensor.clone().boxed()],
-            None,
-        );
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("tensor", tensor.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        SchemaChunk {
-            schema,
-            chunk: Chunk::try_new(vec![
-                time.boxed(),
-                tensor.boxed(),
-                inputs.boxed(),
-                outputs.boxed(),
-            ])
-            .unwrap(),
-        }
-    }
-
-    pub fn inferences_schema_b() -> SchemaChunk<Schema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        );
-        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        let values: Vec<Option<Vec<Option<String>>>> = vec![
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-        ];
-        failures.try_extend(values).unwrap();
-        let failures = ListArray::from(failures);
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-                Field::new("failures", failures.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        SchemaChunk {
-            schema,
-            chunk: Chunk::try_new(vec![
-                time.boxed(),
-                inputs.boxed(),
-                outputs.boxed(),
-                failures.boxed(),
-            ])
-            .unwrap(),
-        }
-    }
-
-    pub(crate) fn inferences_nested() -> SchemaChunk<Schema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-
-        let a = inferences_schema_a();
-        let b = inferences_schema_b();
-
-        let a_struct = StructArray::new(
-            DataType::Struct(a.schema.fields),
-            a.chunk.into_arrays(),
-            None,
-        );
-        let b_struct = StructArray::new(
-            DataType::Struct(b.schema.fields),
-            b.chunk.into_arrays(),
-            None,
-        );
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("input", a_struct.data_type().clone(), false),
-                Field::new("output", b_struct.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
-        };
-
-        SchemaChunk {
-            schema,
-            chunk: Chunk::try_new(vec![time.boxed(), a_struct.boxed(), b_struct.boxed()]).unwrap(),
-        }
-    }
+    use plateau_test::{inferences_nested, inferences_schema_a, inferences_schema_b};
 
     /*
     #[test]

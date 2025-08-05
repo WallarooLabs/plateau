@@ -20,6 +20,7 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
+use plateau_data::Ordering;
 use plateau_transport::TopicIterationOrder;
 use sqlx::migrate::Migrator;
 use sqlx::query::Query;
@@ -34,30 +35,10 @@ use crate::slog::{RecordIndex, SegmentIndex};
 
 pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Ordering {
-    Forward,
-    Reverse,
-}
-
-impl Ordering {
-    fn to_sql_order(self) -> &'static str {
-        match self {
-            Self::Forward => "ASC",
-            Self::Reverse => "DESC",
-        }
-    }
-
-    pub(crate) fn is_reverse(&self) -> bool {
-        *self == Self::Reverse
-    }
-}
-impl From<TopicIterationOrder> for Ordering {
-    fn from(value: TopicIterationOrder) -> Self {
-        match value {
-            TopicIterationOrder::Asc => Self::Forward,
-            TopicIterationOrder::Desc => Self::Reverse,
-        }
+fn to_sql_order(order: Ordering) -> &'static str {
+    match self {
+        Ordering::Forward => "ASC",
+        Ordering::Reverse => "DESC",
     }
 }
 

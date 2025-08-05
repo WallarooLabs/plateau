@@ -6,25 +6,21 @@ use tokio_stream::wrappers::SignalStream;
 
 mod axum_util;
 pub mod catalog;
-pub mod chunk;
-mod compatible;
 pub mod config;
 pub mod http;
-pub mod limit;
 pub mod manifest;
 pub mod metrics;
 pub mod partition;
 pub mod replication;
-mod segment;
 mod slog;
 mod storage;
 mod topic;
 
 pub use crate::config::PlateauConfig as Config;
 pub use catalog::Catalog;
+pub use data::DEFAULT_BYTE_LIMIT;
+pub use plateau_data as data;
 use plateau_transport::arrow2;
-
-pub const DEFAULT_BYTE_LIMIT: usize = 10240000;
 
 /// Future that resolves when an exit signal (SIGINT / SIGTERM / SIGQUIT) is
 /// received.
