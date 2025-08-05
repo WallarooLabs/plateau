@@ -96,7 +96,7 @@ impl RowLimit {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub(crate) enum BatchStatus {
+pub enum BatchStatus {
     Open { remaining: RowLimit },
     SchemaChanged,
     BytesExceeded,
@@ -104,24 +104,24 @@ pub(crate) enum BatchStatus {
 }
 
 impl BatchStatus {
-    pub(crate) fn is_open(&self) -> bool {
+    pub fn is_open(&self) -> bool {
         matches!(self, Self::Open { .. })
     }
 
-    pub(crate) fn is_schema_changed(&self) -> bool {
+    pub fn is_schema_changed(&self) -> bool {
         matches!(self, Self::SchemaChanged)
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct LimitedBatch {
-    pub(crate) schema: Option<Schema>,
-    pub(crate) chunks: Vec<IndexedChunk>,
-    pub(crate) status: BatchStatus,
+pub struct LimitedBatch {
+    pub schema: Option<Schema>,
+    pub chunks: Vec<IndexedChunk>,
+    pub status: BatchStatus,
 }
 
 impl LimitedBatch {
-    pub(crate) fn open(limit: RowLimit) -> Self {
+    pub fn open(limit: RowLimit) -> Self {
         Self {
             schema: None,
             chunks: vec![],
@@ -129,14 +129,14 @@ impl LimitedBatch {
         }
     }
 
-    pub(crate) fn compatible_with(&self, other: &Self) -> bool {
+    pub fn compatible_with(&self, other: &Self) -> bool {
         self.schema
             .as_ref()
             .zip(other.schema.as_ref())
             .is_none_or(|(a, b)| a.compatible(b))
     }
 
-    pub(crate) fn extend_one(&mut self, mut indexed: IndexedChunk) {
+    pub fn extend_one(&mut self, mut indexed: IndexedChunk) {
         if indexed.chunk.is_empty() {
             return;
         }

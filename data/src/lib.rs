@@ -1,5 +1,6 @@
 pub mod chunk;
 pub mod compatible;
+pub use compatible as compat;
 pub mod index;
 pub mod limit;
 pub mod segment;

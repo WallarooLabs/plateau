@@ -79,16 +79,16 @@ pub trait SegmentIterator: DoubleEndedIterator<Item = Result<SegmentChunk>> {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Segment {
+pub struct Segment {
     path: PathBuf,
 }
 
 impl Segment {
-    pub(crate) fn at(path: PathBuf) -> Self {
+    pub fn at(path: PathBuf) -> Self {
         Self { path }
     }
 
-    pub(crate) fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &PathBuf {
         &self.path
     }
 
@@ -104,7 +104,7 @@ impl Segment {
             .open(&self.path)?)
     }
 
-    pub(crate) fn create(&self, schema: Schema, config: Config) -> Result<Writer> {
+    pub fn create(&self, schema: Schema, config: Config) -> Result<Writer> {
         let file = self.file()?;
         let writer = if config.arrow {
             WriteFormat::Arrow(arrow::Writer::create(file, &schema)?)
@@ -144,7 +144,7 @@ impl Segment {
             .chain(arrow_parts.into_iter().flatten())
     }
 
-    pub(crate) fn destroy(&self) -> Result<()> {
+    pub fn destroy(&self) -> Result<()> {
         if self.path.exists() {
             fs::remove_file(&self.path)?;
         } else {
@@ -164,7 +164,7 @@ impl Segment {
         Ok(())
     }
 
-    pub(crate) fn validate(&self) -> bool {
+    pub fn validate(&self) -> bool {
         match self.iter() {
             Ok(_) => true,
             Err(err) => {
@@ -174,7 +174,7 @@ impl Segment {
         }
     }
 
-    pub(crate) fn iter(&self) -> Result<impl SegmentIterator> {
+    pub fn iter(&self) -> Result<impl SegmentIterator> {
         let cache = cache::read(self.cache_path()).unwrap_or_else(|err| {
             error!("error reading cache at {:?}: {err:?}", self.cache_path());
             None

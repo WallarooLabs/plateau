@@ -41,7 +41,7 @@ pub enum Ordering {
 }
 
 impl Ordering {
-    pub(crate) fn is_reverse(&self) -> bool {
+    pub fn is_reverse(&self) -> bool {
         *self == Self::Reverse
     }
 }

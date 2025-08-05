@@ -21,7 +21,7 @@ pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
     std::any::type_name::<T>()
 }
 
-pub(crate) struct LegacyRecords(pub(crate) Vec<Record>);
+pub struct LegacyRecords(pub Vec<Record>);
 
 pub fn chunk_into_legacy(chunk: SegmentChunk, order: Ordering) -> Vec<Record> {
     let mut records = LegacyRecords::try_from(SchemaChunk {

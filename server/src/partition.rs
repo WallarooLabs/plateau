@@ -28,13 +28,10 @@ use crate::arrow2::array::BooleanArray;
 use crate::arrow2::compute::comparison::eq_scalar;
 use crate::arrow2::compute::comparison::gt_eq_scalar;
 use crate::arrow2::scalar::PrimitiveScalar;
-#[cfg(test)]
-use crate::chunk::Record;
-use crate::chunk::{parse_time, IndexedChunk, Schema};
-use crate::limit::{LimitedBatch, Retention, Rolling, RowLimit};
-use crate::manifest::{Manifest, Ordering};
-use crate::manifest::{PartitionId, Scope, SegmentData};
-use crate::slog::RecordIndex;
+use plateau_data::chunk::{parse_time, IndexedChunk, Schema};
+use plateau_data::limit::{LimitedBatch, Retention, Rolling, RowLimit};
+use crate::manifest::{Manifest, PartitionId, Scope, SegmentData};
+use plateau_data::index::{Ordering, RecordIndex};
 use crate::slog::{self, SegmentIndex, Slog};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -181,8 +178,8 @@ impl Partition {
     }
 
     #[cfg(test)]
-    pub(crate) async fn extend_records(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
-        use crate::chunk::LegacyRecords;
+    pub(crate) async fn extend_records(&self, rs: &[plateau_data::chunk::Record]) -> Result<Range<RecordIndex>> {
+        use plateau_data::chunk::LegacyRecords;
 
         self.extend(SchemaChunk::try_from(LegacyRecords(rs.to_vec())).unwrap())
             .await
@@ -301,7 +298,7 @@ impl Partition {
     }
 
     #[cfg(test)]
-    pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
+    pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<plateau_data::chunk::Record> {
         let record_response = self
             .get_records(index, RowLimit::records(1), Ordering::Forward)
             .await;
@@ -625,9 +622,9 @@ impl State {
 pub mod test {
     use super::*;
     use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
-    use crate::chunk::{legacy_schema, LegacyRecords};
-    use crate::limit::BatchStatus;
-    use crate::segment::test::build_records;
+    use crate::chunk::{legacy_schema, LegacyRecords, Record};
+    use plateau_data::limit::BatchStatus;
+    use plateau_data::segment::test::build_records;
     use chrono::TimeZone;
     use plateau_transport::SegmentChunk;
     use tempfile::{tempdir, TempDir};
@@ -1127,7 +1124,7 @@ pub mod test {
                     start,
                     SchemaChunk {
                         schema: chunk_a.schema.clone(),
-                        chunk: crate::chunk::concatenate(&[
+                        chunk: plateau_data::chunk::concatenate(&[
                             chunk_a.chunk.clone(),
                             chunk_a.chunk.clone()
                         ])?

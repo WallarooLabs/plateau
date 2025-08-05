@@ -33,9 +33,9 @@ use plateau_transport::{
 pub use crate::axum_util::{query::Query, Response};
 use crate::catalog::Catalog;
 use crate::http::chunk::SchemaChunkRequest;
-use crate::limit::{BatchStatus, RowLimit};
-use crate::manifest::Ordering;
-use crate::slog::{RecordIndex, SlogError};
+use plateau_data as data;
+use data::{limit::{BatchStatus, RowLimit}, Ordering, RecordIndex};
+use crate::slog::SlogError;
 
 mod chunk;
 mod error;
@@ -87,13 +87,17 @@ impl FromRange for Span {
     }
 }
 
-impl From<BatchStatus> for RecordStatus {
-    fn from(orig: BatchStatus) -> Self {
-        match orig {
-            BatchStatus::Open { .. } => Self::All,
-            BatchStatus::SchemaChanged => Self::SchemaChange,
-            BatchStatus::BytesExceeded => Self::ByteLimited,
-            BatchStatus::RecordsExceeded => Self::RecordLimited,
+trait IntoRecordStatus {
+    fn into_record_status(self) -> RecordStatus;
+}
+
+impl IntoRecordStatus for BatchStatus {
+    fn into_record_status(self) -> RecordStatus {
+        match self {
+            BatchStatus::Open { .. } => RecordStatus::All,
+            BatchStatus::SchemaChanged => RecordStatus::SchemaChange,
+            BatchStatus::BytesExceeded => RecordStatus::ByteLimited,
+            BatchStatus::RecordsExceeded => RecordStatus::RecordLimited,
         }
     }
 }
@@ -337,7 +341,7 @@ pub async fn topic_iterate(
 
     let status = TopicIterationStatus {
         next: result.iter,
-        status: RecordStatus::from(result.batch.status),
+        status: result.batch.status.into_record_status(),
     };
 
     // WARNING !!!  DO NOT ADD MORE ITEMS TO THE METADATA.
@@ -398,7 +402,7 @@ async fn partition_get_records(
     let range = start.zip(end).map(|(start, end)| start..end);
 
     // WARNING !!!  DO NOT ADD MORE ITEMS TO THE METADATA.
-    let status = RecordStatus::from(result.status);
+    let status = result.status.into_record_status();
     if let Some(schema) = result.schema.as_mut() {
         schema.metadata.insert(
             "status".to_string(),

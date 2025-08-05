@@ -6,18 +6,20 @@ use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
-use crate::chunk::{LegacyRecords, Record, Schema};
-use crate::limit::{BatchStatus, LimitedBatch, RowLimit};
-use crate::manifest::{Manifest, Ordering, PartitionId, SegmentData};
+use plateau_data::chunk::{LegacyRecords, Record, Schema};
+use plateau_data::limit::{BatchStatus, LimitedBatch, RowLimit};
+use crate::manifest::{Manifest, PartitionId, SegmentData};
+
+
 use crate::partition::Config as PartitionConfig;
 use crate::partition::Partition;
-use crate::slog::RecordIndex;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::{join_all, FutureExt};
 use futures::stream;
 use futures::stream::StreamExt;
+use plateau_data::index::{Ordering, RecordIndex};
 use plateau_transport::{PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tracing::debug;
@@ -403,7 +405,7 @@ impl Topic {
 mod test {
     use super::*;
     use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
-    use crate::partition::test::{assert_limit_unreached, deindex};
+    use plateau_data::partition::test::{assert_limit_unreached, deindex};
     use chrono::TimeZone;
     use tempfile::{tempdir, TempDir};
 

@@ -1,7 +1,7 @@
 use crate::arrow2::datatypes::Metadata;
 use crate::arrow2::io::ipc::{read, write};
 use crate::arrow2::io::json as arrow_json;
-use crate::Config;
+
 use axum::{
     async_trait,
     body::{boxed, Full, HttpBody},
@@ -24,8 +24,11 @@ use plateau_transport::{
 };
 
 use crate::{
-    chunk::{new_schema_chunk, Schema},
+    Config,
     http::error::ErrorReply,
+};
+use plateau_data::{
+    chunk::{new_schema_chunk, Schema},
     limit::LimitedBatch,
 };
 

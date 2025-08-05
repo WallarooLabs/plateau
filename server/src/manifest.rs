@@ -21,7 +21,6 @@ use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
 use plateau_data::Ordering;
-use plateau_transport::TopicIterationOrder;
 use sqlx::migrate::Migrator;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
@@ -31,14 +30,22 @@ use tracing::{debug, error, info, trace};
 
 pub use plateau_transport::PartitionId;
 
-use crate::slog::{RecordIndex, SegmentIndex};
+use plateau_data::index::RecordIndex;
+use crate::slog::SegmentIndex;
+
 
 pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
-fn to_sql_order(order: Ordering) -> &'static str {
-    match self {
-        Ordering::Forward => "ASC",
-        Ordering::Reverse => "DESC",
+trait ToSqlOrder {
+    fn to_sql_order(&self) -> &'static str;
+}
+
+impl ToSqlOrder for Ordering {
+    fn to_sql_order(&self) -> &'static str {
+        match self {
+            Ordering::Forward => "ASC",
+            Ordering::Reverse => "DESC",
+        }
     }
 }
 
@@ -141,18 +148,22 @@ impl SegmentIndex {
     }
 }
 
-impl RecordIndex {
+trait SqliteMappable<T> {
+    fn to_row(self) -> i64;
+    fn from_row<I>(row: &SqliteRow, index: I) -> T where I: ColumnIndex<SqliteRow>;
+}
+
+impl SqliteMappable<RecordIndex> for RecordIndex {
     fn to_row(self) -> i64 {
         i64::try_from(self.0).unwrap()
     }
 
-    fn from_row<I>(row: &SqliteRow, index: I) -> Self
-    where
-        I: ColumnIndex<SqliteRow>,
-    {
-        Self(usize::try_from(row.get::<i64, _>(index)).unwrap())
+    fn from_row<I>(row: &SqliteRow, index: I) -> RecordIndex where I: ColumnIndex<SqliteRow> {
+        RecordIndex(usize::try_from(row.get::<i64, _>(index)).unwrap())
     }
 }
+
+
 
 fn add_suffix(path: &Path, suffix: &str) -> anyhow::Result<PathBuf> {
     let mut path = path.to_path_buf();
