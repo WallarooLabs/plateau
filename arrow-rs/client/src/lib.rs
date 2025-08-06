@@ -427,11 +427,9 @@ impl Insertion for Insert {
 impl Insertion for SchemaChunk<Schema> {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let mut buf = Vec::new();
-        let options = arrow_ipc::writer::IpcWriteOptions::default();
 
-        let mut writer =
-            arrow_ipc::writer::FileWriter::try_new(&mut buf, &self.schema)
-                .map_err(Error::ArrowSerialize)?;
+        let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut buf, &self.schema)
+            .map_err(Error::ArrowSerialize)?;
 
         writer.write(&self.chunk).map_err(Error::ArrowSerialize)?;
         writer.finish().map_err(Error::ArrowSerialize)?;
@@ -455,14 +453,9 @@ impl Insertion for SchemaChunk<SchemaRef> {
 impl Insertion for MultiChunk {
     fn add_to_request(self, r: RequestBuilder) -> Result<RequestBuilder, Error> {
         let mut buf = Vec::new();
-        let options = arrow_ipc::writer::IpcWriteOptions::default();
 
-        let mut writer = arrow_ipc::writer::FileWriter::try_new_with_options(
-            &mut buf,
-            self.schema.as_ref(),
-            options,
-        )
-        .map_err(Error::ArrowSerialize)?;
+        let mut writer = arrow_ipc::writer::FileWriter::try_new(&mut buf, self.schema.as_ref())
+            .map_err(Error::ArrowSerialize)?;
 
         for chunk in &self.chunks {
             writer.write(chunk).map_err(Error::ArrowSerialize)?;
