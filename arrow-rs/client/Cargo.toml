@@ -30,7 +30,7 @@ polars = { version = "0.36.2", optional = true, features = [
   "dtype-full",
 ] }
 
-plateau-transport.workspace = true
+plateau-transport-arrow-rs = { path = "../../arrow-rs/transport" }
 
 
 [dev-dependencies]
@@ -51,7 +51,7 @@ batch = ["dep:tokio"]
 health = ["dep:tokio"]
 polars = ["dep:polars"]
 replicate = ["dep:backoff", "dep:tokio"]
-rweb = ["plateau-transport/rweb"]
+rweb = ["plateau-transport-arrow-rs/rweb"]
 
 
 [lints]

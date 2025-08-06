@@ -3008,7 +3008,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-client-arrow-rs"
-version = "0.5.1"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3019,13 +3019,13 @@ dependencies = [
  "parking_lot 0.11.2",
  "plateau-server",
  "plateau-test",
- "plateau-transport",
+ "plateau-transport-arrow-rs",
  "polars",
  "reqwest",
  "serde",
  "serde_json",
  "serde_qs",
- "thiserror",
+ "thiserror 1.0.63",
  "tokio",
  "tokio-util",
  "tracing",

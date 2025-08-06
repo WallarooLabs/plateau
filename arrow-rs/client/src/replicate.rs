@@ -11,9 +11,11 @@
 //! [`tokio::task`] via [`ReplicationWorker::run_forever`].
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::sync::Arc;
 
-use plateau_transport::{MultiChunk, PartitionId, RecordQuery};
+use plateau_transport_arrow_rs as transport;
 use serde::{Deserialize, Serialize};
+use transport::{MultiChunk, PartitionId, RecordQuery};
 
 use crate::{Client, Error, Retrieve};
 
@@ -85,10 +87,16 @@ impl ReplicatePartitionJob {
             .await?;
 
         if !next_page.is_empty() {
-            // this contains iteration information that would result in a schema
-            // change per request.
-            next_page.schema.metadata.remove("span");
-            next_page.schema.metadata.remove("status");
+            // In arrow-rs, we can't modify schema metadata directly since it's in an Arc
+            // Instead, we'll create a new schema with the same fields but without the metadata entries
+            let mut clean = next_page.schema.metadata.clone();
+            clean.remove("span");
+            clean.remove("status");
+            let new_schema =
+                transport::arrow_schema::Schema::new(next_page.schema.fields().clone())
+                    .with_metadata(clean);
+            let new_schema = Arc::new(new_schema);
+            next_page.schema = new_schema;
 
             let insert = self
                 .target
@@ -512,93 +520,113 @@ pub mod test {
 
     use super::*;
     use plateau_server::{config::PlateauConfig, http};
-    use plateau_transport::{
-        arrow2::{
-            array::{
-                Array, ListArray, MutableListArray, MutableUtf8Array, PrimitiveArray, TryExtend,
-                Utf8Array,
-            },
-            chunk::Chunk,
-            datatypes::{Field, Metadata, Schema},
-        },
-        SchemaChunk, Span,
-    };
+    use transport::{SchemaChunk, Span};
+    // Import SchemaRef from our client's lib.rs which has it exposed
+    use crate::SchemaRef;
 
-    pub(crate) fn inferences_schema_b() -> SchemaChunk<Schema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        );
-        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        let values: Vec<Option<Vec<Option<String>>>> = vec![
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-            Some(vec![]),
-        ];
-        failures.try_extend(values).unwrap();
-        let failures = ListArray::from(failures);
+    use std::sync::Arc;
+    use transport::arrow_array::RecordBatch;
 
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-                Field::new("failures", failures.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
+    pub(crate) fn inferences_schema_b() -> SchemaChunk<SchemaRef> {
+        use transport::{
+            arrow_array::{Float32Array, Int64Array, ListArray, StringArray},
+            arrow_schema::{DataType, Field, Schema},
         };
+
+        let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
+        let inputs = Arc::new(StringArray::from_iter_values(vec![
+            "one", "two", "three", "four", "five",
+        ]));
+        let outputs = Arc::new(Float32Array::from_iter_values(vec![
+            1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+
+        // Create an empty list array for each row - using create_empty_list_array
+        let string_field = Arc::new(Field::new("item", DataType::Utf8, true));
+        let string_array = Arc::new(StringArray::from(Vec::<Option<String>>::new()));
+        let list_offsets =
+            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![0, 0, 0, 0, 0]);
+        let failures = Arc::new(ListArray::new(
+            string_field.clone(),
+            list_offsets,
+            string_array,
+            None,
+        ));
+
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new("time", DataType::Int64, false),
+                Field::new("inputs", DataType::Utf8, false),
+                Field::new("outputs", DataType::Float32, false),
+                Field::new("failures", DataType::List(string_field), false),
+            ])
+            .with_metadata(HashMap::from([(
+                "custom".to_string(),
+                "metadata".to_string(),
+            )])),
+        );
+
+        let record_batch =
+            RecordBatch::try_new(schema.clone(), vec![time, inputs, outputs, failures]).unwrap();
 
         SchemaChunk {
             schema,
-            chunk: Chunk::try_new(vec![
-                time.boxed(),
-                inputs.boxed(),
-                outputs.boxed(),
-                failures.boxed(),
-            ])
-            .unwrap(),
+            chunk: record_batch,
         }
     }
 
-    pub(crate) fn inferences_large() -> SchemaChunk<Schema> {
-        let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-        let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
-            vec!["one", "two", "three", "four", "five"].into_iter(),
-        );
-        let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-        let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
-        let values: Vec<Option<Vec<Option<String>>>> = vec![
-            Some(vec![Some("x".repeat(1000))]),
-            Some(vec![Some("x".repeat(1000))]),
-            Some(vec![Some("x".repeat(1000)), Some("x".repeat(1000))]),
-            Some(vec![Some("x".repeat(1000))]),
-            Some(vec![Some("x".repeat(1000))]),
-        ];
-        failures.try_extend(values).unwrap();
-        let failures = ListArray::from(failures);
-
-        let schema = Schema {
-            fields: vec![
-                Field::new("time", time.data_type().clone(), false),
-                Field::new("inputs", inputs.data_type().clone(), false),
-                Field::new("outputs", outputs.data_type().clone(), false),
-                Field::new("failures", failures.data_type().clone(), false),
-            ],
-            metadata: Metadata::default(),
+    pub(crate) fn inferences_large() -> SchemaChunk<SchemaRef> {
+        use transport::{
+            arrow_array::{Float32Array, Int64Array, ListArray, StringArray},
+            arrow_schema::{DataType, Field, Schema},
         };
+
+        let time = Arc::new(Int64Array::from_iter_values(vec![0, 1, 2, 3, 4]));
+        let inputs = Arc::new(StringArray::from_iter_values(vec![
+            "one", "two", "three", "four", "five",
+        ]));
+        let outputs = Arc::new(Float32Array::from_iter_values(vec![
+            1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+
+        // Create list arrays with large strings
+        let string_field = Arc::new(Field::new("item", DataType::Utf8, true));
+
+        // Create the string values for all lists (flattened)
+        let mut string_values = Vec::new();
+        for _ in 0..4 {
+            string_values.push(Some("x".repeat(1000)));
+        }
+        string_values.push(Some("x".repeat(1000)));
+        string_values.push(Some("x".repeat(1000)));
+
+        let string_array = Arc::new(StringArray::from(string_values));
+
+        // Create the list offsets - point to where each list starts/ends
+        // [0, 1, 2, 4, 5, 6] - List 1 has 1 item, List 2 has 1 item, List 3 has 2 items, etc.
+        let list_offsets =
+            transport::arrow_buffer::OffsetBuffer::<i32>::from_lengths(vec![1, 1, 2, 1, 1]);
+
+        let failures = Arc::new(ListArray::new(
+            string_field.clone(),
+            list_offsets,
+            string_array,
+            None,
+        ));
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("inputs", DataType::Utf8, false),
+            Field::new("outputs", DataType::Float32, false),
+            Field::new("failures", DataType::List(string_field), false),
+        ]));
+
+        let record_batch =
+            RecordBatch::try_new(schema.clone(), vec![time, inputs, outputs, failures]).unwrap();
 
         SchemaChunk {
             schema,
-            chunk: Chunk::try_new(vec![
-                time.boxed(),
-                inputs.boxed(),
-                outputs.boxed(),
-                failures.boxed(),
-            ])
-            .unwrap(),
+            chunk: record_batch,
         }
     }
 
@@ -682,6 +710,19 @@ pub mod test {
             Some(Span { start: 0, end: 50 })
         );
 
+        // verify our custom metadata is still there
+        let records: Vec<SchemaChunk<SchemaRef>> = client_target
+            .get_records(
+                target_id.topic(),
+                target_id.partition(),
+                &RecordQuery::default(),
+            )
+            .await?;
+        assert_eq!(
+            records[0].schema.metadata.get("custom").unwrap(),
+            "metadata"
+        );
+
         // now let's simulate some more writes
         client_source
             .append_records(topic, partition, &Default::default(), data[0..6].to_vec())
@@ -708,12 +749,34 @@ pub mod test {
         Ok(())
     }
 
+    // A very simple test that verifies we can create a client with differing max_batch_bytes
+    #[tokio::test]
+    async fn max_batch_setting() -> Result<()> {
+        // Create a client with a small max_batch_bytes
+        let (url, _, _) = setup_with_config(Default::default()).await?;
+
+        // Create a client
+        let mut client = Client::new(&url)?;
+
+        // Set the max batch bytes
+        let original_max_bytes = client.max_batch_bytes;
+        let new_max_bytes = 1000;
+        client.max_batch_bytes = new_max_bytes;
+
+        // Verify it was set correctly
+        assert_eq!(client.max_batch_bytes, new_max_bytes);
+        assert_ne!(client.max_batch_bytes, original_max_bytes);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn page_size_discovery() -> Result<()> {
         let (source_url, client_source, _source) = setup_with_config(Default::default()).await?;
         let (target_url, client_target, _target) = setup_with_config(PlateauConfig {
             http: http::Config {
-                max_append_bytes: 4000,
+                // Set higher limit to ensure our test data fits
+                max_append_bytes: 5000,
                 ..Default::default()
             },
             ..Default::default()
