@@ -430,7 +430,7 @@ impl Insertion for SchemaChunk<Schema> {
         let options = arrow_ipc::writer::IpcWriteOptions::default();
 
         let mut writer =
-            arrow_ipc::writer::FileWriter::try_new_with_options(&mut buf, &self.schema, options)
+            arrow_ipc::writer::FileWriter::try_new(&mut buf, &self.schema)
                 .map_err(Error::ArrowSerialize)?;
 
         writer.write(&self.chunk).map_err(Error::ArrowSerialize)?;
