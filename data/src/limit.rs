@@ -1,13 +1,12 @@
 use crate::{
     chunk::{IndexedChunk, Schema},
     compatible::Compatible,
+    transport::estimate_size,
 };
 use bytesize::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
-
-use plateau_transport::estimate_size;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -67,7 +66,7 @@ impl RowLimit {
         }
     }
 
-    pub(crate) fn after(&self, indexed: &mut IndexedChunk) -> BatchStatus {
+    pub fn after(&self, indexed: &mut IndexedChunk) -> BatchStatus {
         let count: usize = indexed.chunk.len();
         let bytes: usize = estimate_size(&indexed.chunk).unwrap_or(0);
         if count >= self.max_records {
@@ -179,36 +178,5 @@ impl IntoIterator for LimitedBatch {
 
     fn into_iter(self) -> Self::IntoIter {
         self.chunks.into_iter()
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use plateau_transport::SegmentChunk;
-
-    use crate::{chunk::iter_legacy, chunk::Record};
-
-    use super::*;
-
-    impl LimitedBatch {
-        pub(crate) fn into_legacy(self) -> anyhow::Result<Vec<Record>> {
-            if self.chunks.is_empty() {
-                return Ok(vec![]);
-            }
-
-            if let Some(schema) = self.schema {
-                use itertools::Itertools;
-                iter_legacy(
-                    schema,
-                    self.chunks
-                        .into_iter()
-                        .map(|chunk| Ok(SegmentChunk::from(chunk))),
-                )
-                .flatten_ok()
-                .collect()
-            } else {
-                Ok(vec![])
-            }
-        }
     }
 }

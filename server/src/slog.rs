@@ -43,11 +43,13 @@ use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
-use plateau_data::chunk::{self, Schema, TimeRange};
-use plateau_data::limit::Rolling;
+use crate::data::{
+    chunk::{self, Schema, TimeRange},
+    index::{Ordering, RecordIndex},
+    limit::Rolling,
+    segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer},
+};
 use crate::manifest::{PartitionId, SegmentData, SegmentId};
-use plateau_data::index::{Ordering, RecordIndex};
-use plateau_data::segment::{Config as SegmentConfig, Segment, Writer, SegmentIterator};
 
 #[derive(Error, Debug)]
 pub(crate) enum SlogError {
@@ -110,8 +112,6 @@ pub(crate) struct Checkpoint {
     pub(crate) segment: SegmentIndex,
     pub(crate) record: RecordIndex,
 }
-
-
 
 pub(crate) type SlogWrites = mpsc::Receiver<WriteResult>;
 
@@ -498,7 +498,7 @@ impl State {
                 size: 0,
                 records: first..first,
                 time: data_time_range.clone(),
-                version: plateau_data::compat::SEGMENT_FORMAT_VERSION,
+                version: crate::manifest::SEGMENT_FORMAT_VERSION,
             },
             saved_chunks: vec![],
             saved_rows: 0,
@@ -730,7 +730,7 @@ fn spawn_slog_thread(
                             records: records.clone(),
                             time,
                             size,
-                            version: plateau_data::compat::SEGMENT_FORMAT_VERSION,
+                            version: crate::manifest::SEGMENT_FORMAT_VERSION,
                         },
                     };
                     trace!("{}: commit {:?}/{:?} send", name, segment, records.end);
@@ -760,7 +760,7 @@ fn spawn_slog_thread(
 mod test {
     use super::*;
 
-    use plateau_data::chunk::{LegacyRecords, Record};
+    use crate::data::records::{LegacyRecords, Record};
 
     use chrono::TimeZone;
     use tempfile::tempdir;

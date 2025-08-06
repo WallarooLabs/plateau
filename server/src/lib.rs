@@ -20,7 +20,11 @@ pub use crate::config::PlateauConfig as Config;
 pub use catalog::Catalog;
 pub use data::DEFAULT_BYTE_LIMIT;
 pub use plateau_data as data;
-use plateau_transport::arrow2;
+pub use plateau_transport as transport;
+pub use plateau_transport::arrow2;
+
+#[cfg(test)]
+pub use plateau_test as test;
 
 /// Future that resolves when an exit signal (SIGINT / SIGTERM / SIGQUIT) is
 /// received.

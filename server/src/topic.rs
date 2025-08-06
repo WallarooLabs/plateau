@@ -6,10 +6,12 @@ use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 
-use plateau_data::chunk::{LegacyRecords, Record, Schema};
-use plateau_data::limit::{BatchStatus, LimitedBatch, RowLimit};
+use crate::data::{
+    chunk::Schema,
+    limit::{BatchStatus, LimitedBatch, RowLimit},
+    records::{LegacyRecords, Record},
+};
 use crate::manifest::{Manifest, PartitionId, SegmentData};
-
 
 use crate::partition::Config as PartitionConfig;
 use crate::partition::Partition;
@@ -404,8 +406,9 @@ impl Topic {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::chunk::test::{inferences_schema_a, inferences_schema_b};
-    use plateau_data::partition::test::{assert_limit_unreached, deindex};
+    use crate::data::records::TryIntoRecords;
+    use crate::partition::test::{assert_limit_unreached, deindex};
+    use crate::test::{inferences_schema_a, inferences_schema_b};
     use chrono::TimeZone;
     use tempfile::{tempdir, TempDir};
 
@@ -471,7 +474,7 @@ mod test {
     /// quick and dirty transform to string vector
     fn batch_to_vec(batch: LimitedBatch) -> Vec<String> {
         batch
-            .into_legacy()
+            .try_into_records()
             .unwrap()
             .iter()
             .map(|r| String::from_utf8(r.message.clone()).unwrap())
@@ -556,7 +559,7 @@ mod test {
         assert_eq!(
             result
                 .batch
-                .into_legacy()?
+                .try_into_records()?
                 .into_iter()
                 .collect::<HashSet<_>>(),
             vec![part_records[0][1].clone(), part_records[1][0].clone()]
@@ -575,7 +578,7 @@ mod test {
         assert_eq!(
             result
                 .batch
-                .into_legacy()?
+                .try_into_records()?
                 .into_iter()
                 .collect::<HashSet<_>>(),
             vec![part_records[2][0].clone()]
@@ -594,7 +597,7 @@ mod test {
         assert_eq!(
             result
                 .batch
-                .into_legacy()?
+                .try_into_records()?
                 .into_iter()
                 .collect::<HashSet<_>>(),
             vec![part_records[1][1].clone(), part_records[2][1].clone()]
@@ -609,7 +612,7 @@ mod test {
             .await;
         assert_limit_unreached(&result.batch.status);
         assert_eq!(result.iter, expected_it);
-        assert_eq!(result.batch.into_legacy()?, vec![]);
+        assert_eq!(result.batch.try_into_records()?, vec![]);
 
         Ok(())
     }
@@ -784,7 +787,7 @@ mod test {
                 .await;
 
             let status = result.batch.status;
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
 
             if fetched.len() >= records.len() * partitions_to_include.len() {
                 assert_limit_unreached(&status);
@@ -846,7 +849,7 @@ mod test {
                 .await;
 
             let status = result.batch.status;
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
 
             if fetched.len() >= expected_data_len {
                 assert_limit_unreached(&status);
@@ -907,7 +910,7 @@ mod test {
             } else {
                 assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
             }
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
             it = result.iter;
         }
         assert_eq!(
@@ -957,7 +960,7 @@ mod test {
                 .await;
 
             let status = result.batch.status;
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
 
             if fetched.len() >= records.len() {
                 assert_limit_unreached(&status);
@@ -1010,7 +1013,7 @@ mod test {
             } else {
                 assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
             }
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
             it = result.iter;
         }
         assert_eq!(
@@ -1051,7 +1054,7 @@ mod test {
             } else {
                 assert_eq!(result.batch.status, BatchStatus::RecordsExceeded);
             }
-            fetched.extend(result.batch.into_legacy().unwrap());
+            fetched.extend(result.batch.try_into_records().unwrap());
             it = result.iter;
         }
         assert_eq!(
@@ -1219,7 +1222,10 @@ mod test {
             )
             .await;
         assert_eq!(ITER_PARTITIONS + 1, result.iter.len());
-        assert_eq!(ITER_RECORDS + 2, result.batch.into_legacy().unwrap().len());
+        assert_eq!(
+            ITER_RECORDS + 2,
+            result.batch.try_into_records().unwrap().len()
+        );
 
         Ok(())
     }

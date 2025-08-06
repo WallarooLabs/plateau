@@ -23,10 +23,7 @@ use plateau_transport::{
     SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
 };
 
-use crate::{
-    Config,
-    http::error::ErrorReply,
-};
+use crate::{http::error::ErrorReply, Config};
 use plateau_data::{
     chunk::{new_schema_chunk, Schema},
     limit::LimitedBatch,

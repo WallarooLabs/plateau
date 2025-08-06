@@ -1,13 +1,9 @@
 //! Utilities for working with the [arrow2::chunk::Chunk] type.
 pub use crate::arrow2::datatypes::Schema;
 use crate::arrow2::{
-    array::{
-        Array, BooleanArray, MutableArray, MutablePrimitiveArray, MutableUtf8Array, PrimitiveArray,
-        Utf8Array,
-    },
+    array::{Array, BooleanArray, PrimitiveArray},
     chunk::Chunk,
     compute::{self, filter::filter_chunk},
-    datatypes::{DataType, Field, Metadata},
 };
 use chrono::{DateTime, TimeZone, Utc};
 use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
@@ -21,67 +17,11 @@ pub fn type_name_of_val<T: ?Sized>(_val: &T) -> &'static str {
     std::any::type_name::<T>()
 }
 
-pub struct LegacyRecords(pub Vec<Record>);
-
-pub fn chunk_into_legacy(chunk: SegmentChunk, order: Ordering) -> Vec<Record> {
-    let mut records = LegacyRecords::try_from(SchemaChunk {
-        schema: legacy_schema(),
-        chunk,
-    })
-    .unwrap()
-    .0;
-    if order.is_reverse() {
-        records.reverse();
-    }
-
-    records
-}
-
 pub fn parse_time(tv: i64) -> DateTime<Utc> {
     Utc.timestamp_millis_opt(tv).unwrap()
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Record {
-    pub time: DateTime<Utc>,
-    pub message: Vec<u8>,
-}
-
-impl<S: Borrow<Schema> + Clone + PartialEq> TryFrom<SchemaChunk<S>> for LegacyRecords {
-    type Error = ChunkError;
-
-    fn try_from(orig: SchemaChunk<S>) -> Result<Self, Self::Error> {
-        let arrays = orig.chunk.into_arrays();
-
-        let time = get_time(&arrays, orig.schema.borrow())?;
-        if orig.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
-            return Err(ChunkError::BadColumn(1, "message"));
-        }
-
-        let message = arrays
-            .get(1)
-            .ok_or(ChunkError::BadColumn(1, "message"))
-            .and_then(|arr| {
-                arr.as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .ok_or_else(|| {
-                        ChunkError::InvalidColumnType("message", "utf8", type_name_of_val(arr))
-                    })
-            })?;
-
-        Ok(Self(
-            time.values_iter()
-                .zip(message.values_iter())
-                .map(|(tv, m)| Record {
-                    time: parse_time(*tv),
-                    message: m.bytes().collect(),
-                })
-                .collect(),
-        ))
-    }
-}
-
-fn get_time<'a>(
+pub fn get_time<'a>(
     arrays: &'a [Box<dyn Array>],
     schema: &Schema,
 ) -> Result<&'a PrimitiveArray<i64>, ChunkError> {
@@ -136,62 +76,6 @@ impl TimeRange for SchemaChunk<Schema> {
     }
 }
 
-impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
-    type Error = ChunkError;
-
-    fn try_from(value: LegacyRecords) -> Result<Self, Self::Error> {
-        let mut records = value.0;
-        let mut times = MutablePrimitiveArray::<i64>::new();
-        let mut messages = MutableUtf8Array::<i32>::new();
-
-        for r in records.drain(..) {
-            let dt = r
-                .time
-                .signed_duration_since(Utc.timestamp_opt(0, 0).unwrap());
-            times.push(Some(dt.num_milliseconds()));
-            messages.push(Some(
-                std::str::from_utf8(&r.message)
-                    .map_err(|_| ChunkError::FailedEncoding)?
-                    .to_string(),
-            ));
-        }
-
-        Ok(Self {
-            schema: legacy_schema(),
-            chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
-                .map_err(|_| ChunkError::LengthMismatch)?,
-        })
-    }
-}
-
-pub fn iter_legacy(
-    schema: Schema,
-    iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
-) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
-    iter.map(move |chunk| {
-        chunk.and_then(|chunk| {
-            LegacyRecords::try_from(SchemaChunk {
-                schema: &schema,
-                chunk,
-            })
-            .map_err(Into::into)
-            .map(|r| r.0)
-        })
-    })
-}
-
-pub fn legacy_schema() -> Schema {
-    // TODO: better schema for timestamps.
-    // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
-    Schema {
-        fields: vec![
-            Field::new("time", DataType::Int64, false),
-            Field::new("message", DataType::Utf8, false),
-        ],
-        metadata: Metadata::default(),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct IndexedChunk {
     pub inner_schema: Schema,
@@ -213,31 +97,6 @@ impl IndexedChunk {
             inner_schema: data.schema,
             chunk: SegmentChunk::new(arrays),
         }
-    }
-
-    #[cfg(test)]
-    /// Formats each message within an [IndexedChunk] as a series of Strings,
-    /// prefixed with the chunk index. If the record is not a [LegacyRecord]
-    /// or col 1 is not Utf8, returns an empty Vec.
-    pub fn display_vec(&self) -> Vec<String> {
-        let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
-        if self.inner_schema.fields[1].data_type == DataType::Utf8 {
-            let idx = (*self.chunk.arrays()[l])
-                .as_any()
-                .downcast_ref::<PrimitiveArray<i32>>()
-                .unwrap()
-                .values_iter();
-            return (*self.chunk.arrays()[1])
-                .as_any()
-                .downcast_ref::<Utf8Array<i32>>()
-                .unwrap()
-                .iter()
-                .map(|s| String::from_utf8(s.unwrap().bytes().collect()).unwrap())
-                .zip(idx)
-                .map(|(s, i)| format!("{i}: {s}"))
-                .collect::<Vec<String>>(); //.clone();
-        }
-        Default::default()
     }
 
     /// The absolute index of the first record in the chunk. For a chunk fetched/iterated
@@ -292,11 +151,6 @@ impl IndexedChunk {
             chunk: filter_chunk(&self.chunk, filter)?,
         })
     }
-
-    #[cfg(test)]
-    pub fn into_legacy(self, order: Ordering) -> Vec<Record> {
-        chunk_into_legacy(self.chunk, order)
-    }
 }
 
 impl From<IndexedChunk> for SegmentChunk {
@@ -342,7 +196,6 @@ pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::arrow2::array::{ListArray, MutableListArray, StructArray, TryExtend};
     use crate::transport::estimate_size;
 
     use plateau_test::{inferences_nested, inferences_schema_a, inferences_schema_b};

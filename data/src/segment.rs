@@ -26,9 +26,6 @@ use tracing::{error, trace, warn};
 use crate::arrow2::datatypes::Schema;
 use plateau_transport::SegmentChunk;
 
-#[cfg(test)]
-use crate::chunk::Record;
-
 #[allow(dead_code)]
 mod arrow;
 mod cache;
@@ -44,17 +41,6 @@ fn validate_header(mut reader: impl Read) -> Result<()> {
     }
 
     Ok(())
-}
-
-// these are incomplete; they are currently only used in testing
-#[cfg(test)]
-#[allow(clippy::derived_hash_with_manual_eq)]
-impl std::hash::Hash for Record {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.time.hash(state);
-        let data_string = String::from_utf8(self.message.clone()).unwrap();
-        data_string.hash(state);
-    }
 }
 
 /// This is currently a placeholder for future segment storage settings (e.g.
@@ -286,6 +272,7 @@ enum WriteFormat {
     Parquet(parquet::Writer),
 }
 
+#[allow(missing_debug_implementations)]
 pub struct Writer {
     segment: Segment,
     writer: WriteFormat,
@@ -414,8 +401,7 @@ pub mod test {
     use std::borrow::Borrow;
 
     use super::*;
-    use crate::chunk::{iter_legacy, test::inferences_schema_a};
-    use chrono::{TimeZone, Utc};
+    use crate::test::inferences_schema_a;
     use plateau_transport::SchemaChunk;
     use sample_arrow2::{
         array::ArbitraryArray,
@@ -461,21 +447,6 @@ pub mod test {
         pub fn update_cache(&mut self, active: SegmentChunk) -> Result<()> {
             self.cache.update(self.chunk_ix, &self.schema, active)
         }
-    }
-
-    pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
-        it.map(|(ix, message)| Record {
-            time: Utc.timestamp_opt(ix, 0).unwrap(),
-            message: message.into_bytes(),
-        })
-        .collect()
-    }
-
-    pub fn collect_records(
-        schema: Schema,
-        iter: impl Iterator<Item = Result<SegmentChunk, anyhow::Error>>,
-    ) -> Vec<Record> {
-        iter_legacy(schema, iter).flat_map(Result::unwrap).collect()
     }
 
     // nulls=true breaks arrow2's parquet support, but is fine for feather

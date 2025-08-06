@@ -3045,8 +3045,6 @@ dependencies = [
  "futures",
  "humantime-serde",
  "itertools 0.13.0",
- "metrics",
- "metrics-exporter-prometheus",
  "parquet-format-safe",
  "parquet2",
  "plateau-client",
@@ -3082,7 +3080,6 @@ dependencies = [
  "config",
  "futures",
  "humantime-serde",
- "itertools 0.13.0",
  "metrics",
  "metrics-exporter-prometheus",
  "parquet-format-safe",
@@ -3118,7 +3115,9 @@ name = "plateau-test"
 version = "0.5.5"
 dependencies = [
  "anyhow",
+ "chrono",
  "plateau-client",
+ "plateau-data",
  "plateau-server",
  "plateau-transport",
  "tempfile",

@@ -28,19 +28,21 @@ use crate::arrow2::array::BooleanArray;
 use crate::arrow2::compute::comparison::eq_scalar;
 use crate::arrow2::compute::comparison::gt_eq_scalar;
 use crate::arrow2::scalar::PrimitiveScalar;
-use plateau_data::chunk::{parse_time, IndexedChunk, Schema};
-use plateau_data::limit::{LimitedBatch, Retention, Rolling, RowLimit};
+use crate::data::{
+    chunk::{parse_time, IndexedChunk, Schema},
+    index::{Ordering, RecordIndex},
+    limit::{LimitedBatch, Retention, Rolling, RowLimit},
+};
 use crate::manifest::{Manifest, PartitionId, Scope, SegmentData};
-use plateau_data::index::{Ordering, RecordIndex};
 use crate::slog::{self, SegmentIndex, Slog};
+use crate::transport::arrow2::compute::comparison::lt_scalar;
+use crate::transport::SchemaChunk;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
 use futures::{future, stream};
 use metrics::{counter, gauge};
-use plateau_transport::arrow2::compute::comparison::lt_scalar;
-use plateau_transport::SchemaChunk;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, watch, RwLock, RwLockReadGuard};
 use tracing::{debug, error, info, trace, warn};
@@ -177,14 +179,6 @@ impl Partition {
         format!("{}-{}", id.topic(), id.partition())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn extend_records(&self, rs: &[plateau_data::chunk::Record]) -> Result<Range<RecordIndex>> {
-        use plateau_data::chunk::LegacyRecords;
-
-        self.extend(SchemaChunk::try_from(LegacyRecords(rs.to_vec())).unwrap())
-            .await
-    }
-
     pub(crate) async fn extend(&self, chunk: SchemaChunk<Schema>) -> Result<Range<RecordIndex>> {
         let size = chunk.len();
         let mut state = self.state.write().await;
@@ -295,27 +289,6 @@ impl Partition {
         state
             .get_records_from_segments(limit, filter, segments, Ordering::Forward)
             .await
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<plateau_data::chunk::Record> {
-        let record_response = self
-            .get_records(index, RowLimit::records(1), Ordering::Forward)
-            .await;
-
-        record_response
-            .chunks
-            .into_iter()
-            .map(|indexed| {
-                indexed
-                    .filter(&eq_scalar(
-                        indexed.indices(),
-                        &PrimitiveScalar::from(Some(index.0 as i32)),
-                    ))
-                    .unwrap()
-            })
-            .flat_map(|indexed| indexed.into_legacy(Ordering::Forward))
-            .next()
     }
 
     pub(crate) async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
@@ -621,13 +594,75 @@ impl State {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::chunk::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
-    use crate::chunk::{legacy_schema, LegacyRecords, Record};
-    use plateau_data::limit::BatchStatus;
-    use plateau_data::segment::test::build_records;
+    use crate::arrow2::{
+        array::{PrimitiveArray, Utf8Array},
+        datatypes::DataType,
+    };
+    use crate::data::limit::BatchStatus;
+    use crate::data::records::{build_records, legacy_schema, IntoRecords, LegacyRecords, Record};
+    use crate::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
+    use crate::transport::SegmentChunk;
     use chrono::TimeZone;
-    use plateau_transport::SegmentChunk;
     use tempfile::{tempdir, TempDir};
+
+    impl Partition {
+        pub(crate) async fn extend_records(&self, rs: &[Record]) -> Result<Range<RecordIndex>> {
+            use crate::data::records::LegacyRecords;
+
+            self.extend(SchemaChunk::try_from(LegacyRecords(rs.to_vec())).unwrap())
+                .await
+        }
+
+        pub(crate) async fn get_record_by_index(&self, index: RecordIndex) -> Option<Record> {
+            let record_response = self
+                .get_records(index, RowLimit::records(1), Ordering::Forward)
+                .await;
+
+            record_response
+                .chunks
+                .into_iter()
+                .map(|indexed| {
+                    indexed
+                        .filter(&eq_scalar(
+                            indexed.indices(),
+                            &PrimitiveScalar::from(Some(index.0 as i32)),
+                        ))
+                        .unwrap()
+                })
+                .flat_map(|indexed| indexed.into_records(Ordering::Forward))
+                .next()
+        }
+    }
+
+    trait DisplayVec {
+        /// Formats each message within an [IndexedChunk] as a series of Strings,
+        /// prefixed with the chunk index. If the record is not a [LegacyRecord]
+        /// or col 1 is not Utf8, returns an empty Vec.
+        fn display_vec(&self) -> Vec<String>;
+    }
+
+    impl DisplayVec for IndexedChunk {
+        fn display_vec(&self) -> Vec<String> {
+            let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
+            if self.inner_schema.fields[1].data_type == DataType::Utf8 {
+                let idx = (*self.chunk.arrays()[l])
+                    .as_any()
+                    .downcast_ref::<PrimitiveArray<i32>>()
+                    .unwrap()
+                    .values_iter();
+                return (*self.chunk.arrays()[1])
+                    .as_any()
+                    .downcast_ref::<Utf8Array<i32>>()
+                    .unwrap()
+                    .iter()
+                    .map(|s| String::from_utf8(s.unwrap().bytes().collect()).unwrap())
+                    .zip(idx)
+                    .map(|(s, i)| format!("{i}: {s}"))
+                    .collect::<Vec<String>>(); //.clone();
+            }
+            Default::default()
+        }
+    }
 
     impl Partition {
         pub(crate) async fn ensure_index(&self, index: RecordIndex) -> Result<()> {
@@ -647,7 +682,7 @@ pub mod test {
 
     pub(crate) fn deindex(is: Vec<IndexedChunk>) -> Vec<Record> {
         is.into_iter()
-            .flat_map(|i| i.into_legacy(Ordering::Forward))
+            .flat_map(|i| i.into_records(Ordering::Forward))
             .collect()
     }
 
@@ -1124,7 +1159,7 @@ pub mod test {
                     start,
                     SchemaChunk {
                         schema: chunk_a.schema.clone(),
-                        chunk: plateau_data::chunk::concatenate(&[
+                        chunk: crate::data::chunk::concatenate(&[
                             chunk_a.chunk.clone(),
                             chunk_a.chunk.clone()
                         ])?

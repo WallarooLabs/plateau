@@ -197,7 +197,7 @@ pub fn inferences_schema_b() -> SchemaChunk<Schema> {
     }
 }
 
-pub(crate) fn inferences_nested() -> SchemaChunk<Schema> {
+pub fn inferences_nested() -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
 
     let a = inferences_schema_a();

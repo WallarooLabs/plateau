@@ -15,8 +15,7 @@ bytesize = { version = "1.1.0", features = ["serde"] }
 chrono = "0.4"
 config = "0.14"
 futures = "0.3"
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+itertools = "0.13"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
 humantime-serde = "1"
@@ -36,7 +35,6 @@ plateau-transport.workspace = true
 
 
 [dev-dependencies]
-itertools = "0.13"
 tempfile = "3"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 uuid = { version = "1.10", features = ["v4"] }

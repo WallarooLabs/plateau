@@ -32,9 +32,11 @@ use plateau_transport::{
 
 pub use crate::axum_util::{query::Query, Response};
 use crate::catalog::Catalog;
+use crate::data::{
+    limit::{BatchStatus, RowLimit},
+    Ordering, RecordIndex,
+};
 use crate::http::chunk::SchemaChunkRequest;
-use plateau_data as data;
-use data::{limit::{BatchStatus, RowLimit}, Ordering, RecordIndex};
 use crate::slog::SlogError;
 
 mod chunk;
@@ -94,10 +96,10 @@ trait IntoRecordStatus {
 impl IntoRecordStatus for BatchStatus {
     fn into_record_status(self) -> RecordStatus {
         match self {
-            BatchStatus::Open { .. } => RecordStatus::All,
-            BatchStatus::SchemaChanged => RecordStatus::SchemaChange,
-            BatchStatus::BytesExceeded => RecordStatus::ByteLimited,
-            BatchStatus::RecordsExceeded => RecordStatus::RecordLimited,
+            Self::Open { .. } => RecordStatus::All,
+            Self::SchemaChanged => RecordStatus::SchemaChange,
+            Self::BytesExceeded => RecordStatus::ByteLimited,
+            Self::RecordsExceeded => RecordStatus::RecordLimited,
         }
     }
 }

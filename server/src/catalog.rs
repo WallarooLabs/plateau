@@ -18,7 +18,7 @@ use tokio::{
 use tokio_stream::wrappers::IntervalStream;
 use tracing::{debug, error, info, trace, warn};
 
-use plateau_data::{Ordering, limit::Retention};
+use crate::data::limit::Retention;
 use crate::manifest::Manifest;
 use crate::manifest::Scope;
 use crate::partition;
@@ -377,9 +377,8 @@ impl Catalog {
 #[cfg(test)]
 mod test {
     use super::*;
-    use plateau_data::Record;
-    use plateau_data::segment::test::build_records;
-    use plateau_data::RecordIndex;
+    use crate::data::records::{build_records, Record};
+    use crate::data::RecordIndex;
     use anyhow::Result;
     use chrono::{TimeDelta, TimeZone, Timelike, Utc};
     use futures::stream;
