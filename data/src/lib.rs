@@ -1,3 +1,5 @@
+//! Tools and helpers for working with ordered and limited chunks, and raw
+//! storage wrappers for persisting these chunks to disk.
 pub mod chunk;
 pub mod compatible;
 pub use compatible as compat;

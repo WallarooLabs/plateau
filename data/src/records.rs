@@ -1,3 +1,7 @@
+//! Helpers for the legacy "records" format plateau initially supported
+//!
+//! These are used extensively in tests, though the arrow format has completely
+//! supplanted the records format in actual usage.
 use std::borrow::Borrow;
 
 use chrono::{DateTime, TimeZone, Utc};
