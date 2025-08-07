@@ -3140,7 +3140,6 @@ dependencies = [
  "anyhow",
  "chrono",
  "plateau-client",
- "plateau-data",
  "plateau-server",
  "plateau-transport",
  "tempfile",
