@@ -20,7 +20,6 @@ use std::str::FromStr;
 use chrono::{DateTime, Utc};
 use futures::stream;
 use futures::stream::StreamExt;
-use plateau_transport::TopicIterationOrder;
 use sqlx::migrate::Migrator;
 use sqlx::query::Query;
 use sqlx::sqlite::{Sqlite, SqliteArguments};
@@ -28,35 +27,21 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRo
 use sqlx::{ColumnIndex, Row};
 use tracing::{debug, error, info, trace};
 
-pub use plateau_transport::PartitionId;
-
-use crate::slog::{RecordIndex, SegmentIndex};
+use crate::data::{Ordering, RecordIndex};
+use crate::slog::SegmentIndex;
+pub use crate::transport::PartitionId;
 
 pub const SEGMENT_FORMAT_VERSION: u16 = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Ordering {
-    Forward,
-    Reverse,
+trait ToSqlOrder {
+    fn to_sql_order(&self) -> &'static str;
 }
 
-impl Ordering {
-    fn to_sql_order(self) -> &'static str {
+impl ToSqlOrder for Ordering {
+    fn to_sql_order(&self) -> &'static str {
         match self {
             Self::Forward => "ASC",
             Self::Reverse => "DESC",
-        }
-    }
-
-    pub(crate) fn is_reverse(&self) -> bool {
-        *self == Self::Reverse
-    }
-}
-impl From<TopicIterationOrder> for Ordering {
-    fn from(value: TopicIterationOrder) -> Self {
-        match value {
-            TopicIterationOrder::Asc => Self::Forward,
-            TopicIterationOrder::Desc => Self::Reverse,
         }
     }
 }
@@ -160,7 +145,14 @@ impl SegmentIndex {
     }
 }
 
-impl RecordIndex {
+trait SqliteMappable<T> {
+    fn to_row(self) -> i64;
+    fn from_row<I>(row: &SqliteRow, index: I) -> T
+    where
+        I: ColumnIndex<SqliteRow>;
+}
+
+impl SqliteMappable<Self> for RecordIndex {
     fn to_row(self) -> i64 {
         i64::try_from(self.0).unwrap()
     }

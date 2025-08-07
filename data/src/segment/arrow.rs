@@ -313,9 +313,10 @@ pub mod test {
 
     use super::*;
     use crate::arrow2::datatypes::{Field, Metadata};
-    use crate::chunk::test::{inferences_nested, inferences_schema_a};
-    use crate::chunk::{legacy_schema, LegacyRecords};
-    use crate::segment::test::{build_records, collect_records, deep_chunk};
+    use crate::records::collect_records;
+    use crate::records::{build_records, legacy_schema, LegacyRecords};
+    use crate::segment::test::deep_chunk;
+    use crate::test::{inferences_nested, inferences_schema_a};
 
     impl Writer {
         fn create_path(path: impl AsRef<Path>, schema: &Schema) -> anyhow::Result<Self> {

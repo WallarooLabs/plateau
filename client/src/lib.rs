@@ -1403,64 +1403,7 @@ mod tests {
     mod polars {
         use super::*;
 
-        // TODO: This is copied from the server, refactor to share amongst other tests.
-        use plateau_server::chunk::Schema;
-
-        fn inferences_schema_a() -> SchemaChunk<Schema> {
-            use crate::arrow2::array::ListArray;
-            use crate::arrow2::array::StructArray;
-            use crate::arrow2::datatypes::DataType;
-            use plateau_transport::arrow2::array::Array;
-
-            let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
-            let inputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
-            let mul = PrimitiveArray::<f32>::from_values(vec![2.0, 2.0, 2.0, 2.0, 2.0]);
-            let inner = PrimitiveArray::<f64>::from_values(vec![
-                2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
-            ]);
-
-            let offsets = vec![0, 2, 2, 4, 6, 8];
-            let tensor = ListArray::new(
-                DataType::List(Box::new(Field::new(
-                    "inner",
-                    inner.data_type().clone(),
-                    false,
-                ))),
-                offsets.try_into().unwrap(),
-                inner.boxed(),
-                None,
-            );
-
-            let outputs = StructArray::new(
-                DataType::Struct(vec![
-                    Field::new("mul", mul.data_type().clone(), false),
-                    Field::new("tensor", tensor.data_type().clone(), false),
-                ]),
-                vec![mul.clone().boxed(), tensor.clone().boxed()],
-                None,
-            );
-
-            let schema = Schema {
-                fields: vec![
-                    Field::new("time", time.data_type().clone(), false),
-                    Field::new("tensor", tensor.data_type().clone(), false),
-                    Field::new("inputs", inputs.data_type().clone(), false),
-                    Field::new("outputs", outputs.data_type().clone(), false),
-                ],
-                metadata: Metadata::default(),
-            };
-
-            SchemaChunk {
-                schema,
-                chunk: Chunk::try_new(vec![
-                    time.boxed(),
-                    tensor.boxed(),
-                    inputs.boxed(),
-                    outputs.boxed(),
-                ])
-                .unwrap(),
-            }
-        }
+        use plateau_test::inferences_schema_a;
 
         #[tokio::test]
         async fn iterate_unlimited_polars_simple() {

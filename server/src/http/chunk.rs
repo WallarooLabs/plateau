@@ -1,7 +1,7 @@
 use crate::arrow2::datatypes::Metadata;
 use crate::arrow2::io::ipc::{read, write};
 use crate::arrow2::io::json as arrow_json;
-use crate::Config;
+
 use axum::{
     async_trait,
     body::{boxed, Full, HttpBody},
@@ -23,9 +23,9 @@ use plateau_transport::{
     SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
 };
 
-use crate::{
+use crate::{http::error::ErrorReply, Config};
+use plateau_data::{
     chunk::{new_schema_chunk, Schema},
-    http::error::ErrorReply,
     limit::LimitedBatch,
 };
 

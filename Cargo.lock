@@ -3034,6 +3034,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "plateau-data"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "bytesize",
+ "chrono",
+ "config",
+ "futures",
+ "humantime-serde",
+ "itertools 0.13.0",
+ "parquet-format-safe",
+ "parquet2",
+ "plateau-client",
+ "plateau-test",
+ "plateau-transport",
+ "reqwest",
+ "sample-arrow2",
+ "sample-std",
+ "sample-test",
+ "serde",
+ "serde_json",
+ "systemstat",
+ "tempfile",
+ "test-log",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "toml 0.7.8",
+ "tower-http",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "plateau-server"
 version = "0.5.5"
 dependencies = [
@@ -3045,12 +3080,12 @@ dependencies = [
  "config",
  "futures",
  "humantime-serde",
- "itertools 0.13.0",
  "metrics",
  "metrics-exporter-prometheus",
  "parquet-format-safe",
  "parquet2",
  "plateau-client",
+ "plateau-data",
  "plateau-test",
  "plateau-transport",
  "reqwest",
@@ -3080,7 +3115,9 @@ name = "plateau-test"
 version = "0.5.5"
 dependencies = [
  "anyhow",
+ "chrono",
  "plateau-client",
+ "plateau-data",
  "plateau-server",
  "plateau-transport",
  "tempfile",

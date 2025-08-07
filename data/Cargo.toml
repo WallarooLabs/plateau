@@ -1,6 +1,6 @@
 [package]
-name = "plateau-server"
-description = "A low-profile event and log aggregator"
+name = "plateau-data"
+description = "Data processing for the plateau server"
 
 version.workspace = true
 edition.workspace = true
@@ -10,39 +10,27 @@ authors.workspace = true
 
 [dependencies]
 anyhow = "1"
-axum = { version = "0.6", features = ["headers"] }
 bytes = "1.6"
 bytesize = { version = "1.1.0", features = ["serde"] }
+chrono = "0.4"
 config = "0.14"
 futures = "0.3"
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+itertools = "0.13"
 parquet2 = { version = "0.17", default-features = false }
 parquet-format-safe = "0.2"
 humantime-serde = "1"
 serde_json = "1"
-serde_qs = { version = "0.12" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.7"
 tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.4", features = ["trace"] }
-# TODO: 0.7.4 adds a deprecation warning that will need to be fixed down the road
-sqlx = { version = "=0.7.3", features = [
-  "chrono",
-  "sqlite",
-  "runtime-tokio-rustls",
-] }
 systemstat = "0.2"
-utoipa = { version = "4", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
-chrono.workspace = true
 thiserror.workspace = true
 
-plateau-data.workspace = true
-plateau-client = { workspace = true, features = ["replicate"] }
+plateau-client.workspace = true
 plateau-transport.workspace = true
 
 

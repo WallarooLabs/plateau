@@ -14,9 +14,10 @@ use bytesize::ByteSize;
 use plateau_client::{
     Error as ClientError, Iterate, MultiChunk, PandasRecordIteration, Retrieve, TopicIterationQuery,
 };
-use plateau_server::chunk::Schema;
+use plateau_data::chunk::Schema;
+use plateau_data::limit;
 use plateau_server::config::PlateauConfig;
-use plateau_server::{catalog, http, limit, partition};
+use plateau_server::{catalog, http, partition};
 use plateau_test::http::TestServer;
 use plateau_test::inferences_large_extension;
 use plateau_transport::{

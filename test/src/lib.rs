@@ -157,3 +157,74 @@ pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         .unwrap(),
     }
 }
+
+pub fn inferences_schema_b() -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+    let inputs = Utf8Array::<i32>::from_trusted_len_values_iter(
+        vec!["one", "two", "three", "four", "five"].into_iter(),
+    );
+    let outputs = PrimitiveArray::<f32>::from_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    let mut failures = MutableListArray::<i32, MutableUtf8Array<i32>>::new();
+    let values: Vec<Option<Vec<Option<String>>>> = vec![
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+        Some(vec![]),
+    ];
+    failures.try_extend(values).unwrap();
+    let failures = ListArray::from(failures);
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("inputs", inputs.data_type().clone(), false),
+            Field::new("outputs", outputs.data_type().clone(), false),
+            Field::new("failures", failures.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![
+            time.boxed(),
+            inputs.boxed(),
+            outputs.boxed(),
+            failures.boxed(),
+        ])
+        .unwrap(),
+    }
+}
+
+pub fn inferences_nested() -> SchemaChunk<Schema> {
+    let time = PrimitiveArray::<i64>::from_values(vec![0, 1, 2, 3, 4]);
+
+    let a = inferences_schema_a();
+    let b = inferences_schema_b();
+
+    let a_struct = StructArray::new(
+        DataType::Struct(a.schema.fields),
+        a.chunk.into_arrays(),
+        None,
+    );
+    let b_struct = StructArray::new(
+        DataType::Struct(b.schema.fields),
+        b.chunk.into_arrays(),
+        None,
+    );
+
+    let schema = Schema {
+        fields: vec![
+            Field::new("time", time.data_type().clone(), false),
+            Field::new("input", a_struct.data_type().clone(), false),
+            Field::new("output", b_struct.data_type().clone(), false),
+        ],
+        metadata: Metadata::default(),
+    };
+
+    SchemaChunk {
+        schema,
+        chunk: Chunk::try_new(vec![time.boxed(), a_struct.boxed(), b_struct.boxed()]).unwrap(),
+    }
+}
