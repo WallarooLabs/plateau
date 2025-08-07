@@ -31,13 +31,13 @@ use plateau_transport::{
 };
 
 pub use crate::axum_util::{query::Query, Response};
+use crate::catalog::slog::SlogError;
 use crate::catalog::Catalog;
 use crate::data::{
     limit::{BatchStatus, RowLimit},
     Ordering, RecordIndex,
 };
 use crate::http::chunk::SchemaChunkRequest;
-use crate::slog::SlogError;
 
 mod chunk;
 mod error;

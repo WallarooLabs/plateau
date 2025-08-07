@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "catalog",
   "client",
   "data",
   "server",
@@ -33,6 +34,7 @@ reqwest = { version = "0.11", default-features = false, features = [
 ] }
 thiserror = "2.0"
 
+plateau-catalog = { path = "./catalog" }
 plateau-cli = { path = "./cli" }
 plateau-client = { path = "./client" }
 plateau-data = { path = "./data" }

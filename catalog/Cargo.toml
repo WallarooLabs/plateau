@@ -1,6 +1,6 @@
 [package]
-name = "plateau-server"
-description = "A low-profile event and log aggregator"
+name = "plateau-catalog"
+description = "Index of all stored segments in plateau"
 
 version.workspace = true
 edition.workspace = true
@@ -19,23 +19,23 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 humantime-serde = "1"
 serde_json = "1"
-serde_qs = { version = "0.12" }
 serde = { version = "1", features = ["derive"] }
-toml = "0.7"
 tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 tokio = { version = "1", features = ["full"] }
-tower-http = { version = "0.4", features = ["trace"] }
 # TODO: 0.7.4 adds a deprecation warning that will need to be fixed down the road
-utoipa = { version = "4", features = ["axum_extras"] }
-utoipa-swagger-ui = { version = "4", features = ["axum"] }
+sqlx = { version = "=0.7.3", features = [
+  "chrono",
+  "sqlite",
+  "runtime-tokio-rustls",
+] }
+systemstat = "0.2"
 
 chrono.workspace = true
 thiserror.workspace = true
 
-plateau-catalog.workspace = true
-plateau-client = { workspace = true, features = ["replicate"] }
 plateau-data.workspace = true
+plateau-client.workspace = true
 plateau-transport.workspace = true
 
 

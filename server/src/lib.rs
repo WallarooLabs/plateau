@@ -1,3 +1,6 @@
+//! The server pulls together the individual components of plateau and exposes
+//! an HTTP interface to the [catalog].
+
 use std::sync::Arc;
 
 use futures::{future, stream};
@@ -5,20 +8,15 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio_stream::wrappers::SignalStream;
 
 mod axum_util;
-pub mod catalog;
 pub mod config;
 pub mod http;
-pub mod manifest;
 pub mod metrics;
-pub mod partition;
 pub mod replication;
-mod slog;
-mod storage;
-mod topic;
 
 pub use crate::config::PlateauConfig as Config;
 pub use catalog::Catalog;
 pub use data::DEFAULT_BYTE_LIMIT;
+pub use plateau_catalog as catalog;
 pub use plateau_data as data;
 pub use plateau_transport as transport;
 pub use plateau_transport::arrow2;
