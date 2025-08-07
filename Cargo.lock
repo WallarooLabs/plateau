@@ -3007,6 +3007,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "plateau-client-arrow-rs"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "backoff",
+ "bytes",
+ "futures",
+ "httptest",
+ "parking_lot 0.11.2",
+ "plateau-server",
+ "plateau-test",
+ "plateau-transport-arrow-rs",
+ "polars",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_qs",
+ "thiserror 1.0.63",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
 name = "plateau-server"
 version = "0.5.5"
 dependencies = [

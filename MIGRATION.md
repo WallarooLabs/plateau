@@ -61,10 +61,12 @@ Based on the repository structure, the migration order is determined by dependen
   
 ### Phase 2: Client Libraries
 
-- [ ] **client-arrow-rs**
-  - [ ] Create copy of client
-  - [ ] Update dependencies to use transport-arrow-rs
-  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+- [x] **client-arrow-rs**
+  - [x] Create copy of client
+  - [x] Update dependencies to use transport-arrow-rs
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
+  - [x] Update `Arc<Schema>` to `SchemaRef` for better compatibility with arrow-rs
+  - [x] Qualify all `plateau_transport_arrow_rs` imports as `transport` for easier copying
 
 ### Phase 3: Test Infrastructure
 
@@ -113,6 +115,7 @@ Based on the repository structure, the migration order is determined by dependen
 ### Best Practices
 
 - Use `ArrayRef` instead of `Arc<dyn Array>` when working with arrays. The `ArrayRef` type is a type alias for `Arc<dyn Array>` and is the recommended way to work with arrays in arrow-rs.
+- For any calls to `::try_new_with_options` where the options are simply the `::default()`, prefer `try_new` when available
 
 ### Troubleshooting Docs
 
@@ -215,14 +218,29 @@ When converting JSON serialization code, pay special attention to:
 - In arrow-rs, metadata is preserved using `ArrowSchema::new_with_metadata()` rather than directly manipulating the metadata field
 - When propagating metadata between schema instances, we need to manually copy it via `.metadata()` iterators
 
-#### Test Compatibility
-- Arrow-rs handling of structs differs from arrow2, which can cause test failures even with semantically equivalent code
-- The order of fields in complex types can be different between the two libraries
-- Focus on preserving the functionality rather than exact field-by-field serialization formats
+#### Import Qualification
+- When migrating code, it's important to consistently qualify imports, especially when dealing with modules that might have the same name in different paths
+- In our case, we used `plateau_transport_arrow_rs as transport` to create a consistent qualifier, which helps avoid confusion between old and new module paths
+- This pattern makes the migration process smoother and reduces the risk of mixing imports from different module versions
 
 #### API Structure Differences
 - Arrow2's functions like `take` are found directly in the compute module, while arrow-rs has them in specialized modules like arrow_select
 - Arrow-rs has a more modular structure with different crates for different functionalities
+
+#### SchemaRef Instead of Arc<Schema>
+- In arrow-rs, it's recommended to use the `SchemaRef` type alias instead of `Arc<Schema>`
+- This makes the code more consistent with arrow-rs conventions and clearer when reading
+- The type alias `SchemaRef` is simply `Arc<Schema>`, but using it makes the intent clearer
+
+#### Transport Qualification for Easier Copying
+- Using a consistent qualifier (like `transport`) for imported types from `plateau_transport_arrow_rs` makes it easier to maintain and copy code
+- This approach also helps avoid name conflicts when types are imported from multiple sources
+- When migrating from one implementation to another, consistent import qualifications reduce the number of changes needed
+
+#### Data Serialization Size Differences
+- The serialization format used by arrow-rs may result in slightly larger binary representations compared to arrow2
+- When replicating tests that depend on specific byte sizes (like the page_size_discovery test), you may need to adjust size limits to accommodate these differences
+- Pay attention to tests that have specific size boundaries or limits, as they might need adjustment during migration
 
 ### References
 
