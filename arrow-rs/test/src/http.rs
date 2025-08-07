@@ -79,7 +79,7 @@ impl TestServer {
         Catalog::close_arc(self.stop().await).await;
     }
 
-    pub fn client(&self) -> anyhow::Result<plateau_client::Client> {
-        plateau_client::Client::new(&self.base()).map_err(Into::into)
+    pub fn client(&self) -> anyhow::Result<plateau_client_arrow_rs::Client> {
+        plateau_client_arrow_rs::Client::new(&self.base()).map_err(Into::into)
     }
 }

@@ -13,9 +13,9 @@ tokio = "1.38"
 
 chrono.workspace = true
 
-plateau-client.workspace = true
+plateau-client-arrow-rs = { path = "../client" }
 plateau-server.workspace = true
-plateau-transport.workspace = true
+plateau-transport-arrow-rs = { path = "../transport" }
 
 
 [lints]

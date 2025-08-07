@@ -3152,9 +3152,9 @@ version = "0.5.5"
 dependencies = [
  "anyhow",
  "chrono",
- "plateau-client",
+ "plateau-client-arrow-rs",
  "plateau-server",
- "plateau-transport",
+ "plateau-transport-arrow-rs",
  "tempfile",
  "tokio",
 ]

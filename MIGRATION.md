@@ -72,11 +72,11 @@ Based on the repository structure, the migration order is determined by dependen
 
 ### Phase 3: Test Infrastructure
 
-- [ ] **plateau-test-arrow-rs**
-  - [ ] Create copy of test
-  - [ ] Update dependencies to use transport-arrow-rs, client-arrow-rs
-  - [ ] Keep the dependency on the legacy plateau-server crate
-  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+- [x] **plateau-test-arrow-rs**
+  - [x] Create copy of test
+  - [x] Update dependencies to use transport-arrow-rs, client-arrow-rs
+  - [x] Keep the dependency on the legacy plateau-server crate
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
 
 
 ### Phase 4: Data Processing Library
@@ -309,10 +309,43 @@ Due to the refactoring that pulled data processing functionality into the `plate
 - This approach also helps avoid name conflicts when types are imported from multiple sources
 - When migrating from one implementation to another, consistent import qualifications reduce the number of changes needed
 
-#### Data Serialization Size Differences
-- The serialization format used by arrow-rs may result in slightly larger binary representations compared to arrow2
-- When replicating tests that depend on specific byte sizes (like the page_size_discovery test), you may need to adjust size limits to accommodate these differences
-- Pay attention to tests that have specific size boundaries or limits, as they might need adjustment during migration
+#### Primitive Type Usage in arrow-rs
+- In arrow-rs, you need to use specific type wrappers like `Int64Type`, `Float32Type` instead of primitive types like `i64` and `f32`
+- For example: `PrimitiveArray::<Int64Type>::from_iter_values(...)` instead of `PrimitiveArray::<i64>::from(...)`
+- The types are found in the `arrow_array::types::*` module
+
+#### Fixed Size List Arrays
+- arrow-rs has a different constructor signature for FixedSizeListArray
+- In arrow2: `FixedSizeListArray::new(DataType::FixedSizeList(...), values, null_bitmap)`
+- In arrow-rs: `FixedSizeListArray::new(field, size, values, null_bitmap)` where field is an `Arc<Field>`
+
+#### StructArray Construction
+- StructArray in arrow-rs requires the `Fields` type instead of `Vec<Field>`
+- Fields for struct arrays must be wrapped in `Fields::from(vec![...])`
+- Use: `StructArray::new(Fields::from(vec![...]), ...)` instead of `StructArray::new(DataType::Struct(vec![...]), ...)`
+
+#### Schema Cloning and Moving
+- Be careful with Schema instances as they don't implement Copy
+- When reusing a Schema, make sure to clone it before moving it into a struct:
+  ```rust
+  let schema_copy = Schema::new(...);
+  let record_batch = RecordBatch::try_new(Arc::new(schema_copy.clone()), ...);
+  SchemaChunk { schema: schema_copy, chunk: record_batch }
+  ```
+
+#### Buffer and Offset Management
+- arrow-rs uses `ScalarBuffer` instead of `Buffer` for offset buffers
+- Use `OffsetBuffer::new(ScalarBuffer::from(offsets))` instead of `OffsetBuffer::new(Buffer::from_slice_ref(&offsets))`
+
+#### Empty Arrays
+- Creating empty arrays is different: use `StringArray::from(Vec::<&str>::new())` instead of methods like `new_empty()`
+
+#### Testing Arrow Arrays
+- When writing tests for Arrow arrays, use `as_any().downcast_ref::<SpecificArrayType>()` to access array-specific methods
+- Access list array elements via offset buffers: `list_array.value_offsets()[index]` rather than methods like `value_offset(index)`
+- Testing nested array structures requires recursive downcasting to access inner array data
+- Helper functions can simplify test code for complex nested array structures
+- Testing empty list arrays is important to verify edge cases during data handling
 
 ### References
 
