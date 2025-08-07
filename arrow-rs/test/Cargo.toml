@@ -1,0 +1,22 @@
+[package]
+name = "plateau-test-arrow-rs"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+
+[dependencies]
+anyhow = "1.0"
+tempfile = "3"
+tokio = "1.38"
+
+chrono.workspace = true
+
+plateau-client.workspace = true
+plateau-server.workspace = true
+plateau-transport.workspace = true
+
+
+[lints]
+workspace = true

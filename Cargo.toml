@@ -11,7 +11,8 @@ members = [
   "plateau",
   "test",
   "arrow-rs/transport",
-  "arrow-rs/client"
+  "arrow-rs/client",
+  "arrow-rs/test"
 ]
 
 
