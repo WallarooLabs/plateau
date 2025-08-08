@@ -198,7 +198,7 @@ impl Partition {
         self.state.write().await.messages.checkpoint().await;
     }
 
-    async fn stream_with_active<'a>(
+    pub async fn stream_with_active<'a>(
         &'a self,
         stored: impl Stream<Item = SegmentData> + 'a + Send,
         state: &RwLockReadGuard<'a, State>,
@@ -226,7 +226,7 @@ impl Partition {
         }
     }
 
-    pub(crate) async fn get_records(
+    pub async fn get_records(
         &self,
         start: RecordIndex,
         limit: RowLimit,
@@ -258,7 +258,7 @@ impl Partition {
             .await
     }
 
-    pub(crate) async fn get_records_by_time(
+    pub async fn get_records_by_time(
         &self,
         start: RecordIndex,
         times: RangeInclusive<DateTime<Utc>>,
@@ -291,7 +291,7 @@ impl Partition {
             .await
     }
 
-    pub(crate) async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
+    pub async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
         let read = self.state.read().await;
         let stored = self.manifest.get_partition_range(&self.id).await;
         debug!("stored: {:?}", stored);
@@ -305,7 +305,7 @@ impl Partition {
             .reduce(merge_ranges)
     }
 
-    pub(crate) async fn byte_size(&self) -> usize {
+    pub async fn byte_size(&self) -> usize {
         self.manifest.get_size(Scope::Partition(&self.id)).await
     }
 

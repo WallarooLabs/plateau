@@ -39,9 +39,9 @@ pub struct Topic {
 }
 
 #[derive(Debug)]
-pub(crate) struct TopicRecordResponse {
-    pub(crate) iter: TopicIterator,
-    pub(crate) batch: LimitedBatch,
+pub struct TopicRecordResponse {
+    pub iter: TopicIterator,
+    pub batch: LimitedBatch,
 }
 
 impl Topic {
@@ -234,7 +234,7 @@ impl Topic {
         partition.get_record_by_index(index).await
     }
 
-    pub(crate) async fn get_records(
+    pub async fn get_records(
         &self,
         starts: TopicIterator,
         limit: RowLimit,
@@ -253,7 +253,7 @@ impl Topic {
         .await
     }
 
-    pub(crate) async fn get_records_by_time(
+    pub async fn get_records_by_time(
         &self,
         starts: TopicIterator,
         times: RangeInclusive<DateTime<Utc>>,
@@ -282,7 +282,7 @@ impl Topic {
     /// partitions are updated in `iterator`. Forward iteration will include
     /// partitions as they are created, reverse operation will only process
     /// those partitions present at the first iteration.
-    async fn iter_topic<'a, F, Fut>(
+    pub async fn iter_topic<'a, F, Fut>(
         &'a self,
         mut iterator: TopicIterator,
         limit: RowLimit,
@@ -373,7 +373,7 @@ impl Topic {
         }
     }
 
-    pub(crate) async fn get_records_from_all<'a, F, Fut>(
+    pub async fn get_records_from_all<'a, F, Fut>(
         &'a self,
         iterator: TopicIterator,
         limit: RowLimit,

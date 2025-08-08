@@ -52,7 +52,7 @@ use crate::data::{
 use crate::manifest::{PartitionId, SegmentData, SegmentId};
 
 #[derive(Error, Debug)]
-pub(crate) enum SlogError {
+pub enum SlogError {
     #[error("writer thread busy")]
     WriterThreadBusy,
 }
