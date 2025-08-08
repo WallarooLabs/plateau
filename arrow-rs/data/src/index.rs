@@ -1,6 +1,6 @@
 use std::ops;
 
-use crate::client::TopicIterationOrder;
+use plateau_transport_arrow_rs::TopicIterationOrder;
 
 /// Each record also has a global unique sequential index
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Ord, PartialOrd)]
