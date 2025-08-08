@@ -17,6 +17,10 @@ plateau-client-arrow-rs = { path = "../client" }
 plateau-server.workspace = true
 plateau-transport-arrow-rs = { path = "../transport" }
 
+[dev-dependencies]
+
+test-log.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

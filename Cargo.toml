@@ -33,7 +33,9 @@ reqwest = { version = "0.11", default-features = false, features = [
   "stream",
   "trust-dns",
 ] }
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
 thiserror = "2.0"
+tracing = "0.1"
 
 plateau-catalog = { path = "./catalog" }
 plateau-cli = { path = "./cli" }

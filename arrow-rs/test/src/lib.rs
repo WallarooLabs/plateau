@@ -1,4 +1,6 @@
 use plateau_transport_arrow_rs as transport;
+use plateau_transport_arrow_rs::arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
+use plateau_transport_arrow_rs::arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use std::sync::Arc;
 use transport::arrow_array::types::*;
 use transport::arrow_array::Array;
@@ -80,11 +82,7 @@ pub fn inferences_large(blob_size: usize) -> SchemaChunk<Schema> {
     }
 }
 
-pub fn inferences_large_extension(
-    count: i64,
-    inner_size: i64,
-    _shape: &str,
-) -> SchemaChunk<Schema> {
+pub fn inferences_large_extension(count: i64, inner_size: i64, shape: &str) -> SchemaChunk<Schema> {
     let time = PrimitiveArray::<Int64Type>::from_iter_values(0..count);
 
     let inner = PrimitiveArray::<Int64Type>::from_iter_values(
@@ -95,8 +93,23 @@ pub fn inferences_large_extension(
     let field = Arc::new(Field::new("inner", inner.data_type().clone(), false));
     let tensor = FixedSizeListArray::new(field, inner_size as i32, Arc::new(inner), None);
 
+    let extension_field = Field::new("tensor", tensor.data_type().clone(), true).with_metadata(
+        // XXX arrow_schema 56 has a much nicer way to do this
+        [
+            (
+                EXTENSION_TYPE_NAME_KEY.into(),
+                "arrow.fixed_shape_tensor".to_string(),
+            ),
+            (
+                EXTENSION_TYPE_METADATA_KEY.into(),
+                format!("{{\"shape\":{shape}}}"),
+            ),
+        ]
+        .into(),
+    );
+
     // Fields for struct arrays must be wrapped in Fields::from
-    let fields = Fields::from(vec![Field::new("tensor", tensor.data_type().clone(), true)]);
+    let fields = Fields::from(vec![extension_field]);
     let out = StructArray::new(fields, vec![Arc::new(tensor)], None);
 
     let schema_copy = Schema::new(vec![
@@ -189,15 +202,6 @@ pub fn inferences_schema_b() -> SchemaChunk<Schema> {
     let inputs = StringArray::from(vec!["one", "two", "three", "four", "five"]);
     let outputs = PrimitiveArray::<Float32Type>::from_iter_values(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
 
-    // Create an empty list array
-    let _values: Vec<Option<Vec<Option<String>>>> = vec![
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-        Some(vec![]),
-    ];
-
     // Create an empty StringArray
     let string_array = StringArray::from(Vec::<&str>::new());
     let offsets = vec![0, 0, 0, 0, 0, 0];
@@ -263,9 +267,10 @@ pub fn inferences_nested() -> SchemaChunk<Schema> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracing::debug;
     use transport::arrow_array::ArrayRef;
 
-    #[test]
+    #[test_log::test]
     fn test_inferences_large() {
         let blob_size = 10;
         let result = inferences_large(blob_size);
@@ -318,7 +323,7 @@ mod tests {
         assert!(failures.as_any().downcast_ref::<ListArray>().is_some());
     }
 
-    #[test]
+    #[test_log::test]
     fn test_inferences_large_extension() {
         let count = 3;
         let inner_size = 2;
@@ -354,9 +359,10 @@ mod tests {
         assert!(out.as_any().downcast_ref::<StructArray>().is_some());
     }
 
-    #[test]
+    #[test_log::test]
     fn test_inferences_schema_a() {
         let result = inferences_schema_a();
+        debug!(?result);
 
         // Test schema fields
         assert_eq!(result.schema.fields.len(), 4);
@@ -399,9 +405,10 @@ mod tests {
         assert!(outputs.as_any().downcast_ref::<StructArray>().is_some());
     }
 
-    #[test]
+    #[test_log::test]
     fn test_inferences_schema_b() {
         let result = inferences_schema_b();
+        debug!(?result);
 
         // Test schema fields
         assert_eq!(result.schema.fields.len(), 4);
@@ -461,9 +468,10 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_log::test]
     fn test_inferences_nested() {
         let result = inferences_nested();
+        debug!(?result);
 
         // Test schema fields
         assert_eq!(result.schema.fields.len(), 3);

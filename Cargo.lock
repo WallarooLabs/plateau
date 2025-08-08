@@ -3156,7 +3156,9 @@ dependencies = [
  "plateau-server",
  "plateau-transport-arrow-rs",
  "tempfile",
+ "test-log",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
