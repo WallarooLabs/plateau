@@ -45,8 +45,10 @@ Based on the repository structure, the migration order is determined by dependen
 
 - **transport**: Base library with direct arrow2 dependencies, no internal dependencies.
 - **client**: Depends on transport.
-- **test**: Depends on transport, client, and server.
-- **server**: Depends on transport and client.
+- **data**: Depends on transport and client.
+- **catalog**: Depends on transport, client, and data.
+- **test**: Depends on transport, client, catalog, and server.
+- **server**: Depends on transport, client, and catalog.
 - **cli**: Depends on transport and client.
 - **bench**: Depends on server and client.
 - **plateau**: Depends on server (which brings in the rest).
@@ -55,13 +57,13 @@ Based on the repository structure, the migration order is determined by dependen
 
 ### Phase 1: Base Libraries
 
-- [x] **transport-arrow-rs**
+- [x] **plateau-transport-arrow-rs**
   - [x] Create copy of transport
   - [x] Update arrow2 to arrow-rs, verify tests and functionality
   
 ### Phase 2: Client Libraries
 
-- [x] **client-arrow-rs**
+- [x] **plateau-client-arrow-rs**
   - [x] Create copy of client
   - [x] Update dependencies to use transport-arrow-rs
   - [x] Update arrow2 to arrow-rs, verify tests and functionality
@@ -70,47 +72,86 @@ Based on the repository structure, the migration order is determined by dependen
 
 ### Phase 3: Test Infrastructure
 
-- [ ] **test-arrow-rs**
-  - [ ] Create copy of test
-  - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
+- [x] **plateau-test-arrow-rs**
+  - [x] Create copy of test
+  - [x] Update dependencies to use transport-arrow-rs, client-arrow-rs
+  - [x] Keep the dependency on the legacy plateau-server crate
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
+
+
+### Phase 4: Data Processing Library
+
+- [ ] **plateau-data-arrow-rs**
+  - [ ] Create copy of data
+  - [ ] Update dependencies to use transport-arrow-rs
+  - [ ] Remove support for parquet segments (for now, just remove the `mod parquet` segment)
   - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+  - [ ] Verify chunk processing and segment management functionality
 
-### Phase 4: Server Implementation
+### Phase 5: Catalog Library
 
-- [ ] **server-arrow-rs**
+- [ ] **plateau-catalog-arrow-rs**
+  - [ ] Create copy of catalog
+  - [ ] Update dependencies to use transport-arrow-rs, client-arrow-rs, and data-arrow-rs
+  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+  - [ ] Verify topic management and partition functionality
+
+### Phase 6: Server Implementation
+
+- [ ] **plateau-server-arrow-rs**
   - [ ] Create copy of server
-  - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
-  - [ ] Update references to parquet2 if necessary
+  - [ ] Update dependencies to use transport-arrow-rs, client-arrow-rs, and catalog-arrow-rs
+  - [ ] Update plateau-test-arrow-rs to now use plateau-server-arrow-rs instead of plateau-server
   - [ ] Update arrow2 to arrow-rs, verify tests and functionality
+  - [ ] Update dependencies to use plateau-data crate for data processing functionality
+  - [ ] Verify catalog functionality remains intact after data module refactoring
 
-### Phase 5: CLI Tool
+### Phase 7: CLI Tool
 
-- [ ] **cli-arrow-rs**
+- [ ] **plateau-cli-arrow-rs**
   - [ ] Create copy of cli
   - [ ] Update dependencies to use transport-arrow-rs and client-arrow-rs
   - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
-### Phase 6: Benchmarking
+### Phase 8: Benchmarking
 
-- [ ] **bench-arrow-rs**
+- [ ] **plateau-bench-arrow-rs**
   - [ ] Create copy of bench
   - [ ] Update dependencies to use server-arrow-rs and client-arrow-rs
   - [ ] Update arrow2 to arrow-rs, verify tests and functionality
 
-### Phase 7: Main Application
+### Phase 9: Main Application
 
 - [ ] **plateau-arrow-rs**
   - [ ] Create copy of plateau
   - [ ] Update dependencies to use server-arrow-rs
   - [ ] Verify tests and functionality
 
-### Phase 8: Integration
+### Phase 10: Integration
 
 - [ ] Update workspace Cargo.toml to include new arrow-rs crates
 - [ ] Update workspace patch section to remove arrow2 dependencies
 - [ ] Final integration testing
 
 ## Migration Notes
+
+### Data and Catalog Refactoring
+
+As part of the refactoring process, the data processing functionality has been pulled out of the server crate into a separate `plateau-data` crate, and the catalog functionality has been pulled out into a separate `plateau-catalog` crate. This modularization helps to:
+
+- Separate data processing and catalog concerns from server implementation details
+- Make data processing and catalog functionality reusable across other components
+- Simplify the server crate by reducing its responsibilities
+- Improve testability of data processing and catalog components
+
+The catalog crate now depends on the `plateau-data` crate for core data processing capabilities. When migrating to arrow-rs, ensure that:
+
+- The `plateau-data` crate dependencies are properly updated to use arrow-rs equivalents
+- The `plateau-catalog` crate dependencies are properly updated to use arrow-rs equivalents
+- Data processing functionality in the `plateau-data` crate is migrated before the catalog crate
+- Catalog functionality in the `plateau-catalog` crate is migrated before the server crate
+- Integration between the catalog and data crates remains functional
+- Any catalog-related tests that depend on data processing functionality continue to pass
 
 ### Best Practices
 
@@ -204,6 +245,34 @@ When converting JSON serialization code, pay special attention to:
   - Create writers with `try_new_with_options` rather than `new`
   - Options are configured with `IpcWriteOptions` instead of `WriteOptions`
 
+### Server Test Considerations
+
+Due to the refactoring that pulled data processing functionality into the `plateau-data` crate, special attention should be paid to the following test aspects during the migration:
+
+- **Data Processing Integration**: Ensure that all server tests that directly or indirectly use data processing functionality continue to work correctly with the new crate structure. This includes tests for:
+  - Schema handling and metadata preservation
+  - Record appending and retrieval
+  - Partition and topic iteration
+  - Data serialization and deserialization
+  - Chunk processing and segment management
+
+- **Catalog Functionality**: Verify that all catalog-related tests continue to pass, especially those that:
+  - Test topic creation and management
+  - Validate checkpointing and retention policies
+  - Check data migration between versions
+  - Verify concurrent access patterns
+
+- **HTTP API Tests**: All HTTP API tests in the server crate depend on proper data processing. Make sure:
+  - Topic and partition endpoints continue to work correctly
+  - Data focus and filtering features function as expected
+  - Request/response size limits are properly enforced
+  - Status reporting (RecordLimited, ByteLimited, etc.) remains accurate
+
+- **Integration Tests**: End-to-end tests that span multiple components should be validated:
+  - Test data flow from client through server to storage and back
+  - Verify performance characteristics remain acceptable
+  - Ensure error handling is consistent across the refactored boundaries
+
 ### Testing Considerations
 
 - Ensure compatibility with existing data formats
@@ -211,6 +280,9 @@ When converting JSON serialization code, pay special attention to:
 - Check for performance regressions
 - Verify memory usage patterns
 - Ensure all public APIs maintain backward compatibility where possible
+- Verify that server tests that depend on data processing continue to pass after the refactoring
+- Ensure catalog functionality remains intact when interacting with the plateau-data crate
+- Validate that partition and topic iteration continue to work correctly with the refactored data modules
 
 ### Lessons Learned
 
@@ -237,10 +309,43 @@ When converting JSON serialization code, pay special attention to:
 - This approach also helps avoid name conflicts when types are imported from multiple sources
 - When migrating from one implementation to another, consistent import qualifications reduce the number of changes needed
 
-#### Data Serialization Size Differences
-- The serialization format used by arrow-rs may result in slightly larger binary representations compared to arrow2
-- When replicating tests that depend on specific byte sizes (like the page_size_discovery test), you may need to adjust size limits to accommodate these differences
-- Pay attention to tests that have specific size boundaries or limits, as they might need adjustment during migration
+#### Primitive Type Usage in arrow-rs
+- In arrow-rs, you need to use specific type wrappers like `Int64Type`, `Float32Type` instead of primitive types like `i64` and `f32`
+- For example: `PrimitiveArray::<Int64Type>::from_iter_values(...)` instead of `PrimitiveArray::<i64>::from(...)`
+- The types are found in the `arrow_array::types::*` module
+
+#### Fixed Size List Arrays
+- arrow-rs has a different constructor signature for FixedSizeListArray
+- In arrow2: `FixedSizeListArray::new(DataType::FixedSizeList(...), values, null_bitmap)`
+- In arrow-rs: `FixedSizeListArray::new(field, size, values, null_bitmap)` where field is an `Arc<Field>`
+
+#### StructArray Construction
+- StructArray in arrow-rs requires the `Fields` type instead of `Vec<Field>`
+- Fields for struct arrays must be wrapped in `Fields::from(vec![...])`
+- Use: `StructArray::new(Fields::from(vec![...]), ...)` instead of `StructArray::new(DataType::Struct(vec![...]), ...)`
+
+#### Schema Cloning and Moving
+- Be careful with Schema instances as they don't implement Copy
+- When reusing a Schema, make sure to clone it before moving it into a struct:
+  ```rust
+  let schema_copy = Schema::new(...);
+  let record_batch = RecordBatch::try_new(Arc::new(schema_copy.clone()), ...);
+  SchemaChunk { schema: schema_copy, chunk: record_batch }
+  ```
+
+#### Buffer and Offset Management
+- arrow-rs uses `ScalarBuffer` instead of `Buffer` for offset buffers
+- Use `OffsetBuffer::new(ScalarBuffer::from(offsets))` instead of `OffsetBuffer::new(Buffer::from_slice_ref(&offsets))`
+
+#### Empty Arrays
+- Creating empty arrays is different: use `StringArray::from(Vec::<&str>::new())` instead of methods like `new_empty()`
+
+#### Testing Arrow Arrays
+- When writing tests for Arrow arrays, use `as_any().downcast_ref::<SpecificArrayType>()` to access array-specific methods
+- Access list array elements via offset buffers: `list_array.value_offsets()[index]` rather than methods like `value_offset(index)`
+- Testing nested array structures requires recursive downcasting to access inner array data
+- Helper functions can simplify test code for complex nested array structures
+- Testing empty list arrays is important to verify edge cases during data handling
 
 ### References
 

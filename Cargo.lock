@@ -3140,11 +3140,25 @@ dependencies = [
  "anyhow",
  "chrono",
  "plateau-client",
- "plateau-data",
  "plateau-server",
  "plateau-transport",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "plateau-test-arrow-rs"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "plateau-client-arrow-rs",
+ "plateau-server",
+ "plateau-transport-arrow-rs",
+ "tempfile",
+ "test-log",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
