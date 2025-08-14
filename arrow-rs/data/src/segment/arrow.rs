@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow_array::RecordBatch;
+use arrow_ipc::MetadataVersion;
 use arrow_ipc::{
     reader::{FileReader, StreamReader},
     writer::{FileWriter, IpcWriteOptions},
@@ -97,7 +98,8 @@ impl Segment {
         // frames written to disk.
         let (reader, schema) = fs::File::open(&self.path)
             .map_err(anyhow::Error::from)
-            .and_then(|damaged| {
+            .and_then(|mut damaged| {
+                damaged.seek(SeekFrom::Start(8))?;
                 let stream_reader = StreamReader::try_new(damaged, None)?;
                 let schema = stream_reader.schema();
                 Ok((stream_reader, schema))
@@ -204,9 +206,10 @@ pub struct Writer {
 impl Writer {
     pub fn create(file: fs::File, schema: &Schema) -> anyhow::Result<Self> {
         let schema_ref = Arc::new(schema.clone());
+        let options = IpcWriteOptions::try_new(8, false, MetadataVersion::V4)?;
 
         Ok(Self {
-            writer: FileWriter::try_new(file.try_clone()?, &schema_ref)?,
+            writer: FileWriter::try_new_with_options(file.try_clone()?, &schema_ref, options)?,
             file,
         })
     }
@@ -214,6 +217,7 @@ impl Writer {
     pub fn write_chunk(&mut self, chunk: SegmentChunk) -> anyhow::Result<()> {
         let schema = self.writer.schema();
         self.writer.write(&chunk.to_record_batch(schema)?)?;
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -440,7 +444,7 @@ pub mod test {
         Ok(s)
     }
 
-    #[test]
+    #[test_log::test]
     fn test_open_drop_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
@@ -454,7 +458,7 @@ pub mod test {
         Ok(())
     }
 
-    #[test]
+    #[test_log::test]
     fn test_open_drop_read_reread() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
@@ -495,7 +499,7 @@ pub mod test {
         Ok(s)
     }
 
-    #[test]
+    #[test_log::test]
     fn test_partial_write_recovery() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
@@ -515,6 +519,7 @@ pub mod test {
         Ok(())
     }
 
+    #[test_log::test]
     fn test_partial_write_read_reread() -> anyhow::Result<()> {
         let root = tempdir()?;
         let a = inferences_schema_a();
