@@ -137,14 +137,14 @@ impl TimeRange for SchemaChunk<Schema> {
     fn time_range(&self) -> Result<RangeInclusive<DateTime<Utc>>, ChunkError> {
         let times = get_time(&self.chunk, self.schema.borrow())?;
 
-        // Collect values into a Vec, filter out nulls, then find min/max
-        let values: Vec<i64> = times.values().to_vec();
+        let empty = || ChunkError::Unsupported("EmptyChunk".to_string());
+        let values = times.values();
         if values.is_empty() {
-            return Err(ChunkError::Unsupported("EmptyChunk".to_string()));
+            return Err(empty());
         }
 
-        let start = parse_time(*values.iter().min().unwrap());
-        let end = parse_time(*values.iter().max().unwrap());
+        let start = parse_time(*values.iter().min().ok_or_else(empty)?);
+        let end = parse_time(*values.iter().max().ok_or_else(empty)?);
 
         Ok(start..=end)
     }
