@@ -325,44 +325,35 @@ pub mod test {
         assert_eq!(1611, b_bytes.len())
     }*/
 
-    #[test]
+    #[test_log::test]
     fn test_size_estimates() -> Result<(), ChunkError> {
         let time_size = 5 * 8;
-        let unknown = 40;
+        let inputs_size = 5 * 4;
+        let mul_size = 5 * 4;
+        let inner_size = 10 * 8;
+        let tensor_size = inner_size;
+        let outputs_size = mul_size + tensor_size;
+
         // Arrow-rs has a slightly different memory layout from arrow2, so we need to adjust the expected size
-        let a_size = time_size + 10 * 8 + 5 * 4 + 10 * 8 + 5 * 4 + unknown;
+        let a_size = time_size + tensor_size + inputs_size + outputs_size;
         let estimated = estimate_size(&inferences_schema_a().chunk)?;
 
         // Update the test to reflect the actual arrow-rs memory layout
         // We allow a range of values since the exact size might change between arrow-rs versions
-        assert!(
-            estimated >= a_size - 40 && estimated <= a_size + 40,
-            "Expected size around {}, got {}",
-            a_size,
-            estimated
-        );
+        assert_eq!(estimated, a_size);
 
-        let numbers = 3 + 3 + 5 + 4 + 4;
-        let unknown = 48;
-        let b_size = time_size + numbers + 5 * 4 + unknown;
+        let time_size = 5 * 8;
+        let inputs_size = 3 + 3 + 5 + 4 + 4;
+        let outputs_size = 5 * 4;
+        // failures array is empty
+        let b_size = time_size + inputs_size + outputs_size;
         let estimated_b = estimate_size(&inferences_schema_b().chunk)?;
 
-        assert!(
-            estimated_b >= b_size - 40 && estimated_b <= b_size + 40,
-            "Expected size around {}, got {}",
-            b_size,
-            estimated_b
-        );
+        assert_eq!(estimated_b, b_size,);
 
         let nested = estimate_size(&inferences_nested().chunk)?;
         let expected_nested = time_size + estimated + estimated_b;
-
-        assert!(
-            nested >= expected_nested - 40 && nested <= expected_nested + 40,
-            "Expected size around {}, got {}",
-            expected_nested,
-            nested
-        );
+        assert_eq!(nested, expected_nested);
 
         Ok(())
     }
