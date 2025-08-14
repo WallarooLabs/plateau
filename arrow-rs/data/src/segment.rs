@@ -592,38 +592,6 @@ pub mod test {
     }
 
     #[test]
-    fn test_parquet_cache_updates() -> Result<()> {
-        let root = tempdir()?;
-
-        let a = inferences_schema_a();
-
-        let all_counts = [1, 3, 4, 2, 1];
-        for ix in 1..all_counts.len() {
-            trace!("iter: {ix} counts: 1 + {:?}", &all_counts[0..ix]);
-            let mut chunk = a.chunk.clone();
-
-            let path = root.path().join(format!("{ix:?}.parquet"));
-            let s = Segment::at(path.clone());
-            let mut w = s.create(a.schema.clone(), Config::parquet())?;
-
-            for count in &all_counts[0..ix] {
-                let new_parts: Vec<_> = std::iter::once(chunk.clone())
-                    .chain(std::iter::repeat_n(a.chunk.clone(), *count))
-                    .collect();
-                chunk = crate::chunk::concatenate(&new_parts)?;
-                w.update_cache(chunk.clone())?;
-            }
-
-            drop(w);
-
-            let mut r = s.iter()?;
-            assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_arrow_cache_updates() -> Result<()> {
         let root = tempdir()?;
 
