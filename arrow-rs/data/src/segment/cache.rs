@@ -123,8 +123,7 @@ impl Writer {
             return Ok(());
         }
 
-        // In arrow-rs, schema comparison works differently
-        anyhow::ensure!(schema.fields().len() == self.partial.schema.fields().len());
+        anyhow::ensure!(schema.fields() == self.partial.schema.fields());
 
         let new_len = chunk.len();
         let additional = crate::chunk::slice(chunk.clone(), self.len(), new_len - self.len());
