@@ -60,7 +60,7 @@ impl Segment {
         anyhow::ensure!(ext != "recovered");
 
         let recovery_path = path.with_extension("recovery");
-        let recovered_path = path.with_extension("recovered"); // Fixed - was using "recovery" twice
+        let recovered_path = path.with_extension("recovered");
 
         Ok(Self {
             path,
