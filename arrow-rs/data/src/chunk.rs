@@ -1,7 +1,6 @@
 //! Utilities for working with RecordBatch type from arrow-rs.
 use arrow_array::{Array, ArrayRef, BooleanArray, Int32Array, Int64Array, RecordBatch};
 pub use arrow_schema::Schema;
-use arrow_schema::SchemaRef;
 use arrow_select::filter::filter_record_batch;
 use chrono::{DateTime, TimeZone, Utc};
 use plateau_transport_arrow_rs::{ChunkError, SchemaChunk, SegmentChunk};
@@ -61,7 +60,7 @@ impl RecordBatchExt for RecordBatch {
 
     fn new(arrays: Vec<ArrayRef>) -> Self {
         if arrays.is_empty() {
-            return RecordBatch::new_empty(Arc::new(Schema::empty()));
+            return Self::new_empty(Arc::new(Schema::empty()));
         }
 
         // All arrays must have the same length
@@ -78,11 +77,11 @@ impl RecordBatchExt for RecordBatch {
         let schema = Arc::new(Schema::new(arrow_schema::Fields::from(fields)));
 
         // Create the batch (may fail if arrays have different lengths)
-        match RecordBatch::try_new(schema, arrays) {
+        match Self::try_new(schema, arrays) {
             Ok(batch) => batch,
             Err(_) => {
                 // Fallback: create a batch with empty schema
-                RecordBatch::new_empty(Arc::new(Schema::empty()))
+                Self::new_empty(Arc::new(Schema::empty()))
             }
         }
     }
@@ -171,12 +170,8 @@ impl IndexedChunk {
 
         // Create an index array based on the order
         let indices = match order {
-            Ordering::Forward => {
-                Arc::new(Int32Array::from_iter_values(start..(start + size))) as ArrayRef
-            }
-            Ordering::Reverse => {
-                Arc::new(Int32Array::from_iter_values(((start - size)..start).rev())) as ArrayRef
-            }
+            Ordering::Forward => Arc::new(Int32Array::from_iter_values(start..(start + size))),
+            Ordering::Reverse => Arc::new(Int32Array::from_iter_values(((start - size)..start).rev())),
         };
 
         arrays.push(indices);
@@ -187,7 +182,7 @@ impl IndexedChunk {
             let name = if i < data.schema.fields().len() {
                 data.schema.fields()[i].name().to_string()
             } else {
-                format!("__index_{}", i)
+                format!("__index_{i}")
             };
 
             fields.push(arrow_schema::Field::new(
@@ -210,7 +205,7 @@ impl IndexedChunk {
     /// using [Ordering::Reverse], this will be the high index, otherwise it will be the low index.
     pub fn start(&self) -> Option<RecordIndex> {
         let indices = self.indices();
-        if indices.len() == 0 {
+        if indices.is_empty() {
             return None;
         }
 
@@ -221,7 +216,7 @@ impl IndexedChunk {
     /// using [Ordering::Reverse], this will be the low index, otherwise it will be the high index.
     pub fn end(&self) -> Option<RecordIndex> {
         let indices = self.indices();
-        if indices.len() == 0 {
+        if indices.is_empty() {
             return None;
         }
 
@@ -283,9 +278,9 @@ impl From<IndexedChunk> for SegmentChunk {
         let schema = Arc::new(Schema::new(arrow_schema::Fields::from(fields)));
 
         // Create the new RecordBatch
-        RecordBatch::try_new(schema, arrays).unwrap_or_else(|_| {
+        Self::try_new(schema, arrays).unwrap_or_else(|_| {
             // Fallback to empty batch if creation fails
-            RecordBatch::new_empty(Arc::new(Schema::empty()))
+            Self::new_empty(Arc::new(Schema::empty()))
         })
     }
 }
@@ -297,7 +292,7 @@ pub fn concatenate(chunks: &[SegmentChunk]) -> anyhow::Result<SegmentChunk> {
 
     // Use arrow::compute::concat_batches to concatenate the RecordBatches
     let schema = chunks[0].schema_ref();
-    arrow::compute::concat_batches(&schema, chunks)
+    arrow::compute::concat_batches(schema, chunks)
         .map_err(|e| anyhow::anyhow!("Failed to concatenate batches: {}", e))
 }
 

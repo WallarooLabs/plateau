@@ -13,7 +13,7 @@ where
 impl Compatible for Schema {
     #[tracing::instrument(level = "trace", target = "server::compatible::schema")]
     fn compatible(&self, other: &Self) -> bool {
-        if !self.fields().compatible(&other.fields()) {
+        if !self.fields().compatible(other.fields()) {
             tracing::trace!("Two schemas are incompatible due to different fields");
             return false;
         }

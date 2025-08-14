@@ -126,7 +126,7 @@ impl Segment {
             warn!("main segment file at {:?} missing", self.path);
         }
 
-        for part in self.parts().into_iter().filter(|p| p.exists()) {
+        for part in self.parts().filter(|p| p.exists()) {
             fs::remove_file(&part)
                 .inspect_err(|e| error!("error removing part {part:?}: {e:?}"))
                 .ok();
@@ -210,7 +210,6 @@ impl Segment {
         let main_size = fs::metadata(&self.path).map(|p| p.len()).unwrap_or(0);
         let part_size: u64 = self
             .parts()
-            .into_iter()
             .map(|part| fs::metadata(part).map(|p| p.len()).unwrap_or(0))
             .sum();
         Ok(usize::try_from(main_size + part_size)?)

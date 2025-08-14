@@ -379,8 +379,8 @@ pub mod test {
         let root = tempdir()?;
         let path = root.path().join("testing.arrow");
 
-        let mut a = inferences_schema_a();
-        let mut schema = a.schema.clone();
+        let a = inferences_schema_a();
+        let schema = a.schema.clone();
         let mut metadata = HashMap::new();
         metadata.insert("pipeline.name".to_string(), "pied-piper".to_string());
         metadata.insert("pipeline.version".to_string(), "3.1".to_string());

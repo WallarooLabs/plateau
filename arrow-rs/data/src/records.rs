@@ -10,7 +10,7 @@ use chrono::{DateTime, TimeZone, Utc};
 use std::sync::Arc;
 
 use crate::{
-    chunk::{get_time, parse_time, type_name_of_val, RecordBatchExt},
+    chunk::{get_time, parse_time, type_name_of_val},
     transport::{ChunkError, SchemaChunk, SegmentChunk},
     IndexedChunk, LimitedBatch, Ordering,
 };
@@ -89,8 +89,8 @@ impl TryFrom<LegacyRecords> for SchemaChunk<SchemaRef> {
             .map(|r| std::str::from_utf8(&r.message).map_err(|_| ChunkError::FailedEncoding))
             .collect::<Result<Vec<_>, _>>()?;
 
-        let time_array = Arc::new(Int64Array::from(time_values)) as Arc<dyn Array>;
-        let message_array = Arc::new(StringArray::from(message_values)) as Arc<dyn Array>;
+        let time_array = Arc::new(Int64Array::from(time_values));
+        let message_array = Arc::new(StringArray::from(message_values));
 
         let schema = legacy_schema();
         let batch = RecordBatch::try_new(schema.clone(), vec![time_array, message_array])
