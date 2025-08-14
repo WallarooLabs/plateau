@@ -110,12 +110,13 @@ impl Segment {
         })
     }
 
-    pub(crate) fn parts(&self) -> Vec<PathBuf> {
-        // Since we've removed parquet support, just use arrow parts
-        match arrow::Segment::new(self.path.clone()) {
-            Ok(segment) => segment.parts(),
-            Err(_) => Vec::new(),
-        }
+    pub(crate) fn parts(&self) -> impl Iterator<Item = PathBuf> {
+        let arrow_parts = arrow::Segment::new(self.path.clone())
+            .map(|s| s.parts())
+            .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
+            .ok();
+
+        arrow_parts.into_iter().flatten()
     }
 
     pub fn destroy(&self) -> Result<()> {
