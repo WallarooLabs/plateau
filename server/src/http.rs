@@ -138,7 +138,7 @@ pub async fn serve(
             post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes)),
         )
         .route("/topic/:topic_name/records", post(topic_iterate_route))
-        .route("/topic/:topic_name", get(topic_get_partitions))
+        .route("/topic/:topic_name", get(topic_get_info))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
                 tracing::span!(
@@ -261,7 +261,7 @@ async fn topic_append_internal(
 
 #[utoipa::path(
     get,
-    operation_id = "topic.get_partitions",
+    operation_id = "topic.get_info",
     path = "/topic/{topic_name}",
     params(
         ("topic_name", Path, description = "Topic name"),
@@ -270,7 +270,7 @@ async fn topic_append_internal(
         (status = 200, description = "List of partitions for topic", body = Partitions),
     ),
   )]
-async fn topic_get_partitions(
+async fn topic_get_info(
     State(AppState(catalog, _config)): State<AppState>,
     Path(topic_name): Path<String>,
 ) -> Result<Response<Partitions>, ErrorReply> {
@@ -282,6 +282,7 @@ async fn topic_get_partitions(
             .into_iter()
             .map(|(partition, range)| (partition, Span::from_range(range)))
             .collect(),
+        bytes: topic.byte_size().await,
     }))
 }
 
@@ -447,7 +448,7 @@ fn parse_time_range(
         healthcheck,
         get_topics,
         topic_append,
-        topic_get_partitions,
+        topic_get_info,
         topic_iterate_route,
         partition_get_records,
     ),

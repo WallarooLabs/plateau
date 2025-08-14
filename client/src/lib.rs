@@ -1055,6 +1055,7 @@ mod tests {
                     .drain(..)
                     .map(|p| (p.to_owned(), Span { start: 0, end: 100 }))
                     .collect(),
+                bytes: 200,
             })),
         );
 

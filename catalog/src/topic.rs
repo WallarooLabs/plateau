@@ -11,7 +11,7 @@ use crate::data::{
     limit::{BatchStatus, LimitedBatch, RowLimit},
     records::{LegacyRecords, Record},
 };
-use crate::manifest::{Manifest, PartitionId, SegmentData};
+use crate::manifest::{Manifest, PartitionId, Scope, SegmentData};
 
 use crate::partition::Config as PartitionConfig;
 use crate::partition::Partition;
@@ -80,6 +80,10 @@ impl Topic {
             partition_filter,
         )
         .await
+    }
+
+    pub async fn byte_size(&self) -> usize {
+        self.manifest.get_size(Scope::Topic(&self.name)).await
     }
 
     async fn partition_names(&self) -> Vec<String> {

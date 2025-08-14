@@ -171,6 +171,7 @@ impl Catalog {
 
     pub async fn retain(&self) {
         trace!("begin global retention check");
+        self.gauge_topics().await;
         self.prune_topics().await;
         while self.over_retention_limit().await {
             // errors in here are effectively unrecoverable as the loop would otherwise spin.
@@ -186,6 +187,25 @@ impl Catalog {
             partition.remove_oldest().await;
         }
         trace!("end global retention check");
+    }
+
+    #[tracing::instrument(skip_all, level = "debug")]
+    pub async fn gauge_topics(&self) {
+        // collect a list of active topic names and then drop the read lock in
+        // case the `get_size` calls below block for a substantial amount of
+        // time
+        let names: Vec<String> = {
+            let topics = &self.state.read().await.topics;
+            topics.keys().cloned().collect()
+        };
+
+        for name in names {
+            let bytes = self.manifest.get_size(Scope::Topic(&name)).await;
+            let labels = [("topic", name)];
+
+            trace!(?labels, %bytes);
+            gauge!("topic_bytes", &labels).set(bytes as f64);
+        }
     }
 
     pub async fn prune_topics(&self) {
@@ -496,7 +516,7 @@ mod test {
         Ok(())
     }
 
-    #[test(tokio::test)]
+    #[test_log::test(tokio::test)]
     async fn test_retain() -> Result<()> {
         let (_root, mut catalog) = catalog().await;
         catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
