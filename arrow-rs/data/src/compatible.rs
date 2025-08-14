@@ -89,12 +89,7 @@ impl Compatible for DataType {
             }
             (Self::LargeList(a), Self::LargeList(b)) => a.compatible(b),
             (Self::Struct(a), Self::Struct(b)) => a.compatible(b),
-            (Self::Union(_, _), Self::Union(_, _)) => {
-                // In arrow-rs, UnionFields has a more complex structure
-                // For now, we'll just use a simplified compatibility check
-                // This could be enhanced later if needed
-                true
-            }
+            (Self::Union(fa, ma), Self::Union(fb, mb)) => fa == fb && ma == mb,
             (Self::Map(sa, sb), Self::Map(oa, ob)) => sa.compatible(oa) && sb == ob,
             (Self::Dictionary(sa, sb), Self::Dictionary(oa, ob)) => {
                 *sa == *oa && sb.as_ref().compatible(ob.as_ref())
