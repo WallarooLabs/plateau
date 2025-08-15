@@ -603,6 +603,7 @@ pub mod test {
     use crate::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::transport::SegmentChunk;
     use chrono::TimeZone;
+    use std::slice;
     use tempfile::{tempdir, TempDir};
 
     impl Partition {
@@ -704,7 +705,7 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            partition.extend_records(&[record.clone()]).await?;
+            partition.extend_records(slice::from_ref(record)).await?;
         }
 
         Ok(())
@@ -877,7 +878,7 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            part.extend_records(&[record.clone()]).await?;
+            part.extend_records(slice::from_ref(record)).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {
@@ -919,7 +920,7 @@ pub mod test {
             .collect();
 
         for record in records.iter() {
-            part.extend_records(&[record.clone()]).await?;
+            part.extend_records(slice::from_ref(record)).await?;
         }
 
         if commit {
@@ -1011,7 +1012,7 @@ pub mod test {
         let (dir, part) = partition(config).await?;
         let spec = {
             for record in records.iter() {
-                part.extend_records(&[record.clone()]).await?;
+                part.extend_records(slice::from_ref(record)).await?;
             }
             part.commit().await?;
             to_spec(part)
@@ -1407,7 +1408,7 @@ pub mod test {
         let (dir, part) = partition(segment_3s()).await?;
         {
             for record in records.iter() {
-                part.extend_records(&[record.clone()]).await?;
+                part.extend_records(slice::from_ref(record)).await?;
             }
             part.commit().await?;
         }
@@ -1453,7 +1454,7 @@ pub mod test {
 
         // now, test that we can write and persist still.
         for record in records.iter() {
-            part.extend_records(&[record.clone()]).await?;
+            part.extend_records(slice::from_ref(record)).await?;
         }
         part.commit().await?;
 
@@ -1514,7 +1515,7 @@ pub mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.extend_records(&[record.clone()]).await?;
+            t.extend_records(slice::from_ref(record)).await?;
         }
         t.commit().await?;
 
@@ -1523,7 +1524,7 @@ pub mod test {
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.extend_records(&[record.clone()]).await?;
+            t.extend_records(slice::from_ref(record)).await?;
         }
 
         // fetch from start fast-forwards to first valid index
@@ -1606,13 +1607,13 @@ pub mod test {
             .collect();
 
         for record in records[0..6].iter() {
-            t.extend_records(&[record.clone()]).await?;
+            t.extend_records(slice::from_ref(record)).await?;
         }
         t.commit().await?;
 
         // write some more records to the active segment
         for record in records[6..].iter() {
-            t.extend_records(&[record.clone()]).await?;
+            t.extend_records(slice::from_ref(record)).await?;
         }
 
         let min_time = times.iter().cloned().min().unwrap();
