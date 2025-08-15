@@ -410,6 +410,7 @@ mod test {
     use crate::partition::test::{assert_limit_unreached, deindex};
     use crate::test::{inferences_schema_a, inferences_schema_b};
     use chrono::TimeZone;
+    use std::slice;
     use tempfile::{tempdir, TempDir};
 
     impl Topic {
@@ -754,13 +755,13 @@ mod test {
         // Create 3 partitions
         for record in &records {
             topic
-                .extend_records("partition-0", &[record.clone()])
+                .extend_records("partition-0", slice::from_ref(record))
                 .await?;
             topic
-                .extend_records("partition-1", &[record.clone()])
+                .extend_records("partition-1", slice::from_ref(record))
                 .await?;
             topic
-                .extend_records("partition-2", &[record.clone()])
+                .extend_records("partition-2", slice::from_ref(record))
                 .await?;
         }
         topic.commit().await?;
@@ -814,13 +815,13 @@ mod test {
         // Create 3 partitions
         for record in &records {
             topic
-                .extend_records("partition-0", &[record.clone()])
+                .extend_records("partition-0", slice::from_ref(record))
                 .await?;
             topic
-                .extend_records("partition-1", &[record.clone()])
+                .extend_records("partition-1", slice::from_ref(record))
                 .await?;
             topic
-                .extend_records("partition-2", &[record.clone()])
+                .extend_records("partition-2", slice::from_ref(record))
                 .await?;
         }
         topic.commit().await?;
@@ -877,7 +878,7 @@ mod test {
         let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .extend_records(&names[ix % parts], &[record.clone()])
+                .extend_records(&names[ix % parts], slice::from_ref(record))
                 .await?;
         }
         topic.commit().await?;
@@ -931,7 +932,7 @@ mod test {
         let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .extend_records(&names[ix % parts], &[record.clone()])
+                .extend_records(&names[ix % parts], slice::from_ref(record))
                 .await?;
         }
         // Create an extra partition that won't be captured by the regex.
@@ -992,7 +993,7 @@ mod test {
         let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .extend_records(&names[ix % parts], &[record.clone()])
+                .extend_records(&names[ix % parts], slice::from_ref(record))
                 .await?;
         }
 
@@ -1033,7 +1034,7 @@ mod test {
         let names: Vec<_> = (0..=parts).map(|ix| format!("partition-{ix}")).collect();
         for (ix, record) in records.iter().enumerate() {
             topic
-                .extend_records(&names[ix % parts], &[record.clone()])
+                .extend_records(&names[ix % parts], slice::from_ref(record))
                 .await?;
         }
 
@@ -1273,7 +1274,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("partition-{}", ix % 3);
-            topic.extend_records(&name, &[record.clone()]).await?;
+            topic.extend_records(&name, slice::from_ref(record)).await?;
         }
 
         for (ix, record) in records.iter().enumerate() {

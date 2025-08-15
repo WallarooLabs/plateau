@@ -383,6 +383,7 @@ mod test {
     use chrono::{TimeDelta, TimeZone, Timelike, Utc};
     use futures::stream;
     use futures::stream::StreamExt;
+    use std::slice;
     use tempfile::{tempdir, TempDir};
     use test_log::test;
 
@@ -427,7 +428,7 @@ mod test {
             catalog
                 .get_topic(&name)
                 .await
-                .extend_records("default", &[record.clone()])
+                .extend_records("default", slice::from_ref(record))
                 .await?;
         }
 
@@ -471,7 +472,9 @@ mod test {
             let name = format!("topic-{}", ix % 3);
             let topic = v0.get_topic(&name).await;
 
-            topic.extend_records("default", &[record.clone()]).await?;
+            topic
+                .extend_records("default", slice::from_ref(record))
+                .await?;
         }
 
         v0.checkpoint().await;
@@ -555,7 +558,7 @@ mod test {
                 catalog
                     .get_topic(&name)
                     .await
-                    .extend_records("default", &[record.clone()])
+                    .extend_records("default", slice::from_ref(record))
                     .await?;
             }
             catalog.checkpoint().await;
@@ -613,7 +616,9 @@ mod test {
             {
                 let topic = catalog.get_topic(&name).await;
 
-                let insert = topic.extend_records("default", &[record.clone()]).await?;
+                let insert = topic
+                    .extend_records("default", slice::from_ref(record))
+                    .await?;
                 topic
                     .ensure_index("default", RecordIndex(insert.end.0 - 1))
                     .await?;
