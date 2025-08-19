@@ -164,6 +164,7 @@ pub struct Inserted {
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct Partitions {
     pub partitions: HashMap<String, Span>,
+    pub bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, ToSchema)]

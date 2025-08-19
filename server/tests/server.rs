@@ -277,13 +277,17 @@ async fn fetch_partition_response(
     result.unwrap().error_for_status().unwrap()
 }
 
-async fn get_topics(client: &Client, url: &str) -> Result<json::Value> {
+async fn get_json(client: &Client, url: &str) -> Result<json::Value> {
     let response = client.get(url).send().await?.error_for_status()?;
     Ok(response.json::<json::Value>().await?)
 }
 
-fn topic_url(server: &TestServer) -> String {
+fn topics_url(server: &TestServer) -> String {
     format!("{}/topics", server.base(),)
+}
+
+fn topic_url(server: &TestServer, topic_name: &str) -> String {
+    format!("{}/topic/{topic_name}", server.base(),)
 }
 
 fn append_url(
@@ -380,7 +384,7 @@ async fn topic_status_all() -> Result<()> {
     let (client, topic_name, server) = setup().await;
 
     assert_eq!(
-        get_topics(&client, &topic_url(&server)).await?,
+        get_json(&client, &topics_url(&server)).await?,
         json::json!({"topics": []})
     );
     repeat_append(
@@ -396,9 +400,14 @@ async fn topic_status_all() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     assert_eq!(
-        get_topics(&client, &topic_url(&server)).await?,
+        get_json(&client, &topics_url(&server)).await?,
         json::json!({"topics": [{"name": topic_name.clone()}]})
     );
+
+    // test topics response has bytes
+    let topic_response = get_json(&client, &topic_url(&server, &topic_name)).await?;
+    trace!(?topic_response);
+    assert!(topic_response.as_object().unwrap().contains_key("bytes"));
 
     // test unlimited request, should get all records
     let response = fetch_topic_response(
