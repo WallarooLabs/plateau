@@ -10,16 +10,21 @@ use std::{
     io::{Read, Write},
     mem,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Instant,
 };
 
-use crate::arrow2::{datatypes::Schema, io::ipc};
 use anyhow::Result;
-use plateau_client::ipc::read::StreamState;
-use plateau_transport::{SchemaChunk, SegmentChunk};
+use arrow_ipc::{
+    reader::StreamReader,
+    writer::{IpcWriteOptions, StreamWriter},
+};
+use arrow_schema::Schema;
+use plateau_transport_arrow_rs::{SchemaChunk, SegmentChunk};
 use tracing::{debug, error, trace, warn};
 
 use super::{validate_header, PLATEAU_HEADER};
+use crate::chunk::RecordBatchExt;
 
 pub struct ActiveChunk {
     path: PathBuf,
@@ -83,7 +88,7 @@ pub struct Writer {
     path: PathBuf,
     file: fs::File,
 
-    writer: ipc::write::StreamWriter<fs::File>,
+    writer: StreamWriter<fs::File>,
     partial: SchemaChunk<Schema>,
 }
 
@@ -96,10 +101,10 @@ impl Writer {
         let buffer = chunk_ix.to_le_bytes();
         file.write_all(&buffer)?;
 
-        let options = ipc::write::WriteOptions { compression: None };
-        let mut writer = ipc::write::StreamWriter::new(file.try_clone()?, options);
-        writer.start(&initial.schema, None)?;
-        writer.write(&initial.chunk, None)?;
+        let _options = IpcWriteOptions::default();
+        let schema_ref = Arc::new(initial.schema.clone());
+        let mut writer = StreamWriter::try_new(file.try_clone()?, &schema_ref)?;
+        writer.write(&initial.chunk.to_record_batch(&initial.schema)?)?;
 
         Ok(Self {
             path,
@@ -118,12 +123,13 @@ impl Writer {
             return Ok(());
         }
 
-        anyhow::ensure!(schema == &self.partial.schema);
+        anyhow::ensure!(schema.fields() == self.partial.schema.fields());
 
         let new_len = chunk.len();
         let additional = crate::chunk::slice(chunk.clone(), self.len(), new_len - self.len());
         trace!("{} => {}", self.len(), chunk.len());
-        self.writer.write(&additional, None)?;
+        self.writer
+            .write(&additional.to_record_batch(&self.partial.schema)?)?;
         self.partial.chunk = chunk;
 
         Ok(())
@@ -160,24 +166,30 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
         reader.read_exact(&mut buffer)?;
         let chunk_ix = u32::from_le_bytes(buffer);
 
-        let metadata = ipc::read::read_stream_metadata(&mut reader)?;
-        let schema = metadata.schema.clone();
-        let reader = ipc::read::StreamReader::new(reader, metadata, None);
+        // Create stream reader with error handling
+        let stream_reader = match StreamReader::try_new(&mut reader, None) {
+            Ok(reader) => reader,
+            Err(e) => {
+                error!(
+                    "Error creating stream reader for cache file {:?}: {}",
+                    path, e
+                );
+                return Ok(None);
+            }
+        };
+        let schema = stream_reader.schema().clone();
 
-        let chunks = reader
-            .take_while(|state| matches!(state, Ok(StreamState::Some(..)) | Err(..)))
-            .filter_map(|result| match result {
-                Ok(StreamState::Some(chunk)) => Some(chunk),
-                Ok(StreamState::Waiting) => {
-                    warn!("halting on unexpected waiting state");
-                    None
+        let mut chunks = Vec::new();
+        for batch_result in stream_reader {
+            match batch_result {
+                Ok(batch) => {
+                    chunks.push(SegmentChunk::from_record_batch(batch));
                 }
                 Err(e) => {
                     error!("error reading cache segment: {:?}", e);
-                    None
                 }
-            })
-            .collect::<Vec<_>>();
+            }
+        }
 
         let concat = if chunks.is_empty() {
             // This can really only happen if plateau / the system crashes while
@@ -198,7 +210,7 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
         Ok(Some(Data {
             chunk_ix,
             rows: SchemaChunk {
-                schema,
+                schema: schema.as_ref().clone(),
                 chunk: concat,
             },
         }))

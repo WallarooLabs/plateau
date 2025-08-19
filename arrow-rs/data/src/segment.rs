@@ -23,13 +23,15 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{error, trace, warn};
 
-use crate::arrow2::datatypes::Schema;
-use plateau_transport::SegmentChunk;
+// Use arrow-rs Schema instead of arrow2 Schema
+use arrow_schema::Schema;
+use plateau_transport_arrow_rs::SegmentChunk;
 
 #[allow(dead_code)]
 mod arrow;
 mod cache;
-mod parquet;
+// Commented out parquet module as part of arrow-rs migration
+// mod parquet;
 
 const PLATEAU_HEADER: &str = "plateau1";
 
@@ -95,12 +97,7 @@ impl Segment {
         let writer = if config.arrow {
             WriteFormat::Arrow(arrow::Writer::create(file, &schema)?)
         } else {
-            WriteFormat::Parquet(parquet::Writer::create(
-                self.path.clone(),
-                file,
-                &schema,
-                config.clone(),
-            )?)
+            anyhow::bail!("parquet format is no longer supported");
         };
 
         let cache = cache::ActiveChunk::new(self.cache_path());
@@ -114,20 +111,12 @@ impl Segment {
     }
 
     pub(crate) fn parts(&self) -> impl Iterator<Item = PathBuf> {
-        let parquet_parts = parquet::Segment::new(self.path.clone())
+        let arrow_parts = arrow::Segment::new(self.path.clone())
             .map(|s| s.parts())
             .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
             .ok();
 
-        let arrow_parts = arrow::Segment::new(self.path.clone())
-            .map(|s| s.parts())
-            .inspect_err(|e| error!("error enumerating arrow parts for {:?}, {e:?}", self.path))
-            .ok();
-
-        parquet_parts
-            .into_iter()
-            .flatten()
-            .chain(arrow_parts.into_iter().flatten())
+        arrow_parts.into_iter().flatten()
     }
 
     pub fn destroy(&self) -> Result<()> {
@@ -175,13 +164,12 @@ impl Segment {
             let mut file = fs::File::open(&self.path)?;
 
             // Check for a header
-            let parquet = parquet::check_file(&mut file);
+            let parquet: Result<bool> = Ok(false); // parquet::check_file(&mut file);
             let arrow = arrow::check_file(&mut file);
             if let (Ok(parquet), Ok(arrow)) = (parquet, arrow) {
                 return if parquet {
                     trace!("{:?} in parquet format", self.path);
-                    let segment = parquet::Segment::new(self.path.clone())?;
-                    Ok(ReadFormat::Parquet(Box::new(segment.read(cache)?)))
+                    anyhow::bail!("parquet format is no longer supported");
                 } else if arrow {
                     trace!("{:?} in arrow format", self.path);
                     let segment = arrow::Segment::new(self.path.clone())?;
@@ -230,7 +218,6 @@ impl Segment {
 
 enum ReadFormat {
     Arrow(arrow::Reader),
-    Parquet(Box<parquet::Reader>),
     OnlyCache(Schema, std::iter::Once<Result<SegmentChunk>>),
 }
 
@@ -240,7 +227,6 @@ impl Iterator for ReadFormat {
     fn next(&mut self) -> Option<Self::Item> {
         match self {
             Self::Arrow(a) => a.next(),
-            Self::Parquet(p) => p.next(),
             Self::OnlyCache(_, c) => c.next(),
         }
     }
@@ -250,7 +236,6 @@ impl DoubleEndedIterator for ReadFormat {
     fn next_back(&mut self) -> Option<Self::Item> {
         match self {
             Self::Arrow(a) => a.next_back(),
-            Self::Parquet(p) => p.next_back(),
             Self::OnlyCache(_, c) => c.next_back(),
         }
     }
@@ -260,7 +245,6 @@ impl SegmentIterator for ReadFormat {
     fn schema(&self) -> &Schema {
         match self {
             Self::Arrow(a) => a.schema(),
-            Self::Parquet(p) => p.schema(),
             Self::OnlyCache(schema, _) => schema,
         }
     }
@@ -269,7 +253,6 @@ impl SegmentIterator for ReadFormat {
 #[allow(clippy::large_enum_variant)]
 enum WriteFormat {
     Arrow(arrow::Writer),
-    Parquet(parquet::Writer),
 }
 
 #[allow(missing_debug_implementations)]
@@ -289,7 +272,6 @@ impl Writer {
 
     fn write_chunk(&mut self, chunk: SegmentChunk) -> Result<()> {
         match &mut self.writer {
-            WriteFormat::Parquet(p) => p.write_chunk(&self.schema, chunk),
             WriteFormat::Arrow(a) => a.write_chunk(chunk),
         }
     }
@@ -342,7 +324,6 @@ impl Writer {
         // First, sync the segment file itself. The cache will not be valid if the
         // chunks that precede it are missing.
         match &self.writer {
-            WriteFormat::Parquet(p) => p.checkpoint()?,
             WriteFormat::Arrow(a) => a.checkpoint()?,
         }
 
@@ -365,7 +346,6 @@ impl Writer {
         // end operation, otherwise the data in cache may be lost in recovery
         // scenarios.
         match self.writer {
-            WriteFormat::Parquet(mut p) => p.end()?,
             WriteFormat::Arrow(a) => a.end()?,
         }
 
@@ -402,13 +382,11 @@ pub mod test {
 
     use super::*;
     use crate::test::inferences_schema_a;
-    use plateau_transport::SchemaChunk;
-    use sample_arrow2::{
-        array::ArbitraryArray,
-        chunk::ArbitraryChunk,
-        datatypes::{sample_flat, ArbitraryDataType},
-    };
-    use sample_std::{Chance, Regex};
+    // Use arrow-rs transport
+    use plateau_transport_arrow_rs as transport;
+    use transport::SchemaChunk;
+    // Remove sample_arrow2 and sample_std imports for now since we removed these dependencies
+    // We'll reimplement test functionality using arrow-rs libraries
     use tempfile::tempdir;
     use test::arrow::test::partial_write;
 
@@ -450,6 +428,8 @@ pub mod test {
     }
 
     // nulls=true breaks arrow2's parquet support, but is fine for feather
+    // XXX - need to create sample-arrow first
+    /*
     pub fn deep_chunk(depth: usize, len: usize, nulls: bool) -> ArbitraryChunk<Regex, Chance> {
         let names = Regex::new("[a-z]{4,8}");
         let data_type = ArbitraryDataType {
@@ -477,6 +457,7 @@ pub mod test {
             array,
         }
     }
+    */
 
     #[test]
     fn test_interrupted_cache_write() -> Result<()> {
@@ -610,38 +591,6 @@ pub mod test {
     }
 
     #[test]
-    fn test_parquet_cache_updates() -> Result<()> {
-        let root = tempdir()?;
-
-        let a = inferences_schema_a();
-
-        let all_counts = [1, 3, 4, 2, 1];
-        for ix in 1..all_counts.len() {
-            trace!("iter: {ix} counts: 1 + {:?}", &all_counts[0..ix]);
-            let mut chunk = a.chunk.clone();
-
-            let path = root.path().join(format!("{ix:?}.parquet"));
-            let s = Segment::at(path.clone());
-            let mut w = s.create(a.schema.clone(), Config::parquet())?;
-
-            for count in &all_counts[0..ix] {
-                let new_parts: Vec<_> = std::iter::once(chunk.clone())
-                    .chain(std::iter::repeat_n(a.chunk.clone(), *count))
-                    .collect();
-                chunk = crate::chunk::concatenate(&new_parts)?;
-                w.update_cache(chunk.clone())?;
-            }
-
-            drop(w);
-
-            let mut r = s.iter()?;
-            assert_eq!(r.next().map(|v| v.unwrap()), Some(chunk));
-        }
-
-        Ok(())
-    }
-
-    #[test]
     fn test_arrow_cache_updates() -> Result<()> {
         let root = tempdir()?;
 
@@ -679,7 +628,7 @@ pub mod test {
         let a = inferences_schema_a();
         let arrow_segment = partial_write(root.path(), a.clone())?;
 
-        let paths: Vec<_> = arrow_segment.clone().parts().collect();
+        let paths: Vec<_> = arrow_segment.clone().parts().into_iter().collect();
         let segment = Segment::at(arrow_segment.into_path());
 
         segment.iter()?.count();

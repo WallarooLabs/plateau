@@ -3230,6 +3230,7 @@ dependencies = [
  "serde_with",
  "strum 0.26.2",
  "thiserror 1.0.63",
+ "tracing",
  "utoipa",
 ]
 

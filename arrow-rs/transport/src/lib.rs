@@ -19,6 +19,7 @@ use regex::Regex;
 use rweb::{openapi::Entity, Schema};
 use serde::{Deserialize, Serialize};
 use serde_with::{serde_as, DisplayFromStr};
+use tracing::trace;
 
 // Re-export arrow crates
 pub use arrow;
@@ -62,7 +63,9 @@ pub enum ChunkError {
 pub fn estimate_size(batch: &RecordBatch) -> Result<usize, ChunkError> {
     let mut total = 0;
     for i in 0..batch.num_columns() {
-        total += estimate_array_size(batch.column(i).as_ref())?;
+        let size = estimate_array_size(batch.column(i).as_ref())?;
+        trace!(%i, %size);
+        total += size;
     }
     Ok(total)
 }
