@@ -1,6 +1,7 @@
 use std::iter;
+use std::sync::Arc;
 
-use crate::arrow2::datatypes::{DataType, Field, IntervalUnit, Metadata, Schema, TimeUnit};
+use arrow_schema::{DataType, Field, IntervalUnit, Schema, TimeUnit};
 
 pub(crate) trait Compatible<Rhs = Self>
 where
@@ -12,12 +13,12 @@ where
 impl Compatible for Schema {
     #[tracing::instrument(level = "trace", target = "server::compatible::schema")]
     fn compatible(&self, other: &Self) -> bool {
-        if !self.fields.compatible(&other.fields) {
+        if !self.fields().compatible(other.fields()) {
             tracing::trace!("Two schemas are incompatible due to different fields");
             return false;
         }
 
-        if self.metadata != other.metadata {
+        if self.metadata() != other.metadata() {
             tracing::trace!("Two schemas are incompatible due to different metadata");
             return false;
         }
@@ -28,17 +29,17 @@ impl Compatible for Schema {
 
 impl Compatible for Field {
     fn compatible(&self, other: &Self) -> bool {
-        if self.name != other.name {
+        if self.name() != other.name() {
             tracing::trace!("Field objects have different names");
             return false;
         }
 
-        if self.is_nullable != other.is_nullable {
+        if self.is_nullable() != other.is_nullable() {
             tracing::trace!("Field objects have different is_nullable");
             return false;
         }
 
-        if self.metadata != other.metadata {
+        if self.metadata() != other.metadata() {
             tracing::trace!("Field objects have different metadata");
             return false;
         }
@@ -88,17 +89,15 @@ impl Compatible for DataType {
             }
             (Self::LargeList(a), Self::LargeList(b)) => a.compatible(b),
             (Self::Struct(a), Self::Struct(b)) => a.compatible(b),
-            (Self::Union(sa, sb, sc), Self::Union(oa, ob, oc)) => {
-                sa.compatible(oa) && *sb == *ob && *sc == *oc
-            }
+            (Self::Union(fa, ma), Self::Union(fb, mb)) => fa == fb && ma == mb,
             (Self::Map(sa, sb), Self::Map(oa, ob)) => sa.compatible(oa) && sb == ob,
-            (Self::Dictionary(sa, sb, sc), Self::Dictionary(oa, ob, oc)) => {
-                *sa == *oa && sb.compatible(ob) && *sc == *oc
+            (Self::Dictionary(sa, sb), Self::Dictionary(oa, ob)) => {
+                *sa == *oa && sb.as_ref().compatible(ob.as_ref())
             }
-            (Self::Decimal(sa, sb), Self::Decimal(oa, ob)) => *sa == *oa && *sb == *ob,
+            (Self::Decimal128(sa, sb), Self::Decimal128(oa, ob)) => *sa == *oa && *sb == *ob,
             (Self::Decimal256(sa, sb), Self::Decimal256(oa, ob)) => *sa == *oa && *sb == *ob,
-            (Self::Extension(sa, sb, sc), Self::Extension(oa, ob, oc)) => {
-                sa == oa && sb.compatible(ob) && *sc == *oc
+            (Self::RunEndEncoded(sa, sb), Self::RunEndEncoded(oa, ob)) => {
+                sa.as_ref().compatible(oa.as_ref()) && sb.as_ref().compatible(ob.as_ref())
             }
             (a, b) => {
                 tracing::trace!(?a, ?b, "DataTypes items are of different type");
@@ -134,8 +133,11 @@ where
     }
 }
 
-impl Compatible for Metadata {
+impl<T> Compatible for Arc<T>
+where
+    T: Compatible,
+{
     fn compatible(&self, other: &Self) -> bool {
-        *self == *other
+        self.as_ref().compatible(other.as_ref())
     }
 }

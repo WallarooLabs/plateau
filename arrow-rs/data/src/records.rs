@@ -4,15 +4,13 @@
 //! supplanted the records format in actual usage.
 use std::borrow::Borrow;
 
+use arrow_array::{Array, Int64Array, RecordBatch, StringArray};
+use arrow_schema::{DataType, Field, Fields, Schema, SchemaRef};
 use chrono::{DateTime, TimeZone, Utc};
+use std::sync::Arc;
 
 use crate::{
-    arrow2::{
-        array::{MutableArray, MutablePrimitiveArray, MutableUtf8Array, Utf8Array},
-        chunk::Chunk,
-        datatypes::{DataType, Field, Metadata},
-    },
-    chunk::{get_time, parse_time, type_name_of_val, Schema},
+    chunk::{get_time, parse_time, type_name_of_val},
     transport::{ChunkError, SchemaChunk, SegmentChunk},
     IndexedChunk, LimitedBatch, Ordering,
 };
@@ -44,72 +42,75 @@ impl<S: Borrow<Schema> + Clone + PartialEq> TryFrom<SchemaChunk<S>> for LegacyRe
     type Error = ChunkError;
 
     fn try_from(orig: SchemaChunk<S>) -> Result<Self, Self::Error> {
-        let arrays = orig.chunk.into_arrays();
+        let time = get_time(&orig.chunk, orig.schema.borrow())?;
 
-        let time = get_time(&arrays, orig.schema.borrow())?;
-        if orig.schema.borrow().fields.get(1).map(|f| f.name.as_str()) != Some("message") {
+        if orig.schema.borrow().fields()[1].name() != "message" {
             return Err(ChunkError::BadColumn(1, "message"));
         }
 
-        let message = arrays
-            .get(1)
-            .ok_or(ChunkError::BadColumn(1, "message"))
-            .and_then(|arr| {
-                arr.as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
-                    .ok_or_else(|| {
-                        ChunkError::InvalidColumnType("message", "utf8", type_name_of_val(arr))
-                    })
+        let message = orig
+            .chunk
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                ChunkError::InvalidColumnType(
+                    "message",
+                    "utf8",
+                    type_name_of_val(orig.chunk.column(1)),
+                )
             })?;
 
-        Ok(Self(
-            time.values_iter()
-                .zip(message.values_iter())
-                .map(|(tv, m)| Record {
-                    time: parse_time(*tv),
-                    message: m.bytes().collect(),
-                })
-                .collect(),
-        ))
+        let mut records = Vec::with_capacity(time.len());
+        for i in 0..time.len() {
+            if time.is_null(i) || message.is_null(i) {
+                continue;
+            }
+
+            records.push(Record {
+                time: parse_time(time.value(i)),
+                message: message.value(i).as_bytes().to_vec(),
+            });
+        }
+
+        Ok(Self(records))
     }
 }
 
-impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
+impl TryFrom<LegacyRecords> for SchemaChunk<SchemaRef> {
     type Error = ChunkError;
 
     fn try_from(value: LegacyRecords) -> Result<Self, Self::Error> {
-        let mut records = value.0;
-        let mut times = MutablePrimitiveArray::<i64>::new();
-        let mut messages = MutableUtf8Array::<i32>::new();
+        let records = &value.0;
+        let time_values: Vec<i64> = records.iter().map(|r| r.time.timestamp_millis()).collect();
 
-        for r in records.drain(..) {
-            let dt = r
-                .time
-                .signed_duration_since(Utc.timestamp_opt(0, 0).unwrap());
-            times.push(Some(dt.num_milliseconds()));
-            messages.push(Some(
-                std::str::from_utf8(&r.message)
-                    .map_err(|_| ChunkError::FailedEncoding)?
-                    .to_string(),
-            ));
-        }
+        let message_values: Vec<&str> = records
+            .iter()
+            .map(|r| std::str::from_utf8(&r.message).map_err(|_| ChunkError::FailedEncoding))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let time_array = Arc::new(Int64Array::from(time_values));
+        let message_array = Arc::new(StringArray::from(message_values));
+
+        let schema = legacy_schema();
+        let batch = RecordBatch::try_new(schema.clone(), vec![time_array, message_array])
+            .map_err(|_| ChunkError::LengthMismatch)?;
 
         Ok(Self {
-            schema: legacy_schema(),
-            chunk: Chunk::try_new(vec![times.as_box(), messages.as_box()])
-                .map_err(|_| ChunkError::LengthMismatch)?,
+            schema,
+            chunk: batch,
         })
     }
 }
 
 pub fn iter_legacy(
-    schema: Schema,
+    schema: SchemaRef,
     iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
 ) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
     iter.map(move |chunk| {
         chunk.and_then(|chunk| {
             LegacyRecords::try_from(SchemaChunk {
-                schema: &schema,
+                schema: schema.clone(),
                 chunk,
             })
             .map_err(Into::into)
@@ -118,16 +119,22 @@ pub fn iter_legacy(
     })
 }
 
-pub fn legacy_schema() -> Schema {
-    // TODO: better schema for timestamps.
-    // something like (TIMESTAMP(isAdjustedToUTC=true, unit=MILLIS));
-    Schema {
-        fields: vec![
-            Field::new("time", DataType::Int64, false),
-            Field::new("message", DataType::Utf8, false),
-        ],
-        metadata: Metadata::default(),
-    }
+// Stub function for API compatibility
+pub fn iter_legacy_schema(
+    schema: Schema,
+    iter: impl Iterator<Item = anyhow::Result<SegmentChunk>>,
+) -> impl Iterator<Item = anyhow::Result<Vec<Record>>> {
+    iter_legacy(Arc::new(schema), iter)
+}
+
+pub fn legacy_schema() -> SchemaRef {
+    // Schema for timestamps and messages
+    let fields = Fields::from(vec![
+        Field::new("time", DataType::Int64, false),
+        Field::new("message", DataType::Utf8, false),
+    ]);
+
+    Arc::new(Schema::new(fields))
 }
 
 pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
@@ -139,7 +146,7 @@ pub fn build_records<I: Iterator<Item = (i64, String)>>(it: I) -> Vec<Record> {
 }
 
 pub fn collect_records(
-    schema: Schema,
+    schema: SchemaRef,
     iter: impl Iterator<Item = Result<SegmentChunk, anyhow::Error>>,
 ) -> Vec<Record> {
     iter_legacy(schema, iter).flat_map(Result::unwrap).collect()
@@ -174,7 +181,7 @@ impl TryIntoRecords for LimitedBatch {
         if let Some(schema) = self.schema {
             use itertools::Itertools;
             iter_legacy(
-                schema,
+                Arc::new(schema.clone()),
                 self.chunks
                     .into_iter()
                     .map(|chunk| Ok(SegmentChunk::from(chunk))),

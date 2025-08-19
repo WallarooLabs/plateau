@@ -16,8 +16,9 @@ chrono = "0.4"
 config = "0.14"
 futures = "0.3"
 itertools = "0.13"
-parquet2 = { version = "0.17", default-features = false }
-parquet-format-safe = "0.2"
+# Removed parquet2 dependency
+# parquet2 = { version = "0.17", default-features = false }
+# parquet-format-safe = "0.2"
 humantime-serde = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
@@ -25,10 +26,26 @@ tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 tokio = { version = "1", features = ["full"] }
 
+# Arrow RS dependencies
+arrow = { version = "55.2.0", features = [
+  "ipc",
+  "csv",
+  "json",
+] }
+arrow-array = "55.2.0"
+arrow-schema = "55.2.0"
+arrow-buffer = "55.2.0"
+arrow-data = "55.2.0"
+arrow-select = "55.2.0"
+arrow-cast = "55.2.0"
+arrow-json = "55.2.0"
+arrow-ipc = "55.2.0"
+
 thiserror.workspace = true
 
-plateau-client.workspace = true
-plateau-transport.workspace = true
+# Use arrow-rs versions of transport and client
+plateau-transport-arrow-rs = { path = "../transport" }
+plateau-client-arrow-rs = { path = "../client" }
 
 
 [dev-dependencies]
@@ -36,14 +53,16 @@ tempfile = "3"
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 uuid = { version = "1.10", features = ["v4"] }
 
-sample-test = "0.2.1"
-sample-std = "0.2.1"
-sample-arrow2 = "0.17.2"
+# Remove sample-arrow2 as we're migrating to arrow-rs
+# sample-test = "0.2.1"
+# sample-std = "0.2.1"
+# sample-arrow2 = "0.17.2"
 
 reqwest.workspace = true
 
-plateau-client.workspace = true
-plateau-test.workspace = true
+# Use arrow-rs versions for testing
+plateau-client-arrow-rs = { path = "../client" }
+plateau-test-arrow-rs = { path = "../test" }
 
 
 [lints]

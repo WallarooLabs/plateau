@@ -1,5 +1,5 @@
 use crate::{
-    chunk::{IndexedChunk, Schema},
+    chunk::{IndexedChunk, RecordBatchExt, Schema},
     compatible::Compatible,
     transport::estimate_size,
 };
