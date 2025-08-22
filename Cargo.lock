@@ -3098,6 +3098,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "plateau-data-arrow-rs"
+version = "0.5.5"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-json",
+ "arrow-schema",
+ "arrow-select",
+ "bytes",
+ "bytesize",
+ "chrono",
+ "config",
+ "futures",
+ "humantime-serde",
+ "itertools 0.13.0",
+ "plateau-client-arrow-rs",
+ "plateau-test-arrow-rs",
+ "plateau-transport-arrow-rs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "test-log",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "plateau-server"
 version = "0.5.5"
 dependencies = [
@@ -3198,6 +3234,7 @@ dependencies = [
  "serde_with",
  "strum 0.26.2",
  "thiserror 1.0.63",
+ "tracing",
  "utoipa",
 ]
 

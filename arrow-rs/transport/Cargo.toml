@@ -31,6 +31,7 @@ thiserror = "1"
 regex = "1.10"
 utoipa = { version = "4", features = ["axum_extras"] }
 
+tracing.workspace = true
 
 [features]
 rweb = ["dep:rweb"]
