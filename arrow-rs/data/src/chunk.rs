@@ -171,7 +171,9 @@ impl IndexedChunk {
         // Create an index array based on the order
         let indices = match order {
             Ordering::Forward => Arc::new(Int32Array::from_iter_values(start..(start + size))),
-            Ordering::Reverse => Arc::new(Int32Array::from_iter_values(((start - size)..start).rev())),
+            Ordering::Reverse => {
+                Arc::new(Int32Array::from_iter_values(((start - size)..start).rev()))
+            }
         };
 
         arrays.push(indices);
