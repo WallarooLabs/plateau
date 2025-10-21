@@ -698,7 +698,7 @@ fn spawn_slog_thread(
                         .log_arrows(schema, full_chunks, Some(active_chunk))
                         .expect("extend full chunks");
 
-                    let size = writer.size_estimate().expect("segment size estimate");
+                    let mut size = writer.size_estimate().expect("segment size estimate");
                     let record_len = records.end.0 - records.start.0;
                     debug!(
                         "{}: wrote to {:?} (end {:?}, len {}, size {}) in {:?}",
@@ -718,10 +718,10 @@ fn spawn_slog_thread(
 
                     if seal {
                         prior_size = 0;
-                        current
-                            .take()
-                            .map(|(_, w, _)| w.close().expect("segment close"));
-                        trace!("{}: sealed {:?} {:?}", name, segment, records);
+                        if let Some((_, w, _)) = current.take() {
+                            size = w.close().expect("segment close");
+                        }
+                        trace!(%size, "{}: sealed {:?} {:?}", name, segment, records);
                     }
 
                     let response = WriteResult {
