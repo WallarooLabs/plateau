@@ -15,6 +15,7 @@ pub struct PlateauConfig {
     pub catalog: catalog::Config,
     pub metrics: metrics::Config,
     pub replication: Option<replication::Config>,
+    pub reconcile: Option<catalog::ReconcileConfig>,
 }
 
 impl PlateauConfig {
@@ -43,6 +44,7 @@ impl Default for PlateauConfig {
             catalog: catalog::Config::default(),
             metrics: metrics::Config::default(),
             replication: None,
+            reconcile: None,
         }
     }
 }

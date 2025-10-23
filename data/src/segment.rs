@@ -113,7 +113,7 @@ impl Segment {
         })
     }
 
-    pub(crate) fn parts(&self) -> impl Iterator<Item = PathBuf> {
+    pub fn parts(&self) -> impl Iterator<Item = PathBuf> {
         let parquet_parts = parquet::Segment::new(self.path.clone())
             .map(|s| s.parts())
             .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
@@ -210,7 +210,7 @@ impl Segment {
         }
     }
 
-    fn cache_path(&self) -> PathBuf {
+    pub fn cache_path(&self) -> PathBuf {
         let mut path: PathBuf = self.path.clone();
         assert!(path.set_extension("arrows"));
         path

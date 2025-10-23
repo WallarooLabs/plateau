@@ -392,6 +392,16 @@ impl Catalog {
             false
         }
     }
+
+    /// Get the topic root path
+    pub fn topic_root(&self) -> &Path {
+        &self.topic_root
+    }
+
+    /// Get a reference to the manifest
+    pub fn manifest(&self) -> &Manifest {
+        &self.manifest
+    }
 }
 
 #[cfg(test)]

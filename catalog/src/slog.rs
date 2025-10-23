@@ -341,7 +341,7 @@ impl Slog {
         (slog, rx)
     }
 
-    fn segment_path(root: &Path, name: &str, segment_ix: SegmentIndex) -> PathBuf {
+    pub(crate) fn segment_path(root: &Path, name: &str, segment_ix: SegmentIndex) -> PathBuf {
         let file = PathBuf::from(format!("{}-{}", name, segment_ix.0));
         [root, file.as_path()].into_iter().collect()
     }

@@ -72,6 +72,29 @@ pub async fn task_from_catalog_config(
     stop: future::BoxFuture<'_, ()>,
 ) -> bool {
     let (addr, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
+
+    // Start reconciliation task if configured
+    if let Some(reconcile_config) = &config.reconcile {
+        tracing::info!(
+            "starting reconciliation task with config: {:?}",
+            reconcile_config
+        );
+        let mut reconciler =
+            catalog::ReconcileJob::with_config(catalog.clone(), reconcile_config.clone());
+
+        tokio::spawn(async move {
+            // Run reconciliation once and exit
+            match reconciler.run(None).await {
+                Ok(_) => {
+                    tracing::info!("reconciliation completed successfully");
+                }
+                Err(e) => {
+                    tracing::error!("reconciliation error: {:?}", e);
+                }
+            }
+        });
+    }
+
     {
         use futures::future::FutureExt;
         let mut tasks = vec![Catalog::checkpoints(catalog.clone()).boxed(), stop, server];

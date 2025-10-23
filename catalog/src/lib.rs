@@ -17,6 +17,7 @@
 
 pub mod catalog;
 pub mod manifest;
+pub mod reconcile;
 pub mod storage;
 
 pub mod partition;
@@ -32,3 +33,4 @@ pub use plateau_transport::arrow2;
 pub use plateau_test as test;
 
 pub use catalog::{Catalog, Config};
+pub use reconcile::{ReconcileConfig, ReconcileJob, ReconcileStats};
