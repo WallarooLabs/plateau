@@ -262,7 +262,9 @@ impl Manifest {
                 time_start=excluded.time_start,
                 time_end=excluded.time_end,
                 record_start=excluded.record_start,
-                record_end=excluded.record_end;
+                record_end=excluded.record_end,
+                size=excluded.size,
+                version=excluded.version;
         ",
         )
         .bind(id.topic())
@@ -603,7 +605,7 @@ mod test {
                         index: SegmentIndex(0),
                         time,
                         records: RecordIndex(0)..RecordIndex(ix),
-                        size: 10,
+                        size: ix + 1,
                         version: SEGMENT_FORMAT_VERSION,
                     },
                 )
@@ -643,6 +645,7 @@ mod test {
             Some(SegmentIndex(1))
         );
         assert_eq!(state.get_max_segment(&id).await, Some(SegmentIndex(1)));
+        assert_eq!(state.get_size(Scope::Topic(id.topic())).await, 25);
     }
 
     #[tokio::test]
