@@ -356,7 +356,7 @@ impl Writer {
         &self.segment.path
     }
 
-    pub fn end(mut self) -> Result<()> {
+    pub fn end(mut self) -> Result<usize> {
         if let Some(rows) = self.cache.take() {
             self.write_chunk(rows.chunk)?;
         }
@@ -364,6 +364,7 @@ impl Writer {
         // NOTE: it is critical that the writer syncs the file as part of the
         // end operation, otherwise the data in cache may be lost in recovery
         // scenarios.
+        let segment = self.segment;
         match self.writer {
             WriteFormat::Parquet(mut p) => p.end()?,
             WriteFormat::Arrow(a) => a.end()?,
@@ -371,7 +372,7 @@ impl Writer {
 
         self.cache.destroy()?;
 
-        Ok(())
+        segment.size_estimate()
     }
 
     /// Return an estimate of the on-disk size of the corresponding file(s).
@@ -383,8 +384,7 @@ impl Writer {
 
     pub fn close(self) -> Result<usize> {
         let mut parent = self.get_path().to_path_buf();
-        let size = self.size_estimate()?;
-        self.end()?;
+        let size = self.end()?;
 
         // NOTE: the file data is now synchronized, but the file itself may not appear in the
         // parent directory on crash unless we fsync that too.
