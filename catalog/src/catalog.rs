@@ -349,7 +349,7 @@ impl Catalog {
         }
     }
 
-    /// Default number of topics to keep in-memory.
+    /// Default headroom (in bytes) to reserve for filesystem overhead.
     pub fn default_headroom() -> ByteSize {
         ByteSize::mib(500)
     }
