@@ -175,7 +175,7 @@ impl Partition {
         &self.id
     }
 
-    fn slog_name(id: &PartitionId) -> String {
+    pub(crate) fn slog_name(id: &PartitionId) -> String {
         format!("{}-{}", id.topic(), id.partition())
     }
 
