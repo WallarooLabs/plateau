@@ -425,6 +425,42 @@ pub struct Topic {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct PartitionInfo {
+    pub name: String,
+    pub oldest_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub newest_time: Option<chrono::DateTime<chrono::Utc>>,
+    pub total_byte_size: usize,
+    pub records: Option<Span>,
+    pub segments: Option<Span>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct TopicInfo {
+    pub name: String,
+    pub partitions: Vec<PartitionInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct InfoResponse {
+    pub topics: Vec<TopicInfo>,
+    pub retention_stats: ReconcileStats,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct ReconcileStats {
+    pub files_checked: usize,
+    pub untracked_files: usize,
+    pub size_mismatches: usize,
+    pub missing_files: usize,
+    pub expected_size: usize,
+    pub actual_size: usize,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct ErrorMessage {

@@ -26,11 +26,14 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::PlateauConfig;
 use plateau_transport::{
-    DataFocus, Inserted, Partitions, RecordQuery, RecordStatus, Span, Topic, TopicIterationOrder,
-    TopicIterationQuery, TopicIterationStatus, TopicIterator, Topics,
+    DataFocus, InfoResponse, Inserted, PartitionInfo, Partitions, ReconcileStats, RecordQuery,
+    RecordStatus, Span, Topic, TopicInfo, TopicIterationOrder, TopicIterationQuery,
+    TopicIterationStatus, TopicIterator, Topics,
 };
 
 pub use crate::axum_util::{query::Query, Response};
+use crate::catalog::manifest::PartitionId;
+use crate::catalog::reconcile::ReconcileJob;
 use crate::catalog::slog::SlogError;
 use crate::catalog::Catalog;
 use crate::data::{
@@ -139,6 +142,7 @@ pub async fn serve(
         )
         .route("/topic/:topic_name/records", post(topic_iterate_route))
         .route("/topic/:topic_name", get(topic_get_info))
+        .route("/info", get(get_info))
         .layer(
             TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
                 tracing::span!(
@@ -442,6 +446,113 @@ fn parse_time_range(
     }
 }
 
+#[utoipa::path(
+    get,
+    operation_id = "get_info",
+    path = "/info",
+    responses(
+        (status = 200, description = "System information including topics, partitions, and retention stats", body = InfoResponse),
+    ),
+  )]
+async fn get_info(
+    State(AppState(catalog, _config)): State<AppState>,
+) -> Result<Response<InfoResponse>, ErrorReply> {
+    use futures::StreamExt;
+
+    // Run retention checks
+    catalog.retain().await;
+
+    // Get all topics
+    let topic_names = catalog.list_topics().await;
+
+    // Collect topic information with their partitions
+    let mut topics = Vec::new();
+
+    for topic_name in &topic_names {
+        let topic = catalog.get_topic(topic_name).await;
+
+        // Get all partition names for this topic from the manifest
+        let partition_names = catalog.manifest().get_partitions(topic_name).await;
+
+        // Collect partition information for this topic
+        let mut partitions = Vec::new();
+
+        for partition_name in partition_names {
+            let partition = topic.get_partition(&partition_name).await;
+
+            // Get partition stats
+            let byte_size = partition.byte_size().await;
+            let readable_ids = partition.readable_ids().await;
+
+            // Get segment data to determine time range and indices
+            let records = readable_ids.as_ref().map(|ids| Span {
+                start: ids.start.0,
+                end: ids.end.0,
+            });
+
+            // Get time range from manifest
+            let partition_id = PartitionId::new(topic_name, &partition_name);
+            let mut oldest_time = None;
+            let mut newest_time = None;
+
+            // Get all segments for this partition to find time range
+            let segments_stream = catalog.manifest().stream_segments(
+                &partition_id,
+                RecordIndex(0),
+                Ordering::Forward,
+            );
+
+            let segments: Vec<_> = segments_stream.collect().await;
+            let segments = segments.first().zip(segments.last()).map(|(first, last)| {
+                oldest_time = Some(*first.time.start());
+                newest_time = Some(*last.time.end());
+
+                Span {
+                    start: first.index.0,
+                    end: last.index.0,
+                }
+            });
+
+            partitions.push(PartitionInfo {
+                name: partition_name, // Just the partition name, not the full path
+                oldest_time,
+                newest_time,
+                total_byte_size: byte_size,
+                records,
+                segments,
+            });
+        }
+
+        topics.push(TopicInfo {
+            name: topic_name.clone(),
+            partitions,
+        });
+    }
+
+    // Run retention job to get stats
+    let mut reconciler = ReconcileJob::new(catalog.clone());
+    // Run a reconciliation pass to get current stats
+    let _ = reconciler
+        .run(None)
+        .await
+        .map_err(|_| ErrorReply::Unknown)?;
+
+    let reconcile_stats = reconciler.stats();
+    let retention_stats = ReconcileStats {
+        files_checked: reconcile_stats.files_checked.len(),
+        untracked_files: reconcile_stats.untracked_files.len(),
+        size_mismatches: reconcile_stats.size_mismatches.len(),
+        missing_files: reconcile_stats.missing_files.len(),
+        expected_size: reconcile_stats.expected_size.as_u64() as usize,
+        actual_size: reconcile_stats.actual_size.as_u64() as usize,
+    };
+
+    Ok(Response::ok(InfoResponse {
+        topics,
+        retention_stats,
+    }))
+}
+
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -451,6 +562,7 @@ fn parse_time_range(
         topic_get_info,
         topic_iterate_route,
         partition_get_records,
+        get_info,
     ),
     components(
         schemas(
@@ -464,6 +576,10 @@ fn parse_time_range(
             Topics,
             TopicIterationOrder,
             // TopicIterator,
+            InfoResponse,
+            TopicInfo,
+            PartitionInfo,
+            ReconcileStats,
         )
     ),
     tags(
