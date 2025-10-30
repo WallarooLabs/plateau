@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub checkpoint_interval: Duration,
     pub retain: Retention,
+    #[serde(default = "Catalog::default_headroom")]
+    pub headroom: ByteSize,
     pub partition: partition::Config,
     pub storage: storage::Config,
     #[serde(default = "Catalog::default_max_open_topics")]
@@ -43,6 +45,7 @@ impl Default for Config {
         Self {
             checkpoint_interval: Duration::from_millis(1000),
             retain: Default::default(),
+            headroom: Catalog::default_headroom(),
             partition: Default::default(),
             storage: Default::default(),
             max_open_topics: Catalog::default_max_open_topics(),
@@ -262,16 +265,19 @@ impl Catalog {
         ByteSize::b(self.manifest.get_size(Scope::Global).await as u64)
     }
 
-    async fn over_retention_limit(&self) -> bool {
-        let retain = &self.config.retain;
+    pub fn total_byte_limit(&self) -> ByteSize {
+        self.config.retain.max_bytes + self.config.headroom
+    }
 
+    async fn over_retention_limit(&self) -> bool {
         let size = self.byte_size().await;
-        debug!("catalog size: {}", size);
+        let limit = self.total_byte_limit();
+        debug!(?limit, "catalog size: {}", size);
         gauge!("stored_size_bytes").set(size.as_u64() as f64);
-        let over = size > retain.max_bytes;
+        let over = size > limit;
 
         if over {
-            info!("over retention limit {} > {}", size, retain.max_bytes);
+            info!("over retention limit {} > {}", size, limit);
         }
 
         over
@@ -341,6 +347,11 @@ impl Catalog {
             // that seems preferable to not running at all
             std::future::pending().await
         }
+    }
+
+    /// Default headroom (in bytes) to reserve for filesystem overhead.
+    pub fn default_headroom() -> ByteSize {
+        ByteSize::mib(500)
     }
 
     /// Default number of topics to keep in-memory.
@@ -529,7 +540,8 @@ mod test {
     #[test_log::test(tokio::test)]
     async fn test_retain() -> Result<()> {
         let (_root, mut catalog) = catalog().await;
-        catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
+        catalog.config.retain.max_bytes = ByteSize::b(8000);
+        catalog.config.headroom = ByteSize::b(catalog.manifest.db_bytes() as u64);
 
         let data = "x".to_string().repeat(500);
 
@@ -556,9 +568,9 @@ mod test {
             partition.extend_records(&records).await?;
         }
 
-        assert!(catalog.byte_size().await > catalog.config.retain.max_bytes);
+        assert!(catalog.byte_size().await > catalog.total_byte_limit());
         catalog.retain().await;
-        assert!(catalog.byte_size().await < catalog.config.retain.max_bytes);
+        assert!(catalog.byte_size().await < catalog.total_byte_limit());
         let topic = catalog.get_topic("oldest").await;
         let partition = topic.get_partition("default").await;
         assert!(partition.byte_size().await < old_size);
