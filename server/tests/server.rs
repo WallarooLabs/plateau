@@ -1010,3 +1010,111 @@ async fn partition_status_byte_limited() {
     assert_partition_status(&response, "ByteLimited");
     assert_response_length(response, message_limit + 1).await;
 }
+
+#[test_log::test(tokio::test)]
+async fn info_endpoint() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    // Initially, there should be no topics or partitions
+    let info_response = get_json(&client, &format!("{}/info", server.base())).await?;
+    assert_eq!(info_response["topics"].as_array().unwrap().len(), 0);
+
+    // Add some data to create topics and partitions
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        TEST_MESSAGE,
+        5,
+    )
+    .await;
+
+    // Add data to a second partition
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, "partition-2").as_str(),
+        TEST_MESSAGE,
+        3,
+    )
+    .await;
+
+    // Add data to a second topic
+    let topic2_name = random_topic();
+    repeat_append(
+        &client,
+        append_url(&server, &topic2_name, "another-partition").as_str(),
+        TEST_MESSAGE,
+        2,
+    )
+    .await;
+
+    server.catalog.checkpoint().await;
+
+    // hack until we have a true commit mechanism
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Now check the info endpoint
+    let info_response = get_json(&client, &format!("{}/info", server.base())).await?;
+
+    // Pretty print the JSON response for debugging
+    let pretty_json = serde_json::to_string_pretty(&info_response)?;
+    tracing::debug!("Info endpoint response:");
+    for line in pretty_json.lines() {
+        tracing::debug!("{}", line);
+    }
+
+    // Should have 2 topics
+    let topics = info_response["topics"].as_array().unwrap();
+    assert_eq!(topics.len(), 2);
+
+    // Check that our topics are present and have correct partitions
+    let mut found_topic1 = false;
+    let mut found_topic2 = false;
+
+    for topic_info in topics {
+        let topic_name_value = topic_info["name"].as_str().unwrap();
+        let partitions = topic_info["partitions"].as_array().unwrap();
+
+        if topic_name_value == topic_name.as_str() {
+            found_topic1 = true;
+            // Should have 2 partitions for topic1
+            assert_eq!(partitions.len(), 2);
+
+            // Check partition names
+            let partition_names: Vec<_> = partitions
+                .iter()
+                .map(|p| p["name"].as_str().unwrap())
+                .collect();
+            assert!(partition_names.contains(&PARTITION_NAME));
+            assert!(partition_names.contains(&"partition-2"));
+        } else if topic_name_value == topic2_name.as_str() {
+            found_topic2 = true;
+            // Should have 1 partition for topic2
+            assert_eq!(partitions.len(), 1);
+            assert_eq!(partitions[0]["name"].as_str().unwrap(), "another-partition");
+        }
+    }
+
+    assert!(found_topic1);
+    assert!(found_topic2);
+
+    // Check partition info structure
+    for topic_info in topics {
+        let partitions = topic_info["partitions"].as_array().unwrap();
+        for partition in partitions {
+            assert!(partition["name"].is_string());
+            assert!(partition["total_byte_size"].is_number());
+        }
+    }
+
+    // Check retention stats are present
+    assert!(info_response["retention_stats"].is_object());
+    let retention_stats = &info_response["retention_stats"];
+    assert!(retention_stats["files_checked"].is_number());
+    assert!(retention_stats["untracked_files"].is_number());
+    assert!(retention_stats["size_mismatches"].is_number());
+    assert!(retention_stats["missing_files"].is_number());
+    assert!(retention_stats["expected_size"].is_number());
+    assert!(retention_stats["actual_size"].is_number());
+
+    Ok(())
+}
