@@ -47,6 +47,8 @@ pub struct ReconcileConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReconcileFix {
+    /// Workaround for inability to pass an empty collection via [config]
+    Noop,
     UpdateManifestSizes,
     // TODO: RemoveOrphans,
     // TODO: RemoveUntrackedSegments
