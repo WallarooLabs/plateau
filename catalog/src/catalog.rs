@@ -10,6 +10,7 @@ use bytesize::ByteSize;
 use chrono::Utc;
 use futures::future::join_all;
 use metrics::gauge;
+use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use tokio::{
     sync::{RwLock, RwLockReadGuard},
@@ -214,7 +215,15 @@ impl Catalog {
     pub async fn prune_topics(&self) {
         let topics = &mut self.state.write().await.topics;
         while topics.len() > self.config.max_open_topics {
-            let to_drop = topics.keys().next().expect("no topics left").clone();
+            let to_drop = {
+                let mut rng = rand::rng();
+                topics
+                    .keys()
+                    .choose(&mut rng)
+                    .expect("no topics left")
+                    .clone()
+            };
+
             info!(
                 "open topic limit hit ({} > {}), dropping \"{}\"",
                 topics.len(),
