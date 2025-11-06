@@ -18,6 +18,7 @@ futures = "0.3"
 metrics = "0.24"
 metrics-exporter-prometheus = "0.17"
 humantime-serde = "1"
+rand = "0.9.2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
