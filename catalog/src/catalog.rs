@@ -185,8 +185,8 @@ impl Catalog {
                 .get_oldest_segment(None)
                 .await
                 .expect("no partition to remove");
-            let topics = &self.state.read().await.topics;
-            let topic = topics.get(oldest.topic()).expect("invalid topic");
+
+            let topic = self.get_topic(oldest.topic()).await;
             let partition = topic.get_partition(oldest.partition()).await;
             partition.remove_oldest().await;
         }
