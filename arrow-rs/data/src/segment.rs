@@ -110,7 +110,7 @@ impl Segment {
         })
     }
 
-    pub(crate) fn parts(&self) -> impl Iterator<Item = PathBuf> {
+    pub fn parts(&self) -> impl Iterator<Item = PathBuf> {
         let arrow_parts = arrow::Segment::new(self.path.clone())
             .map(|s| s.parts())
             .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
@@ -198,7 +198,7 @@ impl Segment {
         }
     }
 
-    fn cache_path(&self) -> PathBuf {
+    pub fn cache_path(&self) -> PathBuf {
         let mut path: PathBuf = self.path.clone();
         assert!(path.set_extension("arrows"));
         path
@@ -337,7 +337,7 @@ impl Writer {
         &self.segment.path
     }
 
-    pub fn end(mut self) -> Result<()> {
+    pub fn end(mut self) -> Result<usize> {
         if let Some(rows) = self.cache.take() {
             self.write_chunk(rows.chunk)?;
         }
@@ -345,13 +345,14 @@ impl Writer {
         // NOTE: it is critical that the writer syncs the file as part of the
         // end operation, otherwise the data in cache may be lost in recovery
         // scenarios.
+        let segment = self.segment;
         match self.writer {
             WriteFormat::Arrow(a) => a.end()?,
         }
 
         self.cache.destroy()?;
 
-        Ok(())
+        segment.size_estimate()
     }
 
     /// Return an estimate of the on-disk size of the corresponding file(s).
@@ -363,8 +364,7 @@ impl Writer {
 
     pub fn close(self) -> Result<usize> {
         let mut parent = self.get_path().to_path_buf();
-        let size = self.size_estimate()?;
-        self.end()?;
+        let size = self.end()?;
 
         // NOTE: the file data is now synchronized, but the file itself may not appear in the
         // parent directory on crash unless we fsync that too.

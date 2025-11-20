@@ -3217,6 +3217,7 @@ dependencies = [
  "arrow-json",
  "arrow-schema",
  "arrow-select",
+ "chrono",
  "clap",
  "regex",
  "rweb",
