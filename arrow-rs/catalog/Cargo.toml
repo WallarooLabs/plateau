@@ -1,0 +1,55 @@
+[package]
+name = "plateau-catalog-arrow-rs"
+description = "Index of all stored segments in plateau"
+
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.6", features = ["headers"] }
+bytes = "1.6"
+bytesize = { version = "1.1.0", features = ["serde"] }
+config = "0.14"
+futures = "0.3"
+metrics = "0.24"
+metrics-exporter-prometheus = "0.17"
+humantime-serde = "1"
+rand = "0.9.2"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+tokio-stream = { version = "0.1", features = ["signal"] }
+tokio = { version = "1", features = ["full"] }
+# TODO: 0.7.4 adds a deprecation warning that will need to be fixed down the road
+sqlx = { version = "=0.7.3", features = [
+  "chrono",
+  "sqlite",
+  "runtime-tokio-rustls",
+] }
+systemstat = "0.2"
+
+chrono.workspace = true
+thiserror.workspace = true
+
+plateau-data.workspace = true
+plateau-client.workspace = true
+plateau-transport.workspace = true
+
+
+[dev-dependencies]
+tempfile = "3"
+test-log = { version = "0.2", default-features = false, features = ["trace"] }
+uuid = { version = "1.10", features = ["v4"] }
+
+reqwest.workspace = true
+
+plateau-client.workspace = true
+plateau-test.workspace = true
+
+
+[lints]
+workspace = true
