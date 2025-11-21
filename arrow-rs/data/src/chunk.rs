@@ -264,22 +264,10 @@ impl From<IndexedChunk> for SegmentChunk {
             .map(|i| indexed.chunk.column(i).clone())
             .collect::<Vec<_>>();
 
-        // Create a new RecordBatch with a generic schema
-        let fields = arrays
-            .iter()
-            .enumerate()
-            .map(|(i, arr)| {
-                arrow_schema::Field::new(
-                    format!("field_{i}"),
-                    arr.data_type().clone(),
-                    arr.null_count() > 0,
-                )
-            })
-            .collect::<Vec<_>>();
+        // Use the inner schema from the IndexedChunk to preserve field names
+        let schema = Arc::new(indexed.inner_schema.clone());
 
-        let schema = Arc::new(Schema::new(arrow_schema::Fields::from(fields)));
-
-        // Create the new RecordBatch
+        // Create the new RecordBatch with the original schema
         Self::try_new(schema, arrays).unwrap_or_else(|_| {
             // Fallback to empty batch if creation fails
             Self::new_empty(Arc::new(Schema::empty()))

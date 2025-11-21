@@ -77,7 +77,7 @@ impl<S: Borrow<Schema> + Clone + PartialEq> TryFrom<SchemaChunk<S>> for LegacyRe
     }
 }
 
-impl TryFrom<LegacyRecords> for SchemaChunk<SchemaRef> {
+impl TryFrom<LegacyRecords> for SchemaChunk<Schema> {
     type Error = ChunkError;
 
     fn try_from(value: LegacyRecords) -> Result<Self, Self::Error> {
@@ -97,7 +97,7 @@ impl TryFrom<LegacyRecords> for SchemaChunk<SchemaRef> {
             .map_err(|_| ChunkError::LengthMismatch)?;
 
         Ok(Self {
-            schema,
+            schema: Arc::unwrap_or_clone(schema),
             chunk: batch,
         })
     }
