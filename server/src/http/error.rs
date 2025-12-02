@@ -1,6 +1,7 @@
 use crate::arrow2::error::Error as ArrowError;
 use axum::http::StatusCode;
 use plateau_transport::{headers::MAX_REQUEST_SIZE_HEADER, ChunkError, ErrorMessage, PathError};
+use tracing::error;
 
 #[derive(Debug)]
 pub enum ErrorReply {
@@ -23,7 +24,7 @@ pub enum ErrorReply {
 
 impl axum::response::IntoResponse for ErrorReply {
     fn into_response(self) -> axum::response::Response {
-        let (code, message) = match self {
+        let (code, user_error) = match self {
             Self::EmptyBody => (StatusCode::BAD_REQUEST, "no body provided".to_string()),
             Self::Arrow(e) => (StatusCode::BAD_REQUEST, format!("arrow error: {e}")),
             Self::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {e}")),
@@ -76,9 +77,11 @@ impl axum::response::IntoResponse for ErrorReply {
             }
         };
 
+        error!(?code, ?user_error);
+
         let response = axum::Json(&ErrorMessage {
             code: code.as_u16(),
-            message,
+            message: user_error,
         })
         .into_response();
 
