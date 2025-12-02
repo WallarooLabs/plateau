@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::ops::{Deref, Range, RangeInclusive};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use axum::{
@@ -18,9 +18,10 @@ use futures::{Future, FutureExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::oneshot;
+use tower_http::classify::{StatusInRangeAsFailures, StatusInRangeFailureClass};
 use tower_http::trace::TraceLayer;
-use tracing::info;
 use tracing::Instrument;
+use tracing::{error, info};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
@@ -128,6 +129,9 @@ pub async fn serve(
 
     let (tx_shutdown, rx_shutdown) = oneshot::channel::<()>();
 
+    // By default tower_http only logs 5xx errors, we want to log 4xx as well
+    let log_codes = StatusInRangeAsFailures::new(400..=599);
+
     let filter = Router::new()
         .merge(SwaggerUi::new("/docs").url("/openapi.json", ApiDoc::openapi()))
         .route("/ok", get(healthcheck))
@@ -144,16 +148,22 @@ pub async fn serve(
         .route("/topic/:topic_name", get(topic_get_info))
         .route("/info", get(get_info))
         .layer(
-            TraceLayer::new_for_http().make_span_with(|request: &Request<Body>| {
-                tracing::span!(
-                    target: "plateau::http",
-                    tracing::Level::INFO,
-                    "request",
-                    method = %request.method(),
-                    uri = %request.uri(),
-                    version = ?request.version(),
-                )
-            }),
+            TraceLayer::new(log_codes.into_make_classifier())
+                .make_span_with(|request: &Request<Body>| {
+                    tracing::span!(
+                        target: "plateau::http",
+                        tracing::Level::INFO,
+                        "request",
+                        method = %request.method(),
+                        uri = %request.uri(),
+                        version = ?request.version(),
+                    )
+                })
+                .on_failure(
+                    |err: StatusInRangeFailureClass, _latency: Duration, _span: &tracing::Span| {
+                        error!(?err);
+                    },
+                ),
         )
         .with_state(AppState(catalog, Arc::clone(&config)));
 
