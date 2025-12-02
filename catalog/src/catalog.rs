@@ -195,14 +195,7 @@ impl Catalog {
 
     #[tracing::instrument(skip_all, level = "debug")]
     pub async fn gauge_topics(&self) {
-        // collect a list of active topic names and then drop the read lock in
-        // case the `get_size` calls below block for a substantial amount of
-        // time
-        let names: Vec<String> = {
-            let topics = &self.state.read().await.topics;
-            topics.keys().cloned().collect()
-        };
-
+        let names = self.list_topics().await;
         for name in names {
             let bytes = self.manifest.get_size(Scope::Topic(&name)).await;
             let labels = [("topic", name)];
