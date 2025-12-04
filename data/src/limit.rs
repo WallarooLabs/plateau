@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use std::time::Duration;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Retention {
     pub max_segment_count: Option<usize>,

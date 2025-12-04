@@ -32,6 +32,7 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub checkpoint_interval: Duration,
     pub retain: Retention,
+    pub retention: CatalogRetention,
     #[serde(default = "Catalog::default_headroom")]
     pub headroom: ByteSize,
     pub partition: partition::Config,
@@ -46,12 +47,49 @@ impl Default for Config {
         Self {
             checkpoint_interval: Duration::from_millis(1000),
             retain: Default::default(),
+            retention: CatalogRetention::default(),
             headroom: Catalog::default_headroom(),
             partition: Default::default(),
             storage: Default::default(),
             max_open_topics: Catalog::default_max_open_topics(),
             max_partition_bytes: ByteSize::mib(3500),
         }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum CatalogRetention {
+    Fixed(Retention),
+    RootMountTotal,
+}
+
+impl CatalogRetention {
+    async fn resolve(&self, root: &Path) -> anyhow::Result<Retention> {
+        match self {
+            Self::Fixed(r) => Ok(r.clone()),
+            Self::RootMountTotal => {
+                let mount_size = storage::path_mount_stat(root.to_owned()).await?.total;
+                info!(?root, %mount_size, "resolved size for retention");
+
+                Ok(Retention {
+                    max_bytes: mount_size,
+                    ..Default::default()
+                })
+            }
+        }
+    }
+
+    fn prior_default() -> Retention {
+        Retention {
+            max_bytes: ByteSize::gib(99),
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for CatalogRetention {
+    fn default() -> Self {
+        Self::Fixed(Self::prior_default())
     }
 }
 
@@ -73,7 +111,7 @@ struct State {
 }
 
 impl Catalog {
-    pub async fn attach(root: PathBuf, config: Config) -> anyhow::Result<Self> {
+    pub async fn attach(root: PathBuf, mut config: Config) -> anyhow::Result<Self> {
         let manifest = Manifest::current_prior_attach(
             root.join("manifest.sqlite"),
             root.join("manifest.json"),
@@ -86,6 +124,14 @@ impl Catalog {
             std::fs::create_dir(&topic_root)?;
         }
         Self::migrate_topics(&manifest, &root, &topic_root).await?;
+
+        if config.retain != CatalogRetention::prior_default() {
+            warn!(
+                "catalog.config.retain is obsolete and has no effect. see catalog.config.retention"
+            )
+        }
+
+        config.retain = config.retention.resolve(&root).await?;
 
         Ok(Self::attach_v0(manifest, root, topic_root, config).await)
     }
@@ -268,7 +314,13 @@ impl Catalog {
     }
 
     pub fn total_byte_limit(&self) -> ByteSize {
-        self.config.retain.max_bytes + self.config.headroom
+        ByteSize(
+            self.config
+                .retain
+                .max_bytes
+                .0
+                .saturating_sub(self.config.headroom.0),
+        )
     }
 
     async fn over_retention_limit(&self) -> bool {
@@ -542,8 +594,8 @@ mod test {
     #[test_log::test(tokio::test)]
     async fn test_retain() -> Result<()> {
         let (_root, mut catalog) = catalog().await;
-        catalog.config.retain.max_bytes = ByteSize::b(8000);
-        catalog.config.headroom = ByteSize::b(catalog.manifest.db_bytes() as u64);
+        catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
+        catalog.config.headroom = ByteSize::b(0);
 
         let data = "x".to_string().repeat(500);
 
@@ -580,7 +632,7 @@ mod test {
         Ok(())
     }
 
-    #[test(tokio::test)]
+    #[test_log::test(tokio::test)]
     async fn test_max_open_topics() -> Result<()> {
         let (_root, catalog) = catalog_config(Config {
             max_open_topics: 1,
