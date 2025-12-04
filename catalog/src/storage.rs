@@ -18,6 +18,15 @@ const MAX_WRITES: usize = 10_000;
 const MAX_DURATION: Duration = Duration::from_secs(10);
 const MIN_AVAILABLE: ByteSize = ByteSize::gb(1);
 
+pub(crate) async fn path_mount_stat(path: PathBuf) -> anyhow::Result<systemstat::Filesystem> {
+    let stat = System::new();
+    spawn_blocking(move || {
+        let fs = stat.mount_at(path)?;
+        Ok::<_, anyhow::Error>(fs)
+    })
+    .await?
+}
+
 /// Periodically monitors the disk space available for logs
 /// and switches its state between read-only and writable
 /// based on configured thresholds.
@@ -80,13 +89,7 @@ impl DiskMonitor {
             if self.write_count.load(Ordering::SeqCst) >= config.max_writes
                 || self.last_write.load(Ordering::SeqCst) < deadline
             {
-                let stat = System::new();
-                let path = path.clone();
-                let avail = spawn_blocking(move || {
-                    let fs = stat.mount_at(path)?;
-                    Ok::<_, anyhow::Error>(fs.avail)
-                })
-                .await??;
+                let avail = path_mount_stat(path.clone()).await?.avail;
 
                 self.readonly
                     .store(avail < config.min_available, Ordering::SeqCst);
