@@ -14,7 +14,8 @@ members = [
   "arrow-rs/client",
   "arrow-rs/test",
   "arrow-rs/data",
-  "arrow-rs/catalog"
+  "arrow-rs/catalog",
+  "arrow-rs/server"
 ]
 
 
