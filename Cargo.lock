@@ -2986,7 +2986,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-catalog-arrow-rs"
-version = "0.5.12"
+version = "0.5.15"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3201,6 +3201,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "plateau-server-arrow-rs"
+version = "0.5.15"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-json",
+ "arrow-schema",
+ "arrow-select",
+ "axum",
+ "bytes",
+ "bytesize",
+ "chrono",
+ "config",
+ "futures",
+ "humantime-serde",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "plateau-catalog-arrow-rs",
+ "plateau-client-arrow-rs",
+ "plateau-data-arrow-rs",
+ "plateau-test-arrow-rs",
+ "plateau-transport-arrow-rs",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serde_qs",
+ "tempfile",
+ "test-log",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "toml 0.7.8",
+ "tower-http",
+ "tracing",
+ "utoipa",
+ "utoipa-swagger-ui",
+ "uuid",
+]
+
+[[package]]
 name = "plateau-test"
 version = "0.5.15"
 dependencies = [
@@ -3220,7 +3265,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "plateau-client-arrow-rs",
- "plateau-server",
+ "plateau-server-arrow-rs",
  "plateau-transport-arrow-rs",
  "tempfile",
  "test-log",

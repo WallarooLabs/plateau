@@ -6,7 +6,7 @@ use tracing::{error, info};
 
 use crate::{catalog, http, metrics, replication};
 
-use catalog::{reconcile::ReconcileFix, ReconcileConfig};
+use crate::catalog::{reconcile::ReconcileFix, ReconcileConfig};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]

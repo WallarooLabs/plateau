@@ -1,7 +1,3 @@
-use crate::arrow2::datatypes::Metadata;
-use crate::arrow2::io::ipc::{read, write};
-use crate::arrow2::io::json as arrow_json;
-
 use axum::{
     async_trait,
     body::{boxed, Full, HttpBody},
@@ -17,17 +13,23 @@ use axum::{
 
 use bytes::Bytes;
 use std::io::{Cursor, Write};
+use std::sync::Arc;
 
-use plateau_transport::{
-    headers::ITERATION_STATUS_HEADER, ArrowError, ArrowSchema, DataFocus, SchemaChunk,
-    SegmentChunk, CONTENT_TYPE_ARROW, CONTENT_TYPE_JSON,
+use crate::transport::arrow_ipc::reader::FileReader;
+use crate::transport::arrow_ipc::writer::FileWriter;
+use crate::transport::arrow_json::{writer::JsonArray, WriterBuilder};
+use crate::transport::arrow_schema::{ArrowError, Schema as ArrowSchema};
+
+use crate::transport::{
+    headers::ITERATION_STATUS_HEADER, DataFocus, SchemaChunk, SegmentChunk, CONTENT_TYPE_ARROW,
+    CONTENT_TYPE_JSON,
 };
 
-use crate::{http::error::ErrorReply, Config};
-use plateau_data::{
+use crate::data::{
     chunk::{new_schema_chunk, Schema},
     limit::LimitedBatch,
 };
+use crate::{http::error::ErrorReply, Config};
 
 const CONTENT_TYPE_PANDAS_RECORD: &str = "application/json; format=pandas-records";
 
@@ -69,7 +71,7 @@ where
                     return ErrorReply::PayloadTooLarge(max_append_bytes);
                 }
 
-                ErrorReply::Arrow(ArrowError::from_external_error(e))
+                ErrorReply::Arrow(ArrowError::from_external_error(Box::new(e)))
             })?;
 
             deserialize_request(bytes).await
@@ -80,10 +82,9 @@ where
 }
 
 pub(crate) async fn deserialize_request(bytes: Bytes) -> Result<SchemaChunkRequest, ErrorReply> {
-    let mut cursor = Cursor::new(bytes);
-    let metadata = read::read_file_metadata(&mut cursor).map_err(ErrorReply::Arrow)?;
-    let schema = metadata.schema.clone();
-    let mut reader = read::FileReader::new(cursor, metadata, None, None);
+    let cursor = Cursor::new(bytes);
+    let mut reader = FileReader::try_new(cursor, None).map_err(ErrorReply::Arrow)?;
+    let schema = Arc::unwrap_or_clone(reader.schema());
     if let Some(chunk) = reader.next() {
         let mut chunk = new_schema_chunk(schema.clone(), chunk.map_err(ErrorReply::Arrow)?)
             .map_err(ErrorReply::Chunk)?;
@@ -107,6 +108,8 @@ pub(crate) fn to_reply(
     focus: DataFocus,
 ) -> Result<Response, ErrorReply> {
     let mut iter = batch.chunks.into_iter();
+    // TBD - review this in the context of arrow-rs, it may have more efficient functionality for
+    // achieving what we need.
     // sigh. this would probably be much easier to implement if/when we
     // refactor SchemaChunk so it holds a Vec of Chunk like LimitedBatch
     // as it is we regenerate the schema and throw it away for each chunk,
@@ -116,33 +119,28 @@ pub(crate) fn to_reply(
         let mut chunk = SegmentChunk::from(chunk);
         let focused_schema = if focus.is_some() {
             let full = SchemaChunk {
-                schema: batch_schema.clone(),
+                schema: Arc::new(batch_schema.clone()),
                 chunk,
             };
             let result = full.focus(&focus).map_err(ErrorReply::Path)?;
             chunk = result.chunk;
             result.schema
         } else {
-            batch_schema.clone()
+            Arc::new(batch_schema.clone())
         };
         (chunk, batch_schema, focused_schema)
     } else {
         return match accept {
             Some(CONTENT_TYPE_ARROW) => {
-                let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
-                let options = write::WriteOptions { compression: None };
+                let mut bytes = Vec::new();
 
-                let schema = ArrowSchema {
-                    fields: vec![],
-                    metadata: Metadata::default(),
-                };
+                let schema = ArrowSchema::empty();
 
-                let mut writer = write::FileWriter::new(bytes, schema, None, options);
+                let mut writer = FileWriter::try_new(&mut bytes, &schema)
+                    .map_err(|e| ErrorReply::Arrow(ArrowError::from_external_error(e.into())))?;
 
-                writer.start().map_err(ErrorReply::Arrow)?;
                 writer.finish().map_err(ErrorReply::Arrow)?;
 
-                let bytes = writer.into_inner().into_inner();
                 Response::builder()
                     .header("Content-Type", CONTENT_TYPE_ARROW)
                     .status(StatusCode::OK)
@@ -165,7 +163,7 @@ pub(crate) fn to_reply(
 
         if focus.is_some() {
             let full = SchemaChunk {
-                schema: batch_schema.clone(),
+                schema: Arc::new(batch_schema.clone()),
                 chunk,
             };
             full.focus(&focus)
@@ -178,18 +176,16 @@ pub(crate) fn to_reply(
 
     match accept {
         Some(CONTENT_TYPE_ARROW) => {
-            let bytes: Cursor<Vec<u8>> = Cursor::new(vec![]);
-            let options = write::WriteOptions { compression: None };
+            let mut bytes = Vec::new();
 
-            let mut writer = write::FileWriter::new(bytes, focused_schema.clone(), None, options);
+            let mut writer = FileWriter::try_new(&mut bytes, &focused_schema)
+                .map_err(|e| ErrorReply::Arrow(ArrowError::from_external_error(e.into())))?;
 
-            writer.start().map_err(ErrorReply::Arrow)?;
             for chunk in iter {
-                writer.write(&chunk?, None).map_err(ErrorReply::Arrow)?;
+                writer.write(&chunk?).map_err(ErrorReply::Arrow)?;
             }
             writer.finish().map_err(ErrorReply::Arrow)?;
 
-            let bytes = writer.into_inner().into_inner();
             Response::builder()
                 .header("Content-Type", CONTENT_TYPE_ARROW)
                 .status(StatusCode::OK)
@@ -215,15 +211,14 @@ pub(crate) fn to_reply(
                 } else {
                     first = false;
                 }
-                let mut buf = vec![];
                 let chunk = chunk?;
-                let mut serializer = arrow_json::write::RecordSerializer::new(
-                    focused_schema.clone(),
-                    &chunk,
-                    vec![],
-                );
-                arrow_json::write::write(&mut buf, &mut serializer).map_err(ErrorReply::Arrow)?;
 
+                let builder = WriterBuilder::new().with_explicit_nulls(true);
+                let mut writer = builder.build::<_, JsonArray>(Cursor::new(Vec::new()));
+                writer.write_batches(&[&chunk]).map_err(ErrorReply::Arrow)?;
+                writer.finish().map_err(ErrorReply::Arrow)?;
+
+                let buf = writer.into_inner().into_inner();
                 bytes.extend(&buf[1..buf.len().saturating_sub(1)]);
             }
             write!(&mut bytes, "]").map_err(|_| ErrorReply::Unknown)?;
