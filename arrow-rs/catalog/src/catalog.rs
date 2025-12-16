@@ -642,7 +642,7 @@ mod test {
     #[test(tokio::test)]
     async fn test_partition_active_limit() -> Result<()> {
         let (_root, catalog) = catalog_config(Config {
-            max_partition_bytes: ByteSize::b(150),
+            max_partition_bytes: ByteSize::b(100),
             ..Default::default()
         })
         .await;
