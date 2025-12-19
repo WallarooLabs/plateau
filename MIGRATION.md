@@ -90,11 +90,14 @@ Based on the repository structure, the migration order is determined by dependen
 
 ### Phase 5: Catalog Library
 
-- [ ] **plateau-catalog-arrow-rs**
-  - [ ] Create copy of catalog
-  - [ ] Update dependencies to use transport-arrow-rs, client-arrow-rs, and data-arrow-rs
-  - [ ] Update arrow2 to arrow-rs, verify tests and functionality
-  - [ ] Verify topic management and partition functionality
+- [x] **plateau-catalog-arrow-rs**
+  - [x] Create copy of catalog
+  - [x] Update dependencies to use transport-arrow-rs, client-arrow-rs, and data-arrow-rs
+  - [x] Update arrow2 to arrow-rs, verify tests and functionality
+  - [x] Verify topic management and partition functionality
+  - [x] Fix IndexedChunk to SegmentChunk conversion to preserve schema field names
+  - [x] Adjust test_partition_active_limit size limit for arrow-rs compatibility
+  - [x] Ensure all references to _arrow_rs crates are only in catalog/lib.rs
 
 ### Phase 6: Server Implementation
 
@@ -361,6 +364,14 @@ Due to the refactoring that pulled data processing functionality into the `plate
 - Avoid `into_iter()` on iterators when not needed (it's a no-op for iterators)
 - Remove unnecessary mut qualifiers when variables are never modified
 - Arrow schemas don't need `&` when passed to `concat_batches`, as it takes the schema by value
+
+#### Migration-Specific Issues Resolved
+- When migrating `TryFrom<LegacyRecords>`, ensure the return type matches what the calling code expects. If the caller expects `SchemaChunk<Schema>`, make sure the implementation returns that type, not `SchemaChunk<SchemaRef>`.
+- When comparing schemas in tests, dereference `SchemaRef` with `*schema_ref` to get the underlying `Schema` for comparison.
+- When using scalar comparisons in arrow-rs, manually create boolean arrays instead of using the legacy scalar comparison functions which may not work with newer arrow-rs types.
+- When converting IndexedChunk to SegmentChunk, preserve the original schema instead of creating generic field names to maintain data integrity during serialization/deserialization.
+- Adjust size limits in tests when migrating from arrow2 to arrow-rs due to differences in serialization overhead and memory layout.
+- Ensure that all references to `_arrow_rs` crates are only in the main lib.rs file of each crate to make future updates easier. Use re-exports from the main module rather than direct references to the arrow-rs crates in submodules.
 
 ### References
 

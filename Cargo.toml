@@ -13,7 +13,8 @@ members = [
   "arrow-rs/transport",
   "arrow-rs/client",
   "arrow-rs/test",
-  "arrow-rs/data"
+  "arrow-rs/data",
+  "arrow-rs/catalog"
 ]
 
 
