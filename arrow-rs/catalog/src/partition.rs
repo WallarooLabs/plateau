@@ -244,13 +244,13 @@ impl Partition {
             if order.is_reverse() {
                 BooleanArray::from(
                     i.into_iter()
-                        .map(|index| index.map(|idx| idx < s).unwrap_or(false))
+                        .map(|index| index.is_some_and(|idx| idx < s))
                         .collect::<Vec<bool>>(),
                 )
             } else {
                 BooleanArray::from(
                     i.into_iter()
-                        .map(|index| index.map(|idx| idx >= s).unwrap_or(false))
+                        .map(|index| index.is_some_and(|idx| idx >= s))
                         .collect::<Vec<bool>>(),
                 )
             }
@@ -284,10 +284,8 @@ impl Partition {
                 .into_iter()
                 .zip(times_array.into_iter())
                 .map(|(index, time)| {
-                    index.map(|idx| idx >= (start.0 as i32)).unwrap_or(false)
-                        && time
-                            .map(|t| times.contains(&parse_time(t)))
-                            .unwrap_or(false)
+                    index.is_some_and(|idx| idx >= (start.0 as i32))
+                        && time.is_some_and(|t| times.contains(&parse_time(t)))
                 })
                 .collect();
 
@@ -634,7 +632,7 @@ pub mod test {
                     let indices_array = indexed.indices();
                     let boolean_values: Vec<bool> = indices_array
                         .into_iter()
-                        .map(|idx| idx.map(|val| val == s).unwrap_or(false))
+                        .map(|idx| idx.is_some_and(|val| val == s))
                         .collect();
                     let filter_array = BooleanArray::from(boolean_values);
                     indexed.filter(&filter_array).unwrap()
