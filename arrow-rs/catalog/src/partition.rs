@@ -284,7 +284,10 @@ impl Partition {
                 .into_iter()
                 .zip(times_array.into_iter())
                 .map(|(index, time)| {
-                    index.map(|idx| idx >= (start.0 as i32)).unwrap_or(false) && time.map(|t| times.contains(&parse_time(t))).unwrap_or(false)
+                    index.map(|idx| idx >= (start.0 as i32)).unwrap_or(false)
+                        && time
+                            .map(|t| times.contains(&parse_time(t)))
+                            .unwrap_or(false)
                 })
                 .collect();
 
