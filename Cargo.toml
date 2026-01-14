@@ -49,6 +49,13 @@ plateau-test = { path = "./test" }
 plateau-transport = { path = "./transport" }
 plateau = { path = "./plateau" }
 
+plateau-catalog-arrow-rs = { path = "./arrow-rs/catalog" }
+plateau-client-arrow-rs = { path = "./arrow-rs/client" }
+plateau-data-arrow-rs = { path = "./arrow-rs/data" }
+plateau-server-arrow-rs = { path = "./arrow-rs/server" }
+plateau-test-arrow-rs = { path = "./arrow-rs/test" }
+plateau-transport-arrow-rs = { path = "./arrow-rs/transport" }
+
 
 [profile.bench]
 debug = true

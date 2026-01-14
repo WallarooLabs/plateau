@@ -33,10 +33,21 @@ utoipa-swagger-ui = { version = "4", features = ["axum"] }
 chrono.workspace = true
 thiserror.workspace = true
 
-plateau-catalog.workspace = true
-plateau-client = { workspace = true, features = ["replicate"] }
-plateau-data.workspace = true
-plateau-transport.workspace = true
+plateau-catalog-arrow-rs.workspace = true
+plateau-client-arrow-rs = { workspace = true, features = ["replicate"] }
+plateau-data-arrow-rs.workspace = true
+plateau-transport-arrow-rs.workspace = true
+
+# Arrow-rs dependencies
+arrow = "55.2.0"
+arrow-array = "55.2.0"
+arrow-schema = "55.2.0"
+arrow-select = "55.2.0"
+arrow-data = "55.2.0"
+arrow-buffer = "55.2.0"
+arrow-cast = "55.2.0"
+arrow-json = "55.2.0"
+arrow-ipc = "55.2.0"
 
 
 [dev-dependencies]
@@ -46,8 +57,8 @@ uuid = { version = "1.10", features = ["v4"] }
 
 reqwest.workspace = true
 
-plateau-client.workspace = true
-plateau-test.workspace = true
+plateau-client-arrow-rs.workspace = true
+plateau-test-arrow-rs.workspace = true
 
 
 [lints]
