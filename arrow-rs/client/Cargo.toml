@@ -17,7 +17,6 @@ reqwest = { version = "0.11", default-features = false, features = [
   "trust-dns",
 ] }
 url = "2"
-thiserror = "1"
 serde = "1"
 serde_json = "1"
 serde_qs = "0.12"
@@ -29,6 +28,8 @@ polars = { version = "0.36.2", optional = true, features = [
   "ipc",
   "dtype-full",
 ] }
+
+thiserror.workspace = true
 
 plateau-transport-arrow-rs = { path = "../../arrow-rs/transport" }
 

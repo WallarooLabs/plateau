@@ -27,11 +27,11 @@ arrow-cast = "55.2.0"
 arrow-json = "55.2.0"
 arrow-ipc = "55.2.0"
 strum = { version = "0.26", features = ["derive"] }
-thiserror = "1"
 regex = "1.10"
 utoipa = { version = "4", features = ["axum_extras"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+thiserror.workspace = true
 tracing.workspace = true
 
 [features]
