@@ -22,7 +22,6 @@ serde_json = "1"
 serde_qs = { version = "0.12" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.7"
-tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.4", features = ["trace"] }
@@ -32,6 +31,7 @@ utoipa-swagger-ui = { version = "4", features = ["axum"] }
 
 chrono.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 plateau-catalog-arrow-rs.workspace = true
 plateau-client-arrow-rs = { workspace = true, features = ["replicate"] }

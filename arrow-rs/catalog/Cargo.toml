@@ -21,7 +21,6 @@ humantime-serde = "1"
 rand = "0.9.2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-tracing = "0.1"
 tokio-stream = { version = "0.1", features = ["signal"] }
 tokio = { version = "1", features = ["full"] }
 # TODO: 0.7.4 adds a deprecation warning that will need to be fixed down the road
@@ -34,6 +33,7 @@ systemstat = "0.2"
 
 chrono.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 # Arrow RS dependencies
 arrow = { version = "55.2.0", features = [
