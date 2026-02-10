@@ -11,6 +11,7 @@ use std::{
 use arrow::compute::concat_batches;
 
 use arrow_array::{make_array, Array, ArrayRef, RecordBatch, StructArray, UInt64Array};
+use arrow_array::{FixedSizeListArray, ListArray};
 use arrow_data::ArrayData;
 use arrow_schema::{ArrowError, DataType, Field, Fields, Schema as ArrowSchema, SchemaRef};
 use arrow_select::take::take;
@@ -32,7 +33,7 @@ pub use arrow_json;
 pub use arrow_schema;
 pub use arrow_select;
 
-use arrow_array::{FixedSizeListArray, ListArray, StringArray};
+use arrow_array::StringArray;
 use strum::{Display, EnumIter};
 use thiserror::Error;
 use utoipa::{IntoParams, ToSchema};
@@ -711,7 +712,7 @@ impl SchemaChunk<SchemaRef> {
 
             let mut arr = self.get_array(split)?;
             if let Some(s) = focus.dataset_separator.as_ref() {
-                gather_flat_arrays(&mut fields, &mut arrays, &path, arr, s, &exclude);
+                gather_flat_arrays(&mut fields, &mut arrays, &path, arr, focus, s, &exclude);
             } else {
                 // Apply size check if needed
                 focus.size_check_array(&mut arr);
@@ -889,61 +890,62 @@ fn gather_flat_arrays(
     fields: &mut Vec<Field>,
     arrays: &mut Vec<ArrayRef>,
     key: &str,
-    arr: ArrayRef,
+    mut arr: ArrayRef,
+    focus: &DataFocus,
     separator: &str,
     exclude: &HashSet<&String>,
 ) {
     let path = vec![key.to_string()];
 
     // Handle the case where arr is not a struct
-    if arr.as_any().downcast_ref::<StructArray>().is_none() {
-        let is_nullable = arr.nulls().is_some();
-        fields.push(Field::new(
-            key.to_string(),
-            arr.data_type().clone(),
-            is_nullable,
-        ));
-        arrays.push(arr);
-        return;
-    }
+    let mut stack = match arr.as_any().downcast_ref::<StructArray>() {
+        Some(struct_arr) => {
+            let iter = struct_arr.fields().iter().zip(struct_arr.columns().iter());
+            vec![(path.clone(), iter)]
+        }
+        None => {
+            focus.size_check_array(&mut arr);
+            let is_nullable = arr.nulls().is_some();
+            fields.push(Field::new(
+                key.to_string(),
+                arr.data_type().clone(),
+                is_nullable,
+            ));
+            arrays.push(arr);
+            return;
+        }
+    };
 
-    // Now we know arr is a StructArray
-    let mut stack = Vec::new();
+    while let Some((current_path, mut iter)) = stack.pop() {
+        if let Some((field, column)) = iter.next() {
+            // There are more fields to process in this struct, push it back
+            stack.push((current_path.clone(), iter));
 
-    if let Some(struct_arr) = arr.as_any().downcast_ref::<StructArray>() {
-        // Create iterators over field/column pairs
-        let iter = struct_arr.fields().iter().zip(struct_arr.columns().iter());
-        stack.push((path.clone(), iter));
+            let field_name = field.name();
+            let mut new_path = current_path.clone();
+            new_path.push(field_name.to_string());
 
-        while let Some((current_path, mut iter)) = stack.pop() {
-            if let Some((field, column)) = iter.next() {
-                // There are more fields to process in this struct, push it back
-                stack.push((current_path.clone(), iter));
-
-                let field_name = field.name();
-                let mut new_path = current_path.clone();
-                new_path.push(field_name.to_string());
-
-                let path_str = new_path.join(separator);
-                if !exclude.contains(&path_str) {
-                    if let Some(nested_struct) = column.as_any().downcast_ref::<StructArray>() {
-                        // For nested structs, process their fields recursively
-                        let nested_iter = nested_struct
-                            .fields()
-                            .iter()
-                            .zip(nested_struct.columns().iter());
-                        stack.push((new_path, nested_iter));
-                    } else {
-                        // For non-struct fields, add them to our result
-                        let field_name = new_path.join(separator);
-                        let is_nullable = arr.nulls().is_some();
-                        fields.push(Field::new(
-                            field_name,
-                            column.data_type().clone(),
-                            is_nullable,
-                        ));
-                        arrays.push(column.clone());
-                    }
+            let path_str = new_path.join(separator);
+            if !exclude.contains(&path_str) {
+                if let Some(nested_struct) = column.as_any().downcast_ref::<StructArray>() {
+                    // For nested structs, process their fields recursively
+                    let nested_iter = nested_struct
+                        .fields()
+                        .iter()
+                        .zip(nested_struct.columns().iter());
+                    stack.push((new_path, nested_iter));
+                } else {
+                    // For non-struct fields, add them to our result
+                    let field_name = new_path.join(separator);
+                    let mut column = column.clone();
+                    focus.size_check_array(&mut column);
+                    let is_nullable = column.nulls().is_some();
+                    fields.push(Field::new(
+                        field_name,
+                        column.data_type().clone(),
+                        is_nullable,
+                    ));
+                    arrays.push(column);
                 }
             }
         }
@@ -1508,7 +1510,7 @@ mod tests {
         let large_string_array: ArrayRef = string_array;
 
         // Create schema and record batch
-        let field = Field::new("large_text", DataType::Utf8, false);
+        let field = Field::new("large_text", DataType::Utf8, true); // Changed to true - nullable
         let schema = Arc::new(ArrowSchema::new(Fields::from(vec![field])));
         let batch = RecordBatch::try_new(schema.clone(), vec![large_string_array]).unwrap();
 
@@ -1572,5 +1574,240 @@ mod tests {
         assert_rechunk_invariants(batch.slice(0, 10), 11);
         assert_rechunk_invariants(batch.slice(0, 10), 3);
         assert_rechunk_invariants(batch.slice(0, 0), 100);
+    }
+
+    #[test]
+    fn test_focus_preserves_list_nulls_from_inferences_schema() {
+        // Reproduce the specific issue from the failing pandas records test
+        // This test creates data that matches the inferences_schema_a() pattern
+
+        use arrow_array::types::{Float32Type, Float64Type, Int64Type};
+        use arrow_array::{ListArray, PrimitiveArray};
+        use arrow_buffer::{NullBuffer, OffsetBuffer, ScalarBuffer};
+
+        // Create the test data that mimics inferences_schema_a from the test crate
+        let time = Arc::new(PrimitiveArray::<Int64Type>::from_iter_values(vec![
+            0, 1, 2, 3, 4,
+        ]));
+        let inputs = Arc::new(PrimitiveArray::<Float32Type>::from_iter_values(vec![
+            1.0, 2.0, 3.0, 4.0, 5.0,
+        ]));
+        let mul = Arc::new(PrimitiveArray::<Float32Type>::from_iter_values(vec![
+            2.0, 2.0, 2.0, 2.0, 2.0,
+        ]));
+
+        // Create inner data for list arrays
+        let inner = Arc::new(PrimitiveArray::<Float64Type>::from_iter_values(vec![
+            2.0, 2.0, // Entry 0: [2.0, 2.0]
+            // Entry 1: [] (no data - this is where the null should be)
+            4.0, 4.0, // Entry 2: [4.0, 4.0]
+            6.0, 6.0, // Entry 3: [6.0, 6.0]
+            8.0, 8.0, // Entry 4: [8.0, 8.0]
+        ]));
+
+        // Create field for list arrays
+        let inner_field = Arc::new(Field::new("inner", DataType::Float64, false));
+
+        let offsets = vec![0, 2, 2, 4, 6, 8];
+
+        // Create tensor array
+        let tensor = ListArray::new(
+            inner_field.clone(),
+            OffsetBuffer::new(ScalarBuffer::from(offsets.clone())),
+            inner.clone(),
+            None,
+        );
+
+        // Create fixed array (similar structure)
+        let fixed = ListArray::new(
+            inner_field.clone(),
+            OffsetBuffer::new(ScalarBuffer::from(vec![0, 2, 2, 4, 6, 8])),
+            inner.clone(),
+            None,
+        );
+
+        // Create null array - entry at index 1 should be truly null
+        // The offsets indicate: [0, 2, 2, 4, 6, 8] - entry at index 1 has same start/end (2,2) = empty
+        // But we want it to be explicitly null, not just empty
+        let null_inner_data = Arc::new(PrimitiveArray::<Float64Type>::from_iter_values(vec![
+            2.0, 2.0, // Entry 0: [2.0, 2.0]
+            // Entry 1: [] (no data)
+            4.0, 4.0, // Entry 2: [4.0, 4.0]
+            6.0, 6.0, // Entry 3: [6.0, 6.0]
+            8.0, 8.0, // Entry 4: [8.0, 8.0]
+        ]));
+
+        let null_offsets = vec![0, 2, 2, 4, 6, 8];
+
+        // This is the critical part - we create a null buffer that marks entry 1 as null
+        // NullBuffer::from takes a validity vector where `false` means null and `true` means valid
+        let null_list = ListArray::new(
+            inner_field.clone(),
+            OffsetBuffer::new(ScalarBuffer::from(null_offsets)),
+            null_inner_data,
+            // This null buffer marks entry at index 1 as null (position 1 is false = null)
+            Some(NullBuffer::from(vec![true, false, true, true, true])),
+        );
+
+        // Create outputs struct with fields that match the failing test exactly
+        let fields = Fields::from(vec![
+            Field::new("mul", mul.data_type().clone(), false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+            Field::new("fixed", fixed.data_type().clone(), false),
+            Field::new("null", null_list.data_type().clone(), true), // This field is nullable
+        ]);
+
+        let outputs = StructArray::new(
+            fields,
+            vec![
+                mul.clone(),
+                Arc::new(tensor.clone()),
+                Arc::new(fixed.clone()),
+                Arc::new(null_list.clone()),
+            ],
+            None,
+        );
+
+        // Create the schema and record batch matching the exact structure from inferences_schema_a
+        let schema_fields = vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("tensor", tensor.data_type().clone(), false),
+            Field::new("inputs", inputs.data_type().clone(), false),
+            Field::new("outputs", outputs.data_type().clone(), true),
+        ];
+        let arrow_schema = Arc::new(ArrowSchema::new(Fields::from(schema_fields)));
+
+        let record_batch = RecordBatch::try_new(
+            arrow_schema.clone(),
+            vec![time, Arc::new(tensor), inputs, Arc::new(outputs)],
+        )
+        .unwrap();
+
+        let schema_chunk = SchemaChunk {
+            schema: arrow_schema,
+            chunk: record_batch,
+        };
+
+        // Check the initial state - verify that the null information is present
+        let initial_outputs = schema_chunk.get_array(["outputs"]).unwrap();
+        let initial_outputs_struct = initial_outputs
+            .as_any()
+            .downcast_ref::<StructArray>()
+            .unwrap();
+        let initial_null_field = initial_outputs_struct.column_by_name("null").unwrap();
+        let initial_null_list = initial_null_field
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap();
+
+        // Verify initial state has correct null information
+        assert_eq!(initial_null_list.len(), 5);
+        assert!(!initial_null_list.is_null(0)); // [2.0, 2.0] - not null
+        assert!(initial_null_list.is_null(1)); // null entry - should be true
+        assert!(!initial_null_list.is_null(2)); // [4.0, 4.0] - not null
+        assert!(!initial_null_list.is_null(3)); // [6.0, 6.0] - not null
+        assert!(!initial_null_list.is_null(4)); // [8.0, 8.0] - not null
+
+        // Focus on inputs and outputs with flattening - this is what the failing test does
+        let focus = DataFocus {
+            dataset: vec!["inputs".to_string(), "outputs".to_string()],
+            dataset_separator: Some(".".to_string()),
+            ..Default::default()
+        };
+
+        let focused = schema_chunk.focus(&focus).unwrap();
+
+        // Check that we have the expected flattened fields
+        assert_eq!(focused.schema.fields().len(), 5); // inputs, outputs.mul, outputs.tensor, outputs.fixed, outputs.null
+        assert_eq!(focused.schema.field(0).name(), "inputs");
+        assert_eq!(focused.schema.field(1).name(), "outputs.mul");
+        assert_eq!(focused.schema.field(2).name(), "outputs.tensor");
+        assert_eq!(focused.schema.field(3).name(), "outputs.fixed");
+        assert_eq!(focused.schema.field(4).name(), "outputs.null");
+
+        // Get the outputs.null array and check its null information
+        let null_array_result = focused.get_array(["outputs.null"]);
+        assert!(
+            null_array_result.is_ok(),
+            "Should be able to get outputs.null array"
+        );
+        let null_array = null_array_result.unwrap();
+        let list_array = null_array.as_any().downcast_ref::<ListArray>().unwrap();
+
+        // Check that the null information is preserved after focus operation
+        assert_eq!(list_array.len(), 5);
+
+        // These assertions should now pass since we've fixed the null information preservation
+        assert!(!list_array.is_null(0), "Entry 0 should not be null"); // [2.0, 2.0]
+        assert!(
+            list_array.is_null(1),
+            "Entry 1 should be null (explicitly marked)"
+        ); // null
+        assert!(!list_array.is_null(2), "Entry 2 should not be null"); // [4.0, 4.0]
+        assert!(!list_array.is_null(3), "Entry 3 should not be null"); // [6.0, 6.0]
+        assert!(!list_array.is_null(4), "Entry 4 should not be null"); // [8.0, 8.0]
+    }
+
+    #[test]
+    fn test_tensor_truncation() {
+        use arrow_array::types::Int64Type;
+        use arrow_array::PrimitiveArray;
+        use arrow_schema::Schema;
+
+        // Create a test dataset similar to inferences_large_extension but smaller
+        let count = 3;
+        let inner_size = 100; // Much smaller than the 200,000 in the failing test
+
+        let time = Arc::new(PrimitiveArray::<Int64Type>::from_iter_values(0..count));
+
+        let inner = PrimitiveArray::<Int64Type>::from_iter_values(
+            (0..count).flat_map(|ix| (0..inner_size).map(move |_| ix)),
+        );
+
+        // Create a FixedSizeListArray for the tensor
+        let field = Arc::new(Field::new("inner", inner.data_type().clone(), false));
+        let tensor = FixedSizeListArray::new(field, inner_size, Arc::new(inner), None);
+
+        // Create a struct with a single tensor field - note that we make the tensor field nullable
+        let extension_field = Field::new("tensor", tensor.data_type().clone(), true);
+        let fields = Fields::from(vec![extension_field]);
+        let out = StructArray::new(fields, vec![Arc::new(tensor)], None);
+
+        // Create schema with time and out fields
+        let schema = Schema::new(vec![
+            Field::new("time", DataType::Int64, false),
+            Field::new("out", out.data_type().clone(), false),
+        ]);
+
+        // Create record batch
+        let record_batch =
+            RecordBatch::try_new(Arc::new(schema.clone()), vec![time, Arc::new(out)]).unwrap();
+
+        // Create SchemaChunk
+        let schema_chunk = SchemaChunk {
+            schema: Arc::new(schema),
+            chunk: record_batch,
+        };
+
+        // Create DataFocus with max_bytes set
+        let focus = DataFocus {
+            dataset: vec!["*".into()],
+            dataset_separator: Some(".".into()),
+            max_bytes: Some(100), // Small enough to trigger truncation
+            ..Default::default()
+        };
+
+        // Apply focus
+        let focused = schema_chunk.focus(&focus).unwrap();
+
+        // Check if the tensor was properly nullified
+        let out_tensor = focused.get_array(["out.tensor"]).unwrap();
+
+        // The tensor should be null after truncation
+        assert_eq!(
+            out_tensor.null_count(),
+            count as usize,
+            "Tensor should be all null after truncation"
+        );
     }
 }

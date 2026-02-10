@@ -10,6 +10,7 @@ use transport::arrow_array::PrimitiveArray;
 use transport::arrow_array::RecordBatch;
 use transport::arrow_array::StringArray;
 use transport::arrow_array::StructArray;
+use transport::arrow_buffer::NullBuffer;
 use transport::arrow_buffer::OffsetBuffer;
 use transport::arrow_buffer::ScalarBuffer;
 use transport::arrow_schema::DataType;
@@ -137,18 +138,10 @@ pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         2.0, 2.0, 4.0, 4.0, 6.0, 6.0, 8.0, 8.0, 10.0, 10.0,
     ]);
 
-    // TODO: we need fixed size list array support, which currently is not
-    // in arrow2's parquet io module.
-    /*
-    let outputs = FixedSizeListArray::new(
-        DataType::FixedSizeList(
-            Box::new(Field::new("inner", inner.data_type().clone(), false)),
-            2,
-        ),
-        std::sync::Arc::new(inner),
-        None,
-    );
-    */
+    // Create FixedSizeListArray for fixed field
+    let fixed_field = Arc::new(Field::new("inner", inner.data_type().clone(), false));
+    let fixed = FixedSizeListArray::new(fixed_field, 2, Arc::new(inner.clone()), None);
+
     let offsets = vec![0, 2, 2, 4, 6, 8];
 
     // Create Field with Arc wrapper
@@ -156,20 +149,52 @@ pub fn inferences_schema_a() -> SchemaChunk<Schema> {
 
     let tensor = ListArray::new(
         inner_field.clone(),
-        OffsetBuffer::new(ScalarBuffer::from(offsets)),
+        OffsetBuffer::new(ScalarBuffer::from(offsets.clone())),
         Arc::new(inner.clone()),
         None,
+    );
+
+    // Create null array with the correct nullability pattern
+    // - First entry (index 0) is valid and has data [2.0, 2.0]
+    // - Second entry (index 1) is empty array, but valid (not null)
+    // - Third entry (index 2) is null (not just an empty array, but a null value)
+    // - Fourth and fifth entries have data and are valid
+    let null_inner_data = PrimitiveArray::<Float64Type>::from_iter_values(vec![
+        2.0, 2.0, // Entry 0: [2.0, 2.0]
+        // Entry 1: [] (no data)
+        // Entry 2 is null, no data needed
+        6.0, 6.0, // Entry 3: [6.0, 6.0]
+        8.0, 8.0, // Entry 4: [8.0, 8.0]
+    ]);
+
+    // Offsets must match the actual data lengths
+    let null_offsets = vec![0, 2, 2, 2, 4, 6];
+
+    // The validity bitmap is critical - use [true, true, false, true, true]
+    // This makes the third element (index 2) a NULL value rather than an empty array
+    let null = ListArray::new(
+        inner_field.clone(),
+        OffsetBuffer::new(ScalarBuffer::from(null_offsets)),
+        Arc::new(null_inner_data),
+        Some(NullBuffer::from(vec![true, true, false, true, true])),
     );
 
     // Fields for struct arrays must be wrapped in Fields::from
     let fields = Fields::from(vec![
         Field::new("mul", mul.data_type().clone(), false),
         Field::new("tensor", tensor.data_type().clone(), false),
+        Field::new("fixed", fixed.data_type().clone(), false),
+        Field::new("null", null.data_type().clone(), true),
     ]);
 
     let outputs = StructArray::new(
         fields,
-        vec![Arc::new(mul.clone()), Arc::new(tensor.clone())],
+        vec![
+            Arc::new(mul.clone()),
+            Arc::new(tensor.clone()),
+            Arc::new(fixed.clone()),
+            Arc::new(null.clone()),
+        ],
         None,
     );
 
@@ -177,7 +202,7 @@ pub fn inferences_schema_a() -> SchemaChunk<Schema> {
         Field::new("time", DataType::Int64, false),
         Field::new("tensor", tensor.data_type().clone(), false),
         Field::new("inputs", inputs.data_type().clone(), false),
-        Field::new("outputs", outputs.data_type().clone(), false),
+        Field::new("outputs", outputs.data_type().clone(), true),
     ]);
 
     let record_batch = RecordBatch::try_new(

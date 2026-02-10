@@ -14,7 +14,7 @@ tokio = "1.38"
 chrono.workspace = true
 
 plateau-client-arrow-rs = { path = "../client" }
-plateau-server.workspace = true
+plateau-server-arrow-rs = { path = "../server" }
 plateau-transport-arrow-rs = { path = "../transport" }
 
 [dev-dependencies]
