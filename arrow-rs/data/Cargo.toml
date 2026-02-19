@@ -54,9 +54,9 @@ test-log = { version = "0.2", default-features = false, features = ["trace"] }
 uuid = { version = "1.10", features = ["v4"] }
 
 # Remove sample-arrow2 as we're migrating to arrow-rs
-# sample-test = "0.2.1"
-# sample-std = "0.2.1"
-# sample-arrow2 = "0.17.2"
+sample-test = "0.2.1"
+sample-std = "0.2.1"
+sample-arrow-rs = "55.2.0"
 
 reqwest.workspace = true
 

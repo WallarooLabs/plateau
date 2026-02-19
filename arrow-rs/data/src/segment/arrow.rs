@@ -303,11 +303,10 @@ pub mod test {
     // Fix imports to use arrow-rs versions
     use plateau_transport_arrow_rs as transport;
     use transport::SchemaChunk;
-    // Temporarily comment out sample_arrow2 dependencies
-    // use sample_arrow2::chunk::{ChainedChunk, ChainedMultiChunk};
-    // use sample_std::{Random, Regex, Sample};
-    // use sample_test::sample_test;
-    // use crate::segment::test::deep_chunk;
+    // Use sample-arrow-rs for property-based testing
+    use crate::segment::test::deep_chunk;
+    use sample_arrow_rs::chunk::{ChainedChunk, ChainedMultiChunk};
+    use sample_test::sample_test;
     use tempfile::tempdir;
 
     use super::*;
@@ -537,76 +536,50 @@ pub mod test {
         Ok(())
     }
 
-    // Temporarily comment out tests that depend on sample_arrow2
-    /*
+    // Property-based tests using sample-arrow-rs
     #[sample_test]
+    #[test_log::test]
     fn arbitrary_chunk(#[sample(deep_chunk(3, 100, true).sample_one())] chunk: ChainedChunk) {
-        let chunk = chunk.value;
+        // In arrow-rs, RecordBatch already contains its schema
+        let batch = chunk.value;
         let root = tempdir().unwrap();
         let path = root.path().join("testing.arrow");
+        trace!(?batch);
 
-        use sample_std::Sample;
-        let mut name = Regex::new("[a-z]{4, 8}");
-        let mut g = Random::new();
+        // The RecordBatch already has a schema embedded
+        let schema = (*batch.schema()).clone();
 
-        let schema = Schema {
-            fields: chunk
-                .iter()
-                .map(|arr| {
-                    Field::new(
-                        name.generate(&mut g),
-                        arr.data_type().clone(),
-                        arr.validity().is_some(),
-                    )
-                })
-                .collect(),
-            metadata: Metadata::default(),
-        };
         let mut w = Writer::create_path(&path, &schema).unwrap();
-        w.write_chunk(chunk.clone()).unwrap();
+        w.write_chunk(batch.clone()).unwrap();
         w.end().unwrap();
 
         let r = Reader::open(&path).unwrap();
         let chunks = r.collect::<anyhow::Result<Vec<_>>>().unwrap();
-        assert_eq!(chunks, vec![chunk]);
+        assert_eq!(chunks, vec![batch]);
     }
 
     #[sample_test]
+    #[test_log::test]
     fn arbitrary_many_chunk(
         #[sample(deep_chunk(5, 100, true).sample_many(2..10))] chunk: ChainedMultiChunk,
     ) {
-        let chunks = chunk.value;
+        let batches = chunk.value;
+        trace!(?batches);
         let root = tempdir().unwrap();
         let path = root.path().join("testing.arrow");
 
-        let mut name = Regex::new("[a-z]{4, 8}");
-        let mut g = Random::new();
+        // Get schema from first batch - all batches should have same schema
+        let schema = (*batches.first().unwrap().schema()).clone();
 
-        let schema = Schema {
-            fields: chunks
-                .first()
-                .unwrap()
-                .iter()
-                .map(|arr| {
-                    Field::new(
-                        name.generate(&mut g),
-                        arr.data_type().clone(),
-                        arr.validity().is_some(),
-                    )
-                })
-                .collect(),
-            metadata: Metadata::default(),
-        };
         let mut w = Writer::create_path(&path, &schema).unwrap();
 
-        for chunk in &chunks {
-            w.write_chunk(chunk.clone()).unwrap();
+        for batch in &batches {
+            w.write_chunk(batch.clone()).unwrap();
         }
         w.end().unwrap();
 
         let r = Reader::open(&path).unwrap();
-        let actual_chunks = r.collect::<anyhow::Result<Vec<_>>>().unwrap();
-        assert_eq!(actual_chunks, chunks);
+        let actual_batches = r.collect::<anyhow::Result<Vec<_>>>().unwrap();
+        assert_eq!(actual_batches, batches);
     }
-    */
 }
