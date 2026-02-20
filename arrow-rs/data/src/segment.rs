@@ -384,11 +384,15 @@ pub mod test {
     use crate::test::inferences_schema_a;
     // Use arrow-rs transport
     use plateau_transport_arrow_rs as transport;
-    use transport::SchemaChunk;
-    // Remove sample_arrow2 and sample_std imports for now since we removed these dependencies
-    // We'll reimplement test functionality using arrow-rs libraries
+    use sample_arrow_rs::{
+        array::ArbitraryArray,
+        chunk::ArbitraryChunk,
+        datatypes::{sample_flat, ArbitraryDataType},
+    };
+    use sample_std::{Chance, Regex};
     use tempfile::tempdir;
     use test::arrow::test::partial_write;
+    use transport::SchemaChunk;
 
     impl Config {
         pub fn nocommit() -> Self {
@@ -428,8 +432,6 @@ pub mod test {
     }
 
     // nulls=true breaks arrow2's parquet support, but is fine for feather
-    // XXX - need to create sample-arrow first
-    /*
     pub fn deep_chunk(depth: usize, len: usize, nulls: bool) -> ArbitraryChunk<Regex, Chance> {
         let names = Regex::new("[a-z]{4,8}");
         let data_type = ArbitraryDataType {
@@ -457,7 +459,6 @@ pub mod test {
             array,
         }
     }
-    */
 
     #[test]
     fn test_interrupted_cache_write() -> Result<()> {

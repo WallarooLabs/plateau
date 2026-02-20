@@ -3153,6 +3153,9 @@ dependencies = [
  "plateau-test-arrow-rs",
  "plateau-transport-arrow-rs",
  "reqwest",
+ "sample-arrow-rs",
+ "sample-std",
+ "sample-test",
  "serde",
  "serde_json",
  "tempfile",
@@ -4275,6 +4278,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "sample-arrow-rs"
+version = "55.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d6a4de828117008194c83e10a0cee51794f966859305c90f29553cebe48f682"
+dependencies = [
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-data",
+ "arrow-schema",
+ "sample-std",
 ]
 
 [[package]]
