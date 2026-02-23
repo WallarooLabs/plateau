@@ -17,7 +17,8 @@ use tokio::sync::mpsc;
 use tokio::task;
 use tracing::{error, warn};
 
-use plateau_transport::InsertQuery;
+use plateau_transport_arrow_rs as transport;
+use transport::InsertQuery;
 
 use crate::{Client, Error as ClientError, Insertion, MaxRequestSize};
 

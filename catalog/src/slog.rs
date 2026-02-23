@@ -32,11 +32,11 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 use std::vec;
 
+use crate::transport::estimate_size;
+use crate::transport::{SchemaChunk, SegmentChunk};
 use bytesize::ByteSize;
 use chrono::{DateTime, Utc};
 use metrics::counter;
-use plateau_client::estimate_size;
-use plateau_transport::{SchemaChunk, SegmentChunk};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -44,7 +44,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, trace};
 
 use crate::data::{
-    chunk::{self, Schema, TimeRange},
+    chunk::{self, RecordBatchExt, Schema, TimeRange},
     index::{Ordering, RecordIndex},
     limit::Rolling,
     segment::{Config as SegmentConfig, Segment, SegmentIterator, Writer},
@@ -811,7 +811,7 @@ mod test {
             SegmentIndex(0),
             RecordIndex(0),
             Config {
-                segment: plateau_data::segment::Config::default(),
+                segment: crate::data::segment::Config::default(),
                 ..Default::default()
             },
         );

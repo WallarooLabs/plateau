@@ -14,10 +14,10 @@ use std::time::{Duration, Instant};
 
 use tokio::fs;
 
+use crate::data::segment::Segment;
 use anyhow::Result;
 use bytesize::ByteSize;
 use futures::stream::StreamExt;
-use plateau_data::segment::Segment;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 

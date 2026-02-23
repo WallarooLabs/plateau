@@ -23,21 +23,16 @@ use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use crate::arrow2::array::BooleanArray;
-#[cfg(test)]
-use crate::arrow2::compute::comparison::eq_scalar;
-use crate::arrow2::compute::comparison::gt_eq_scalar;
-use crate::arrow2::scalar::PrimitiveScalar;
 use crate::data::{
-    chunk::{parse_time, IndexedChunk, Schema},
+    chunk::{parse_time, IndexedChunk, RecordBatchExt, Schema},
     index::{Ordering, RecordIndex},
     limit::{LimitedBatch, Retention, Rolling, RowLimit},
 };
 use crate::manifest::{Manifest, PartitionId, Scope, SegmentData};
 use crate::slog::{self, SegmentIndex, Slog};
-use crate::transport::arrow2::compute::comparison::lt_scalar;
 use crate::transport::SchemaChunk;
 use anyhow::Result;
+use arrow_array::BooleanArray;
 use chrono::{DateTime, Utc};
 use futures::stream::{BoxStream, Stream, StreamExt};
 use futures::FutureExt;
@@ -245,11 +240,19 @@ impl Partition {
             // TODO: ideally we'd be using slicing here instead; it's more
             // efficient. This is a straightforward port of the original code.
             let i = chunk.indices();
-            let s = &PrimitiveScalar::from(Some(start.0 as i32));
+            let s = start.0 as i32;
             if order.is_reverse() {
-                lt_scalar(i, s)
+                BooleanArray::from(
+                    i.into_iter()
+                        .map(|index| index.is_some_and(|idx| idx < s))
+                        .collect::<Vec<bool>>(),
+                )
             } else {
-                gt_eq_scalar(i, s)
+                BooleanArray::from(
+                    i.into_iter()
+                        .map(|index| index.is_some_and(|idx| idx >= s))
+                        .collect::<Vec<bool>>(),
+                )
             }
         };
 
@@ -274,16 +277,19 @@ impl Partition {
             .await;
 
         let filter = |indexed: &IndexedChunk| {
-            BooleanArray::from_trusted_len_values_iter(
-                indexed
-                    .indices()
-                    .into_iter()
-                    .zip(indexed.times().into_iter())
-                    .map(|(index, time)| {
-                        *index.unwrap() >= (start.0 as i32)
-                            && times.contains(&parse_time(*time.unwrap()))
-                    }),
-            )
+            let indices_array = indexed.indices();
+            let times_array = indexed.times();
+
+            let boolean_values: Vec<bool> = indices_array
+                .into_iter()
+                .zip(times_array.into_iter())
+                .map(|(index, time)| {
+                    index.is_some_and(|idx| idx >= (start.0 as i32))
+                        && time.is_some_and(|t| times.contains(&parse_time(t)))
+                })
+                .collect();
+
+            BooleanArray::from(boolean_values)
         };
 
         state
@@ -594,14 +600,12 @@ impl State {
 #[cfg(test)]
 pub mod test {
     use super::*;
-    use crate::arrow2::{
-        array::{PrimitiveArray, Utf8Array},
-        datatypes::DataType,
-    };
     use crate::data::limit::BatchStatus;
     use crate::data::records::{build_records, legacy_schema, IntoRecords, LegacyRecords, Record};
     use crate::test::{inferences_nested, inferences_schema_a, inferences_schema_b};
     use crate::transport::SegmentChunk;
+    use arrow_array::{array::PrimitiveArray, types::Int32Type};
+    use arrow_schema::DataType;
     use chrono::TimeZone;
     use std::slice;
     use tempfile::{tempdir, TempDir};
@@ -623,12 +627,15 @@ pub mod test {
                 .chunks
                 .into_iter()
                 .map(|indexed| {
-                    indexed
-                        .filter(&eq_scalar(
-                            indexed.indices(),
-                            &PrimitiveScalar::from(Some(index.0 as i32)),
-                        ))
-                        .unwrap()
+                    let s = index.0 as i32;
+                    // Create a boolean array manually instead of using eq() with scalar
+                    let indices_array = indexed.indices();
+                    let boolean_values: Vec<bool> = indices_array
+                        .into_iter()
+                        .map(|idx| idx.is_some_and(|val| val == s))
+                        .collect();
+                    let filter_array = BooleanArray::from(boolean_values);
+                    indexed.filter(&filter_array).unwrap()
                 })
                 .flat_map(|indexed| indexed.into_records(Ordering::Forward))
                 .next()
@@ -644,19 +651,20 @@ pub mod test {
 
     impl DisplayVec for IndexedChunk {
         fn display_vec(&self) -> Vec<String> {
-            let l = self.inner_schema.fields.len(); // index is stored in an "unlisted" extra column
-            if self.inner_schema.fields[1].data_type == DataType::Utf8 {
+            let l = self.inner_schema.fields().len(); // index is stored in an "unlisted" extra column
+            if self.inner_schema.field(1).data_type() == &DataType::Utf8 {
                 let idx = (*self.chunk.arrays()[l])
                     .as_any()
-                    .downcast_ref::<PrimitiveArray<i32>>()
+                    .downcast_ref::<PrimitiveArray<Int32Type>>()
                     .unwrap()
-                    .values_iter();
+                    .values()
+                    .iter();
                 return (*self.chunk.arrays()[1])
                     .as_any()
-                    .downcast_ref::<Utf8Array<i32>>()
+                    .downcast_ref::<arrow_array::StringArray>()
                     .unwrap()
                     .iter()
-                    .map(|s| String::from_utf8(s.unwrap().bytes().collect()).unwrap())
+                    .map(|s| s.unwrap().to_string())
                     .zip(idx)
                     .map(|(s, i)| format!("{i}: {s}"))
                     .collect::<Vec<String>>(); //.clone();
@@ -1370,7 +1378,7 @@ pub mod test {
                 )
                 .await;
             assert!(result.status.is_open());
-            assert_eq!(result.schema.unwrap(), legacy_schema());
+            assert_eq!(result.schema.unwrap(), *legacy_schema());
             assert_eq!(
                 result.chunks.iter().map(|c| c.chunk.len()).sum::<usize>(),
                 30
