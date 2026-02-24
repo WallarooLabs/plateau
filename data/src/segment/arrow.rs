@@ -20,7 +20,7 @@ use arrow_ipc::{
     writer::{FileWriter, IpcWriteOptions},
 };
 use arrow_schema::Schema;
-use plateau_transport_arrow_rs::SegmentChunk;
+use plateau_transport::SegmentChunk;
 use tracing::{error, trace, warn};
 
 use super::{cache, SegmentIterator};
@@ -301,7 +301,7 @@ impl SegmentIterator for Reader {
 pub mod test {
     use std::collections::HashMap;
     // Fix imports to use arrow-rs versions
-    use plateau_transport_arrow_rs as transport;
+    use plateau_transport as transport;
     use transport::SchemaChunk;
     // Use sample-arrow-rs for property-based testing
     use crate::segment::test::deep_chunk;

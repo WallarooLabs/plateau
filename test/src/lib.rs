@@ -1,6 +1,6 @@
-use plateau_transport_arrow_rs as transport;
-use plateau_transport_arrow_rs::arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
-use plateau_transport_arrow_rs::arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
+use plateau_transport as transport;
+use plateau_transport::arrow_schema::extension::EXTENSION_TYPE_METADATA_KEY;
+use plateau_transport::arrow_schema::extension::EXTENSION_TYPE_NAME_KEY;
 use std::sync::Arc;
 use transport::arrow_array::types::*;
 use transport::arrow_array::Array;

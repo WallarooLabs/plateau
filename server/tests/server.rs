@@ -11,7 +11,7 @@ use serde_json as json;
 use test_log::tracing_subscriber::{fmt, EnvFilter};
 use tracing::trace;
 
-use plateau_server_arrow_rs as plateau;
+use plateau_server as plateau;
 
 use plateau::client::{Error as ClientError, Iterate, PandasRecordIteration, Retrieve};
 use plateau::data::chunk::{RecordBatchExt, Schema};
@@ -27,9 +27,9 @@ use plateau::transport::{
 use plateau::Config as PlateauConfig;
 use plateau::{catalog, catalog::partition, data, data::limit, http};
 
-use plateau_test_arrow_rs::http::TestServer;
-use plateau_test_arrow_rs::inferences_large_extension;
-use plateau_test_arrow_rs::{inferences_schema_a, inferences_schema_b};
+use plateau_test::http::TestServer;
+use plateau_test::inferences_large_extension;
+use plateau_test::{inferences_schema_a, inferences_schema_b};
 
 #[allow(clippy::manual_repeat_n)]
 async fn repeat_append(client: &Client, url: &str, body: &str, count: usize) {

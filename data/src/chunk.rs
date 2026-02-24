@@ -3,7 +3,7 @@ use arrow_array::{Array, ArrayRef, BooleanArray, Int32Array, Int64Array, RecordB
 pub use arrow_schema::Schema;
 use arrow_select::filter::filter_record_batch;
 use chrono::{DateTime, TimeZone, Utc};
-use plateau_transport_arrow_rs::{ChunkError, SchemaChunk, SegmentChunk};
+use plateau_transport::{ChunkError, SchemaChunk, SegmentChunk};
 use std::borrow::Borrow;
 use std::ops::RangeInclusive;
 use std::sync::Arc;
@@ -294,7 +294,7 @@ pub fn slice(chunk: SegmentChunk, offset: usize, len: usize) -> SegmentChunk {
 pub mod test {
     use super::*;
     use crate::transport::estimate_size;
-    use plateau_test_arrow_rs as test_arrow_rs;
+    use plateau_test as test_arrow_rs;
     use test_arrow_rs::{inferences_nested, inferences_schema_a, inferences_schema_b};
 
     /*
