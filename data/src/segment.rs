@@ -25,7 +25,7 @@ use tracing::{error, trace, warn};
 
 // Use arrow-rs Schema instead of arrow2 Schema
 use arrow_schema::Schema;
-use plateau_transport_arrow_rs::SegmentChunk;
+use plateau_transport::SegmentChunk;
 
 #[allow(dead_code)]
 mod arrow;
@@ -383,7 +383,7 @@ pub mod test {
     use super::*;
     use crate::test::inferences_schema_a;
     // Use arrow-rs transport
-    use plateau_transport_arrow_rs as transport;
+    use plateau_transport as transport;
     use sample_arrow_rs::{
         array::ArbitraryArray,
         chunk::ArbitraryChunk,

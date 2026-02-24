@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
 
-use plateau_transport_arrow_rs as transport;
+use plateau_transport as transport;
 use serde::{Deserialize, Serialize};
 use transport::{MultiChunk, PartitionId, RecordQuery};
 

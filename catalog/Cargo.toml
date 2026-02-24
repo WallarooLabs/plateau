@@ -1,5 +1,5 @@
 [package]
-name = "plateau-catalog-arrow-rs"
+name = "plateau-catalog"
 description = "Index of all stored segments in plateau"
 
 version.workspace = true
@@ -51,9 +51,9 @@ arrow-json = "55.2.0"
 arrow-ipc = "55.2.0"
 
 # Use arrow-rs versions of dependencies
-plateau-data-arrow-rs = { path = "../data" }
-plateau-client-arrow-rs = { path = "../client" }
-plateau-transport-arrow-rs = { path = "../transport" }
+plateau-data.workspace = true
+plateau-client.workspace = true
+plateau-transport.workspace = true
 
 
 [dev-dependencies]
@@ -64,8 +64,8 @@ uuid = { version = "1.10", features = ["v4"] }
 reqwest.workspace = true
 
 # Use arrow-rs versions for testing
-plateau-client-arrow-rs = { path = "../client" }
-plateau-test-arrow-rs = { path = "../test" }
+plateau-client.workspace = true
+plateau-test.workspace = true
 
 
 [lints]

@@ -7,7 +7,7 @@ use std::{pin::Pin, str::FromStr};
 use async_trait::async_trait;
 use bytes::Bytes;
 use futures::{TryStream, TryStreamExt};
-use plateau_transport_arrow_rs as transport;
+use plateau_transport as transport;
 pub use reqwest;
 use reqwest::Body;
 use reqwest::{
@@ -16,16 +16,19 @@ use reqwest::{
 };
 use thiserror::Error;
 use tracing::{trace, warn};
+pub use transport::arrow_schema::SchemaRef;
 use transport::headers::ITERATION_STATUS_HEADER;
 #[cfg(feature = "polars")]
 use transport::RecordStatus;
 use transport::CONTENT_TYPE_JSON;
 use transport::{
     arrow_ipc,
-    arrow_schema::{ArrowError, Schema, SchemaRef},
-    Insert, InsertQuery, Inserted, MultiChunk, Partitions, RecordQuery, Records, SchemaChunk,
-    TopicIterationQuery, TopicIterationReply, TopicIterationStatus, TopicIterator, Topics,
-    CONTENT_TYPE_ARROW,
+    arrow_schema::{ArrowError, Schema},
+    Insert, Inserted, Partitions, RecordQuery, Records, TopicIterator, Topics, CONTENT_TYPE_ARROW,
+};
+pub use transport::{
+    InsertQuery, MultiChunk, SchemaChunk, TopicIterationQuery, TopicIterationReply,
+    TopicIterationStatus,
 };
 
 #[cfg(feature = "health")]
@@ -93,10 +96,10 @@ pub const DEFAULT_MAX_BATCH_BYTES: usize = 10240000;
 /// Plateau client. Creation options:
 /// ```
 /// // Client pointed at 'localhost:3030'.
-/// let client = plateau_client_arrow_rs::Client::default();
+/// let client = plateau_client::Client::default();
 ///
 /// // Client pointed at an alternate URL.
-/// let client = plateau_client_arrow_rs::Client::new("plateau.my-wallaroo-cluster.dev:1234");
+/// let client = plateau_client::Client::new("plateau.my-wallaroo-cluster.dev:1234");
 /// ```
 #[derive(Debug, Clone)]
 pub struct Client {
@@ -993,7 +996,7 @@ mod tests {
         Expectation, Server,
     };
     use plateau_server::{http, Config as PlateauConfig};
-    use plateau_transport_arrow_rs::{DataFocus, RecordStatus, Span, Topic, TopicIterationOrder};
+    use plateau_transport::{DataFocus, RecordStatus, Span, Topic, TopicIterationOrder};
     use tokio_util::io::ReaderStream;
 
     use super::*;

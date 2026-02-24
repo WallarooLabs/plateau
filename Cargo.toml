@@ -10,17 +10,11 @@ members = [
   "bench",
   "plateau",
   "test",
-  "arrow-rs/transport",
-  "arrow-rs/client",
-  "arrow-rs/test",
-  "arrow-rs/data",
-  "arrow-rs/catalog",
-  "arrow-rs/server"
 ]
 
 
 [workspace.package]
-version = "0.5.15"
+version = "0.6.0"
 edition = "2021"
 authors = ["Wallaroo Labs"]
 repository = "https://github.com/WallarooLabs/plateau"
@@ -49,21 +43,10 @@ plateau-test = { path = "./test" }
 plateau-transport = { path = "./transport" }
 plateau = { path = "./plateau" }
 
-plateau-catalog-arrow-rs = { path = "./arrow-rs/catalog" }
-plateau-client-arrow-rs = { path = "./arrow-rs/client" }
-plateau-data-arrow-rs = { path = "./arrow-rs/data" }
-plateau-server-arrow-rs = { path = "./arrow-rs/server" }
-plateau-test-arrow-rs = { path = "./arrow-rs/test" }
-plateau-transport-arrow-rs = { path = "./arrow-rs/transport" }
-
 
 [profile.bench]
 debug = true
 
-
-[patch.crates-io]
-arrow2 = { git = "https://github.com/WallarooLabs/arrow2", branch = "fmurphy/bugfix-records-parsing" }
-parquet2 = { git = "https://github.com/WallarooLabs/parquet2", branch = "more-writer-details" }
 
 
 [workspace.lints.clippy]

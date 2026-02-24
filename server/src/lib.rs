@@ -14,11 +14,11 @@ pub mod metrics;
 pub mod replication;
 
 // Re-export plateau modules at the top level
-pub use plateau_catalog_arrow_rs as catalog;
-pub use plateau_client_arrow_rs as client;
-pub use plateau_data_arrow_rs as data;
-pub use plateau_transport_arrow_rs as transport;
-// Re-export arrow from plateau_transport_arrow_rs
+pub use plateau_catalog as catalog;
+pub use plateau_client as client;
+pub use plateau_data as data;
+pub use plateau_transport as transport;
+// Re-export arrow from plateau_transport
 pub use transport::arrow;
 
 // Re-export commonly used types from the modules
@@ -27,7 +27,7 @@ pub use catalog::Catalog;
 pub use data::DEFAULT_BYTE_LIMIT;
 
 #[cfg(test)]
-pub use plateau_test_arrow_rs as test;
+pub use plateau_test as test;
 
 /// Future that resolves when an exit signal (SIGINT / SIGTERM / SIGQUIT) is
 /// received.

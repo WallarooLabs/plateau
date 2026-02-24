@@ -14,7 +14,13 @@ serde = { version = "1", features = ["derive"] }
 humantime-serde = "1"
 
 sample-std = "0.2.1"
-sample-arrow2 = "0.17.2"
+sample-arrow-rs = "55.2.0"
+
+arrow-ipc = "55.2.0"
+arrow-array = "55.2.0"
+arrow-schema = "55.2.0"
+
+plateau-transport.workspace = true
 
 futures = "0.3"
 hdrhistogram = "7.5"
