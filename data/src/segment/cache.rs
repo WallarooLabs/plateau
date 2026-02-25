@@ -20,7 +20,7 @@ use arrow_ipc::{
     writer::{IpcWriteOptions, StreamWriter},
 };
 use arrow_schema::Schema;
-use plateau_transport_arrow_rs::{SchemaChunk, SegmentChunk};
+use plateau_transport::{SchemaChunk, SegmentChunk};
 use tracing::{debug, error, trace, warn};
 
 use super::{validate_header, PLATEAU_HEADER};

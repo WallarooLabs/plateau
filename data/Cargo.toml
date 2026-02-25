@@ -1,5 +1,5 @@
 [package]
-name = "plateau-data-arrow-rs"
+name = "plateau-data"
 description = "Data processing for the plateau server"
 
 version.workspace = true
@@ -44,8 +44,8 @@ arrow-ipc = "55.2.0"
 thiserror.workspace = true
 
 # Use arrow-rs versions of transport and client
-plateau-transport-arrow-rs = { path = "../transport" }
-plateau-client-arrow-rs = { path = "../client" }
+plateau-transport.workspace = true
+plateau-client.workspace = true
 
 
 [dev-dependencies]
@@ -61,8 +61,8 @@ sample-arrow-rs = "55.2.0"
 reqwest.workspace = true
 
 # Use arrow-rs versions for testing
-plateau-client-arrow-rs = { path = "../client" }
-plateau-test-arrow-rs = { path = "../test" }
+plateau-client.workspace = true
+plateau-test.workspace = true
 
 
 [lints]

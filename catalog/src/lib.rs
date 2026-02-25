@@ -24,12 +24,12 @@ pub mod partition;
 pub mod slog;
 pub mod topic;
 
-pub use plateau_client_arrow_rs as client;
-pub use plateau_data_arrow_rs as data;
-pub use plateau_transport_arrow_rs as transport;
+pub use plateau_client as client;
+pub use plateau_data as data;
+pub use plateau_transport as transport;
 
 #[cfg(test)]
-pub use plateau_test_arrow_rs as test;
+pub use plateau_test as test;
 
 pub use catalog::{Catalog, Config};
 pub use reconcile::{ReconcileConfig, ReconcileJob, ReconcileStats};

@@ -1,5 +1,5 @@
 [package]
-name = "plateau-test-arrow-rs"
+name = "plateau-test"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -13,9 +13,9 @@ tokio = "1.38"
 
 chrono.workspace = true
 
-plateau-client-arrow-rs = { path = "../client" }
-plateau-server-arrow-rs = { path = "../server" }
-plateau-transport-arrow-rs = { path = "../transport" }
+plateau-client.workspace = true
+plateau-server.workspace = true
+plateau-transport.workspace = true
 
 [dev-dependencies]
 

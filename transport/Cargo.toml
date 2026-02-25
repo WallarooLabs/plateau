@@ -1,5 +1,5 @@
 [package]
-name = "plateau-transport-arrow-rs"
+name = "plateau-transport"
 
 version.workspace = true
 edition.workspace = true

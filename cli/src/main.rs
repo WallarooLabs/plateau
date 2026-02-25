@@ -11,7 +11,7 @@ use tokio::{fs::File, io::AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 
 use plateau_client::{
-    localhost, ArrowSchema, ArrowStream, Client, Iterate, Retrieve, SchemaChunk, SizedArrowStream,
+    localhost, ArrowStream, Client, Iterate, Retrieve, SchemaChunk, SchemaRef, SizedArrowStream,
 };
 
 mod display;
@@ -223,7 +223,7 @@ async fn make_request(client: &Client, cmd: Command) -> Result<(), Error> {
             }
             OutputFormat::ArrowStdout => {
                 params.data_focus.dataset_separator = Some(".".to_owned());
-                let mut response: Vec<SchemaChunk<ArrowSchema>> = client
+                let mut response: Vec<SchemaChunk<SchemaRef>> = client
                     .get_records(topic_name, partition_name, &params)
                     .await?;
 
