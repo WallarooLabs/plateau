@@ -26,7 +26,7 @@ use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::PlateauConfig;
-use plateau_transport::{
+use crate::transport::{
     DataFocus, InfoResponse, Inserted, PartitionInfo, Partitions, ReconcileStats, RecordQuery,
     RecordStatus, Span, Topic, TopicInfo, TopicIterationOrder, TopicIterationQuery,
     TopicIterationStatus, TopicIterator, Topics,
@@ -231,7 +231,7 @@ async fn get_topics(
     responses(
         (status = 200, description = "Span of inserted records", body = Inserted),
     ),
-    request_body(content = SchemaChunk<plateau_transport::ArrowSchema>, content_type = "application/vnd.apache.arrow.file"),
+    request_body(content = SchemaChunk<crate::transport::ArrowSchema>, content_type = "application/vnd.apache.arrow.file"),
   )]
 async fn topic_append(
     State(AppState(catalog, _config)): State<AppState>,
@@ -580,7 +580,7 @@ async fn get_info(
             Inserted,
             Partitions,
             // PartitionFilter,
-            plateau_transport::ArrowSchemaChunk,
+            crate::transport::ArrowSchemaChunk,
             Span,
             Topic,
             Topics,
@@ -600,7 +600,7 @@ struct ApiDoc;
 
 #[cfg(test)]
 mod test {
-    use plateau_transport::{TopicIterationOrder, TopicIterationQuery};
+    use crate::transport::{TopicIterationOrder, TopicIterationQuery};
 
     #[test]
     fn can_parse_order_query() {

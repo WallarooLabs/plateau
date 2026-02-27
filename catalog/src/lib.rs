@@ -27,7 +27,6 @@ pub mod topic;
 pub use plateau_client as client;
 pub use plateau_data as data;
 pub use plateau_transport as transport;
-pub use plateau_transport::arrow2;
 
 #[cfg(test)]
 pub use plateau_test as test;

@@ -38,6 +38,17 @@ plateau-client = { workspace = true, features = ["replicate"] }
 plateau-data.workspace = true
 plateau-transport.workspace = true
 
+# Arrow-rs dependencies
+arrow = "55.2.0"
+arrow-array = "55.2.0"
+arrow-schema = "55.2.0"
+arrow-select = "55.2.0"
+arrow-data = "55.2.0"
+arrow-buffer = "55.2.0"
+arrow-cast = "55.2.0"
+arrow-json = "55.2.0"
+arrow-ipc = "55.2.0"
+
 
 [dev-dependencies]
 tempfile = "3"

@@ -8,9 +8,29 @@ pub mod limit;
 pub mod records;
 pub mod segment;
 
+// Use the arrow-rs versions of plateau crates
 pub use plateau_client as client;
-pub use plateau_client::arrow2;
+// Import Arrow modules
+pub use arrow;
+pub use arrow_array;
+pub use arrow_buffer;
+pub use arrow_cast;
+pub use arrow_data;
+pub use arrow_ipc;
+pub use arrow_json;
+pub use arrow_schema;
+pub use arrow_select;
 pub use plateau_transport as transport;
+
+// Adding explicit type re-exports for arrow crates to make migration easier
+pub use arrow_array::Array;
+pub use arrow_array::ArrayRef;
+pub use arrow_array::RecordBatch;
+pub use arrow_schema::DataType;
+pub use arrow_schema::Field;
+pub use arrow_schema::Fields;
+pub use arrow_schema::Schema;
+pub use arrow_schema::SchemaRef;
 
 #[cfg(test)]
 pub use plateau_test as test;

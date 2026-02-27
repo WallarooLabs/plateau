@@ -1,14 +1,17 @@
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use arrow2::io::ipc;
-use plateau_client::arrow2::chunk::Chunk;
-use plateau_client::arrow2::datatypes::{DataType, Field};
-use plateau_client::{arrow2, ArrowSchema, MultiChunk};
-use sample_arrow2::array::sampler_from_example;
-use sample_arrow2::primitive::primitive_len_sampler;
-use sample_arrow2::{AlwaysValid, SetLen};
+use arrow_array::types::Int64Type;
+use arrow_array::RecordBatch;
+use arrow_ipc::reader::FileReader;
+use arrow_schema::{DataType, Field};
+use plateau_client::MultiChunk;
+use plateau_transport::arrow_schema::SchemaRef;
+use sample_arrow_rs::array::sampler_from_example;
+use sample_arrow_rs::primitive::primitive_len_sampler;
+use sample_arrow_rs::{AlwaysValid, SetLen};
 use sample_std::{sample_all, Random, Sample, TryConvert};
 
 use crate::{HealthCheckJob, IteratorJob, SummarizerJob, WorkerConfig, WorkerTask, WriterJob};
@@ -37,35 +40,59 @@ impl Sample for Now {
 }
 
 pub fn build_sampler(path: &Path) -> anyhow::Result<MultiChunkSampler> {
-    let mut file = File::open(path)?;
+    let file = File::open(path)?;
+    let mut reader = FileReader::try_new(file, None)?;
+    let schema: SchemaRef = reader.schema().clone();
 
-    let metadata = ipc::read::read_file_metadata(&mut file)?;
-    let schema = metadata.schema.clone();
-    let mut reader = ipc::read::FileReader::new(&mut file, metadata, None, None);
-    let result = reader.next().ok_or_else(|| anyhow::anyhow!("no data"))?;
-    let chunk = result?;
+    let batch: RecordBatch = reader.next().ok_or_else(|| anyhow::anyhow!("no data"))??;
 
-    let metadata = schema.metadata;
+    let metadata = schema.metadata().clone();
 
-    let mut samplers = vec![primitive_len_sampler(Now, AlwaysValid)];
+    let mut samplers = vec![primitive_len_sampler::<_, _, Int64Type>(Now, AlwaysValid)];
 
     let without_time = schema
-        .fields
+        .fields()
         .iter()
-        .zip(chunk.into_arrays())
-        .filter_map(|(f, array)| if f.name == "time" { None } else { Some(array) });
+        .zip(batch.columns().iter())
+        .filter_map(|(f, array)| {
+            if f.name() == "time" {
+                None
+            } else {
+                Some(array.clone())
+            }
+        });
 
     samplers.extend(without_time.map(|array| sampler_from_example(array.as_ref())));
 
-    let mut fields = vec![Field::new("time", DataType::Int64, false)];
-    fields.extend(schema.fields.into_iter().filter(|f| f.name != "time"));
+    let mut fields: Vec<Arc<Field>> = vec![Arc::new(Field::new("time", DataType::Int64, false))];
+    fields.extend(
+        schema
+            .fields()
+            .iter()
+            .filter(|f| f.name() != "time")
+            .cloned(),
+    );
 
-    let schema = ArrowSchema { fields, metadata };
+    let schema_metadata = metadata;
+    let field_names: Vec<String> = fields.iter().map(|f| f.name().to_string()).collect();
 
     Ok(Box::new(sample_all(samplers).try_convert(
-        move |arrays| MultiChunk {
-            schema: schema.clone(),
-            chunks: [Chunk::new(arrays)].into(),
+        move |arrays| {
+            // Build schema from actual array types to handle nullability differences
+            let actual_fields: Vec<Arc<Field>> = field_names
+                .iter()
+                .zip(arrays.iter())
+                .map(|(name, array)| Arc::new(Field::new(name, array.data_type().clone(), false)))
+                .collect();
+            let schema: SchemaRef = Arc::new(arrow_schema::Schema::new_with_metadata(
+                arrow_schema::Fields::from(actual_fields),
+                schema_metadata.clone(),
+            ));
+            let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+            MultiChunk {
+                schema,
+                chunks: [batch].into(),
+            }
         },
         |_| None,
     )))

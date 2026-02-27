@@ -13,13 +13,18 @@ pub mod http;
 pub mod metrics;
 pub mod replication;
 
+// Re-export plateau modules at the top level
+pub use plateau_catalog as catalog;
+pub use plateau_client as client;
+pub use plateau_data as data;
+pub use plateau_transport as transport;
+// Re-export arrow from plateau_transport
+pub use transport::arrow;
+
+// Re-export commonly used types from the modules
 pub use crate::config::PlateauConfig as Config;
 pub use catalog::Catalog;
 pub use data::DEFAULT_BYTE_LIMIT;
-pub use plateau_catalog as catalog;
-pub use plateau_data as data;
-pub use plateau_transport as transport;
-pub use plateau_transport::arrow2;
 
 #[cfg(test)]
 pub use plateau_test as test;

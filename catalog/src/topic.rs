@@ -16,13 +16,13 @@ use crate::manifest::{Manifest, PartitionId, Scope, SegmentData};
 use crate::partition::Config as PartitionConfig;
 use crate::partition::Partition;
 
+use crate::data::index::{Ordering, RecordIndex};
+use crate::transport::{PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::future::{join_all, FutureExt};
 use futures::stream;
 use futures::stream::StreamExt;
-use plateau_data::index::{Ordering, RecordIndex};
-use plateau_transport::{PartitionFilter, PartitionSelector, SchemaChunk, TopicIterator};
 use tokio::sync::{RwLock, RwLockReadGuard};
 use tracing::debug;
 

@@ -1,6 +1,6 @@
-use crate::arrow2::error::Error as ArrowError;
+use crate::transport::arrow_schema::ArrowError;
+use crate::transport::{headers::MAX_REQUEST_SIZE_HEADER, ChunkError, ErrorMessage, PathError};
 use axum::http::StatusCode;
-use plateau_transport::{headers::MAX_REQUEST_SIZE_HEADER, ChunkError, ErrorMessage, PathError};
 use tracing::error;
 
 #[derive(Debug)]
