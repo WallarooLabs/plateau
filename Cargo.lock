@@ -517,7 +517,7 @@ checksum = "8c3c1a368f70d6cf7302d78f8f7093da241fb8e8807c05cc9e51a125895a6d5b"
 
 [[package]]
 name = "bench"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -2776,7 +2776,7 @@ dependencies = [
 
 [[package]]
 name = "plateau"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "chrono",
  "plateau-server",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-catalog"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-cli"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-client"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-data"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-server"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow",
@@ -2955,7 +2955,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-test"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2970,7 +2970,7 @@ dependencies = [
 
 [[package]]
 name = "plateau-transport"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "anyhow",
  "arrow",
