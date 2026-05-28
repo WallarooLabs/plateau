@@ -512,15 +512,29 @@ impl ReconcileJob {
                         .fixes
                         .contains(&ReconcileFix::UpdateManifestSizes)
                     {
-                        info!("Fixing size mismatch for segment {}", segment_file_name);
-                        let mut corrected_segment = segment.clone();
-                        corrected_segment.size = total_actual_size;
-
-                        // Update the manifest with the correct size
-                        self.catalog
+                        // Apply the fix conditionally on the size we observed. If
+                        // retention removed this segment (or another writer changed
+                        // it) since we snapshotted the manifest, the update is a
+                        // no-op rather than re-creating a stale row. This keeps the
+                        // fix safe to run while writes and retention are in flight.
+                        let applied = self
+                            .catalog
                             .manifest()
-                            .update(&partition_id, &corrected_segment)
+                            .update_size_if_unchanged(
+                                &partition_id,
+                                segment.index,
+                                segment.size,
+                                total_actual_size,
+                            )
                             .await;
+                        if applied {
+                            info!("Fixed size mismatch for segment {}", segment_file_name);
+                        } else {
+                            info!(
+                                "Skipped stale size fix for segment {} (concurrently removed or changed)",
+                                segment_file_name
+                            );
+                        }
                     }
                 } else {
                     debug!(
