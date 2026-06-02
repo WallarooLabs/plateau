@@ -21,6 +21,8 @@
 use std::fs;
 use std::ops::{Range, RangeInclusive};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::data::{
@@ -56,6 +58,13 @@ pub struct Partition {
     state: RwLock<State>,
     config: Config,
     manifest: Manifest,
+    /// High-water mark for the highest [SegmentIndex] whose manifest update has
+    /// been confirmed durable for a *sealed* (no longer active) segment.
+    ///
+    /// Encoded as `index + 1` so that `0` can represent "no sealed segment yet";
+    /// see [Partition::sealed_ix]. Monotonically non-decreasing: retention
+    /// removing segments never moves it backward.
+    sealed_ix: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Partition {
@@ -104,10 +113,18 @@ impl Partition {
         let (commit_writer, commits) = watch::channel(record);
         let commit_manifest = manifest.clone();
         let commit_id = id.clone();
+        let sealed_ix = Arc::new(AtomicU64::new(0));
+        let commit_sealed_ix = sealed_ix.clone();
         tokio::spawn(async move {
             while let Some(r) = writes.recv().await {
                 trace!("{} checkpoint: {:?}", commit_id, &r);
                 commit_manifest.update(&commit_id, &r.data).await;
+                // the manifest update above is now durable. if it sealed the
+                // segment, advance the watermark. fetch_max keeps it monotonic
+                // regardless of the order updates land in.
+                if r.sealed {
+                    commit_sealed_ix.fetch_max(r.data.index.0 as u64 + 1, AtomicOrdering::Relaxed);
+                }
                 // ok if no receivers, that means nothing is awaiting a commit
                 commit_writer.send(r.data.records.end).ok();
             }
@@ -127,6 +144,7 @@ impl Partition {
             state: RwLock::new(state),
             id,
             config,
+            sealed_ix,
         }
     }
 
@@ -168,6 +186,21 @@ impl Partition {
     #[allow(dead_code)]
     pub(crate) fn id(&self) -> &PartitionId {
         &self.id
+    }
+
+    /// The highest [SegmentIndex] whose manifest update has been confirmed
+    /// durable for a sealed (no longer active) segment, or `None` if no segment
+    /// has been sealed durably yet.
+    ///
+    /// This is a high-water mark: it never moves backward, even after retention
+    /// removes the segment it points at. The currently active (writeable)
+    /// segment is never included. Cheap to call; intended to be read once per
+    /// reconcile pass per partition.
+    pub fn sealed_ix(&self) -> Option<SegmentIndex> {
+        match self.sealed_ix.load(AtomicOrdering::Relaxed) {
+            0 => None,
+            encoded => Some(SegmentIndex((encoded - 1) as usize)),
+        }
     }
 
     pub(crate) fn slog_name(id: &PartitionId) -> String {
@@ -1711,6 +1744,68 @@ pub mod test {
             vec![6]
         );
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sealed_ix_fresh_is_none() -> Result<()> {
+        let (_dir, part) = partition(segment_3s()).await?;
+        assert_eq!(part.sealed_ix(), None);
+        part.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sealed_ix_active_not_sealed() -> Result<()> {
+        // segment_3s rolls at >2 rows; two writes stay in the active segment.
+        // checkpoint makes that segment's data durable without sealing it, so
+        // the watermark stays None.
+        let (_dir, part) = partition(segment_3s()).await?;
+        init_records(&part, 2).await?;
+        part.checkpoint().await;
+        part.ensure_index(RecordIndex(2)).await?;
+        assert_eq!(part.sealed_ix(), None);
+        part.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sealed_ix_advances_after_roll() -> Result<()> {
+        // the fourth write rolls segment 0 (records 0..3); once that seal lands
+        // durably, sealed_ix points at segment 0 (never the active segment 1).
+        let (_dir, part) = partition(segment_3s()).await?;
+        init_records(&part, 4).await?;
+        part.ensure_index(RecordIndex(3)).await?;
+        assert_eq!(part.sealed_ix(), Some(SegmentIndex(0)));
+        part.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sealed_ix_tracks_most_recent_sealed() -> Result<()> {
+        // ten writes seal segments 0 (0..3), 1 (3..6) and 2 (6..9), leaving an
+        // active segment 3. sealed_ix tracks the most recent *sealed* segment.
+        let (_dir, part) = partition(segment_3s()).await?;
+        init_records(&part, 10).await?;
+        part.ensure_index(RecordIndex(9)).await?;
+        assert_eq!(part.sealed_ix(), Some(SegmentIndex(2)));
+        part.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_sealed_ix_monotonic_under_retention() -> Result<()> {
+        let (_dir, part) = partition(segment_3s()).await?;
+        init_records(&part, 10).await?;
+        part.ensure_index(RecordIndex(9)).await?;
+        assert_eq!(part.sealed_ix(), Some(SegmentIndex(2)));
+
+        // retention removing the oldest segment is an observation that must not
+        // advance the watermark, and crucially must not move it backward.
+        part.remove_oldest().await;
+        assert_eq!(part.sealed_ix(), Some(SegmentIndex(2)));
+
+        part.close().await;
         Ok(())
     }
 }

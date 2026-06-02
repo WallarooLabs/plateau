@@ -300,6 +300,9 @@ struct AppendRequest {
 #[derive(Debug)]
 pub(crate) struct WriteResult {
     pub(crate) data: SegmentData,
+    /// True when this write sealed (finalized) the segment, i.e. the segment is
+    /// now immutable and no longer the active, writeable one.
+    pub(crate) sealed: bool,
 }
 
 impl Slog {
@@ -732,6 +735,7 @@ fn spawn_slog_thread(
                             size,
                             version: crate::manifest::SEGMENT_FORMAT_VERSION,
                         },
+                        sealed: seal,
                     };
                     trace!("{}: commit {:?}/{:?} send", name, segment, records.end);
                     tx_commits.blocking_send(response).expect("channel closed");
