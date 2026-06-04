@@ -32,4 +32,6 @@ pub use plateau_transport as transport;
 pub use plateau_test as test;
 
 pub use catalog::{Catalog, Config};
-pub use reconcile::{ReconcileConfig, ReconcileJob, ReconcileStats};
+pub use reconcile::{
+    ActiveSegmentReport, ReconcileConfig, ReconcileJob, ReconcileReport, ReconcileStats,
+};

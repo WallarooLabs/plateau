@@ -455,7 +455,15 @@ pub struct TopicInfo {
 #[cfg_attr(feature = "rweb", derive(Schema))]
 pub struct InfoResponse {
     pub topics: Vec<TopicInfo>,
+    /// Strict sealed-segment reconciliation stats.
     pub retention_stats: ReconcileStats,
+    /// Informational per-partition reports for the currently active (writeable)
+    /// tail segments. These are never "fixed" by reconciliation; a non-zero
+    /// `delta` is expected while writes accumulate before a manifest flush.
+    ///
+    /// Defaulted on deserialization so older clients and payloads remain valid.
+    #[serde(default)]
+    pub active_segments: Vec<ActiveSegmentReport>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
@@ -467,6 +475,26 @@ pub struct ReconcileStats {
     pub missing_files: usize,
     pub expected_size: usize,
     pub actual_size: usize,
+}
+
+/// Wire form of a reconciliation report for the active (writeable) tail segment
+/// of a single partition.
+///
+/// `delta` is `disk_size - manifest_size`, signed: a negative value means the
+/// manifest claims more bytes than exist on disk, which is an alert signal
+/// (corruption or an accounting bug). A positive value is normal — writes
+/// accumulate on disk before the manifest is flushed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct ActiveSegmentReport {
+    pub topic: String,
+    pub partition: String,
+    pub manifest_size: usize,
+    pub disk_size: usize,
+    pub delta: i64,
+    /// Seconds since this partition's most recent manifest update landed
+    /// durably, if known. Currently always `None` (no write-path hook yet).
+    pub last_manifest_update_age_secs: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

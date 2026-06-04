@@ -1056,5 +1056,20 @@ async fn info_endpoint() -> Result<()> {
     assert!(retention_stats["expected_size"].is_number());
     assert!(retention_stats["actual_size"].is_number());
 
+    // The active-segment bucket is part of the wire format. The freshly written
+    // partitions have not rolled, so their active tails should be reported here.
+    let active_segments = info_response["active_segments"].as_array().unwrap();
+    assert!(
+        !active_segments.is_empty(),
+        "expected at least one active-segment report"
+    );
+    for entry in active_segments {
+        assert!(entry["topic"].is_string());
+        assert!(entry["partition"].is_string());
+        assert!(entry["manifest_size"].is_number());
+        assert!(entry["disk_size"].is_number());
+        assert!(entry["delta"].is_number());
+    }
+
     Ok(())
 }
