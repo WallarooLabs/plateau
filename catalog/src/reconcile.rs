@@ -226,8 +226,6 @@ impl ReconcileStats {
 ///   disk, which points at corruption or an accounting bug.
 /// - `delta` growing unboundedly across consecutive scans suggests manifest
 ///   updates are stuck or falling behind.
-/// - `last_manifest_update_age` exceeding a threshold suggests the write path is
-///   wedged. (See the field's TODO; currently always `None`.)
 #[derive(Debug, Clone)]
 pub struct ActiveSegmentReport {
     /// Topic the active segment belongs to.
@@ -241,13 +239,6 @@ pub struct ActiveSegmentReport {
     /// `disk_size as i64 - manifest_size as i64`. Signed; negative is an alert
     /// signal (manifest claims more bytes than disk has).
     pub delta: i64,
-    /// Time since this partition's most recent manifest update landed durably.
-    ///
-    /// TODO: there is no hook in the write path that records when the last
-    /// manifest update became durable, so this is always `None` for now. Wire
-    /// it up once the write path exposes that timestamp; per this PR's scope we
-    /// deliberately do not add new plumbing in the write path for it.
-    pub last_manifest_update_age: Option<Duration>,
 }
 
 /// The full output of a reconciliation pass, split into two buckets.
@@ -571,9 +562,8 @@ impl ReconcileJob {
 
         let expected_size = ByteSize(segment.size as u64);
         let actual_size = ByteSize(total_actual_size as u64);
-        self.state.report.sealed.expected_size = ByteSize(
-            self.state.report.sealed.expected_size.as_u64() + expected_size.as_u64(),
-        );
+        self.state.report.sealed.expected_size =
+            ByteSize(self.state.report.sealed.expected_size.as_u64() + expected_size.as_u64());
         self.state.report.sealed.actual_size =
             ByteSize(self.state.report.sealed.actual_size.as_u64() + actual_size.as_u64());
 
@@ -670,9 +660,6 @@ impl ReconcileJob {
             manifest_size,
             disk_size,
             delta,
-            // TODO: no durable-update timestamp hook exists in the write path
-            // yet; see ActiveSegmentReport::last_manifest_update_age.
-            last_manifest_update_age: None,
         });
     }
 
@@ -1279,7 +1266,7 @@ mod tests {
 
         let report = reconciler.report();
         // The rolled segment was checked in the sealed bucket.
-        assert!(report.sealed.files_checked.len() >= 1);
+        assert!(!report.sealed.files_checked.is_empty());
         // Healthy system: no problems in either bucket.
         assert_eq!(report.sealed.size_mismatches.len(), 0);
         assert_eq!(report.sealed.missing_files.len(), 0);
@@ -1327,7 +1314,10 @@ mod tests {
         let slog_name = Partition::slog_name(&partition_id);
         let segment_path = Slog::segment_path(&topic_path, &slog_name, SegmentIndex(0));
         {
-            let mut f = fs::OpenOptions::new().append(true).open(&segment_path).await?;
+            let mut f = fs::OpenOptions::new()
+                .append(true)
+                .open(&segment_path)
+                .await?;
             f.write_all(&vec![0u8; 1000]).await?;
             f.flush().await?;
         }
