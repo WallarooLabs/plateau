@@ -475,19 +475,28 @@ pub struct ReconcileStats {
     pub missing_files: usize,
     pub expected_size: usize,
     pub actual_size: usize,
-    /// Count of `missing_files` entries dropped by the low-water filter because
-    /// the segment was retired by retention mid-scan (retention churn, not
-    /// corruption). Defaulted on deserialization so older payloads stay valid.
+    /// Counts of diff entries the low-water filter dropped as retention churn.
+    /// Defaulted on deserialization so older payloads stay valid.
     #[serde(default)]
-    pub retention_removed_missing_files: usize,
-    /// Same as above, for `untracked_files` (orphan) entries.
-    #[serde(default)]
-    pub retention_removed_untracked_files: usize,
-    /// Same as above, for `size_mismatches` entries. Rare in practice since the
-    /// CAS fix path already tolerates concurrent removal, but recorded for
-    /// symmetry and visibility.
-    #[serde(default)]
-    pub retention_removed_size_mismatches: usize,
+    pub retention_removed: RetentionRemoved,
+}
+
+/// Counts of sealed-bucket diff entries dropped by the low-water filter because
+/// the underlying segment was retired by retention while reconciliation was
+/// scanning (retention churn, not corruption). These distinguish a quiet system
+/// from one where retention is racing reconcile and the report is being
+/// smoothed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+#[cfg_attr(feature = "rweb", derive(Schema))]
+pub struct RetentionRemoved {
+    /// `missing_files` entries dropped (segment now below the low-water mark).
+    pub missing_files: usize,
+    /// `untracked_files` (orphan) entries dropped.
+    pub untracked_files: usize,
+    /// `size_mismatches` entries dropped. Rare in practice since the CAS fix
+    /// path already tolerates concurrent removal, but recorded for symmetry and
+    /// visibility.
+    pub size_mismatches: usize,
 }
 
 /// Wire form of a reconciliation report for the active (writeable) tail segment

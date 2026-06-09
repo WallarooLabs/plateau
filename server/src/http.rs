@@ -28,7 +28,8 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::config::PlateauConfig;
 use crate::transport::{
     ActiveSegmentReport, DataFocus, InfoResponse, Inserted, PartitionInfo, Partitions,
-    ReconcileStats, RecordQuery, RecordStatus, Span, Topic, TopicInfo, TopicIterationOrder,
+    ReconcileStats, RecordQuery, RecordStatus, RetentionRemoved, Span, Topic, TopicInfo,
+    TopicIterationOrder,
     TopicIterationQuery, TopicIterationStatus, TopicIterator, Topics,
 };
 
@@ -556,9 +557,11 @@ async fn get_info(
         missing_files: sealed.missing_files.len(),
         expected_size: sealed.expected_size.as_u64() as usize,
         actual_size: sealed.actual_size.as_u64() as usize,
-        retention_removed_missing_files: report.retention_rm.missing_files,
-        retention_removed_untracked_files: report.retention_rm.untracked_files,
-        retention_removed_size_mismatches: report.retention_rm.size_mismatches,
+        retention_removed: RetentionRemoved {
+            missing_files: report.retention_rm.missing_files,
+            untracked_files: report.retention_rm.untracked_files,
+            size_mismatches: report.retention_rm.size_mismatches,
+        },
     };
 
     let active_segments = report
@@ -607,6 +610,7 @@ async fn get_info(
             TopicInfo,
             PartitionInfo,
             ReconcileStats,
+            RetentionRemoved,
             ActiveSegmentReport,
         )
     ),
