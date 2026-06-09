@@ -27,9 +27,9 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::config::PlateauConfig;
 use crate::transport::{
-    DataFocus, InfoResponse, Inserted, PartitionInfo, Partitions, ReconcileStats, RecordQuery,
-    RecordStatus, Span, Topic, TopicInfo, TopicIterationOrder, TopicIterationQuery,
-    TopicIterationStatus, TopicIterator, Topics,
+    ActiveSegmentReport, DataFocus, InfoResponse, Inserted, PartitionInfo, Partitions,
+    ReconcileStats, RecordQuery, RecordStatus, Span, Topic, TopicInfo, TopicIterationOrder,
+    TopicIterationQuery, TopicIterationStatus, TopicIterator, Topics,
 };
 
 pub use crate::axum_util::{query::Query, Response};
@@ -547,19 +547,33 @@ async fn get_info(
         .await
         .map_err(|_| ErrorReply::Unknown)?;
 
-    let reconcile_stats = reconciler.stats();
+    let report = reconciler.report();
+    let sealed = &report.sealed;
     let retention_stats = ReconcileStats {
-        files_checked: reconcile_stats.files_checked.len(),
-        untracked_files: reconcile_stats.untracked_files.len(),
-        size_mismatches: reconcile_stats.size_mismatches.len(),
-        missing_files: reconcile_stats.missing_files.len(),
-        expected_size: reconcile_stats.expected_size.as_u64() as usize,
-        actual_size: reconcile_stats.actual_size.as_u64() as usize,
+        files_checked: sealed.files_checked.len(),
+        untracked_files: sealed.untracked_files.len(),
+        size_mismatches: sealed.size_mismatches.len(),
+        missing_files: sealed.missing_files.len(),
+        expected_size: sealed.expected_size.as_u64() as usize,
+        actual_size: sealed.actual_size.as_u64() as usize,
     };
+
+    let active_segments = report
+        .active
+        .iter()
+        .map(|a| ActiveSegmentReport {
+            topic: a.topic.clone(),
+            partition: a.partition.clone(),
+            manifest_size: a.manifest_size,
+            disk_size: a.disk_size,
+            delta: a.delta,
+        })
+        .collect();
 
     Ok(Response::ok(InfoResponse {
         topics,
         retention_stats,
+        active_segments,
     }))
 }
 
@@ -590,6 +604,7 @@ async fn get_info(
             TopicInfo,
             PartitionInfo,
             ReconcileStats,
+            ActiveSegmentReport,
         )
     ),
     tags(
