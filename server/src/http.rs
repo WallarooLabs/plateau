@@ -556,6 +556,9 @@ async fn get_info(
         missing_files: sealed.missing_files.len(),
         expected_size: sealed.expected_size.as_u64() as usize,
         actual_size: sealed.actual_size.as_u64() as usize,
+        retention_removed_missing_files: report.retention_rm.missing_files,
+        retention_removed_untracked_files: report.retention_rm.untracked_files,
+        retention_removed_size_mismatches: report.retention_rm.size_mismatches,
     };
 
     let active_segments = report

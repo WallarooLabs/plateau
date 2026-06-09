@@ -475,6 +475,19 @@ pub struct ReconcileStats {
     pub missing_files: usize,
     pub expected_size: usize,
     pub actual_size: usize,
+    /// Count of `missing_files` entries dropped by the low-water filter because
+    /// the segment was retired by retention mid-scan (retention churn, not
+    /// corruption). Defaulted on deserialization so older payloads stay valid.
+    #[serde(default)]
+    pub retention_removed_missing_files: usize,
+    /// Same as above, for `untracked_files` (orphan) entries.
+    #[serde(default)]
+    pub retention_removed_untracked_files: usize,
+    /// Same as above, for `size_mismatches` entries. Rare in practice since the
+    /// CAS fix path already tolerates concurrent removal, but recorded for
+    /// symmetry and visibility.
+    #[serde(default)]
+    pub retention_removed_size_mismatches: usize,
 }
 
 /// Wire form of a reconciliation report for the active (writeable) tail segment
