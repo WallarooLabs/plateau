@@ -464,6 +464,14 @@ pub struct InfoResponse {
     /// Defaulted on deserialization so older clients and payloads remain valid.
     #[serde(default)]
     pub active_segments: Vec<ActiveSegmentReport>,
+    /// True when no reconciliation pass has completed yet, so `retention_stats`
+    /// and `active_segments` are placeholders (zeroed / empty) rather than real
+    /// observations. The handler never blocks waiting for a pass; it returns
+    /// this snapshot immediately.
+    ///
+    /// Defaulted on deserialization so older clients and payloads remain valid.
+    #[serde(default)]
+    pub pending: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]

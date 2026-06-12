@@ -33,5 +33,6 @@ pub use plateau_test as test;
 
 pub use catalog::{Catalog, Config};
 pub use reconcile::{
-    ActiveSegmentReport, ReconcileConfig, ReconcileJob, ReconcileReport, ReconcileStats,
+    ActiveSegmentReport, ReconcileConfig, ReconcileJob, ReconcileMode, ReconcileReport,
+    ReconcileStats,
 };

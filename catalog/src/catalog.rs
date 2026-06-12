@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use arc_swap::ArcSwapOption;
 use bytesize::ByteSize;
 use chrono::Utc;
 use futures::future::join_all;
@@ -13,7 +14,7 @@ use metrics::gauge;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{RwLock, RwLockReadGuard},
+    sync::{Mutex, RwLock, RwLockReadGuard},
     time,
 };
 use tokio_stream::wrappers::IntervalStream;
@@ -23,6 +24,7 @@ use crate::data::limit::Retention;
 use crate::manifest::Manifest;
 use crate::manifest::Scope;
 use crate::partition;
+use crate::reconcile::ReconcileReport;
 use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;
 
@@ -102,6 +104,15 @@ pub struct Catalog {
     topic_root: PathBuf,
     state: RwLock<State>,
     disk_monitor: DiskMonitor,
+    /// Single-flight guard for fix-enabled reconciliation passes. Held for the
+    /// duration of a pass (see [crate::reconcile::ReconcileJob]); a second
+    /// fix-enabled pass that cannot acquire it degrades to report-only instead
+    /// of overlapping. Report-only passes never take it.
+    reconcile_fix_guard: Arc<Mutex<()>>,
+    /// The latest completed reconciliation report, published lock-free so
+    /// readers (e.g. the `/info` handler) can snapshot it without blocking on an
+    /// in-flight pass. `None` until the first pass completes.
+    latest_reconcile_report: ArcSwapOption<ReconcileReport>,
 }
 
 #[derive(Debug)]
@@ -153,6 +164,8 @@ impl Catalog {
                 last_checkpoint: SystemTime::now(),
             }),
             disk_monitor,
+            reconcile_fix_guard: Arc::new(Mutex::new(())),
+            latest_reconcile_report: ArcSwapOption::empty(),
         }
     }
 
@@ -466,6 +479,24 @@ impl Catalog {
     /// Get a reference to the manifest
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// A handle to the single-flight guard for fix-enabled reconciliation
+    /// passes. Reconciliation acquires this lazily (via `try_lock_owned`) and
+    /// holds it for the duration of a fix-enabled pass.
+    pub fn reconcile_fix_guard(&self) -> Arc<Mutex<()>> {
+        self.reconcile_fix_guard.clone()
+    }
+
+    /// Snapshot the latest completed reconciliation report, if any pass has
+    /// finished. This is a lock-free read and never blocks on an in-flight pass.
+    pub fn latest_reconcile_report(&self) -> Option<Arc<ReconcileReport>> {
+        self.latest_reconcile_report.load_full()
+    }
+
+    /// Publish a completed reconciliation report as the latest snapshot.
+    pub fn publish_reconcile_report(&self, report: Arc<ReconcileReport>) {
+        self.latest_reconcile_report.store(Some(report));
     }
 }
 
