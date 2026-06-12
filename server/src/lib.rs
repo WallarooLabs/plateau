@@ -78,35 +78,22 @@ pub async fn task_from_catalog_config(
 ) -> bool {
     let (addr, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
 
-    // Start reconciliation task if configured
-    if let Some(reconcile_config) = &config.reconcile {
-        tracing::info!(
-            "starting reconciliation task with config: {:?}",
-            reconcile_config
-        );
-        let mut reconciler =
-            catalog::ReconcileJob::with_config(catalog.clone(), reconcile_config.clone());
-        let publish_catalog = catalog.clone();
-
-        tokio::spawn(async move {
-            // Run reconciliation once and publish the result so /info can read
-            // the latest snapshot. The continuous loop comes later; for now this
-            // single completed pass becomes queryable.
-            match reconciler.run(None).await {
-                Ok(_) => {
-                    publish_catalog.publish_reconcile_report(Arc::new(reconciler.report().clone()));
-                    tracing::info!("reconciliation completed successfully");
-                }
-                Err(e) => {
-                    tracing::error!("reconciliation error: {:?}", e);
-                }
-            }
-        });
-    }
-
     {
         use futures::future::FutureExt;
         let mut tasks = vec![Catalog::checkpoints(catalog.clone()).boxed(), stop, server];
+
+        // Run reconciliation continuously if configured. The loop runs passes
+        // back-to-back (paced by the config), publishing each completed report
+        // into the catalog so /info reflects the freshest consistency view. It
+        // joins the shutdown race here: when `stop` (or the server) wins the
+        // `select_all`, this future is dropped, cleanly cancelling the loop.
+        if let Some(reconcile_config) = config.reconcile.clone() {
+            tracing::info!(
+                "starting continuous reconciliation loop with config: {:?}",
+                reconcile_config
+            );
+            tasks.push(catalog::ReconcileJob::run_loop(catalog.clone(), reconcile_config).boxed());
+        }
 
         if config.catalog.storage.monitor {
             tasks.push(catalog.monitor_disk_storage().boxed());

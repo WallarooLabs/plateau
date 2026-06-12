@@ -472,6 +472,14 @@ pub struct InfoResponse {
     /// Defaulted on deserialization so older clients and payloads remain valid.
     #[serde(default)]
     pub pending: bool,
+    /// Wall-clock time the most recent reconciliation pass completed, as stamped
+    /// by the continuous reconciliation loop. Lets operators judge how fresh the
+    /// reconciliation view is. `None` until the first pass completes (in which
+    /// case `pending` is also true).
+    ///
+    /// Defaulted on deserialization so older clients and payloads remain valid.
+    #[serde(default)]
+    pub last_reconcile_pass_completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
