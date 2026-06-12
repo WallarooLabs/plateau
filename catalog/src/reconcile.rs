@@ -379,10 +379,34 @@ impl ReconcileJob {
     pub async fn run(&mut self, limit: Option<usize>) -> Result<bool> {
         // Decide (once per pass) whether this pass fixes or only reports, and
         // take the single-flight guard if it fixes. The guard is held across all
-        // incremental `run` calls until the pass completes below or `reset` is
-        // called.
+        // incremental `run` calls until the pass ends (completes or errors) or
+        // `reset` is called.
         self.ensure_fix_mode();
 
+        let result = self.run_units(limit).await;
+
+        // The guard is held only while a pass is still making progress
+        // (`Ok(false)`). Any terminal outcome ends the pass, so release it:
+        // - On completion the report keeps its `mode` as a record of the pass.
+        // - On error the pass is abandoned partway through, so we also re-arm the
+        //   mode decision. The error has many possible exit points inside
+        //   `run_units`; releasing here (rather than per-exit) guarantees a
+        //   failed fix-enabled pass never wedges single-flight, and that a retry
+        //   re-acquires the guard before any further fix runs — preserving the
+        //   "`mode == Fixing` implies the guard is held" invariant.
+        match &result {
+            Ok(true) => self.fix_guard = None,
+            Err(_) => self.release_fix_mode(),
+            Ok(false) => {}
+        }
+
+        result
+    }
+
+    /// Drive incremental units of work up to the effective limit, returning
+    /// `true` once the whole pass is complete. Does not touch the single-flight
+    /// guard; [Self::run] owns the guard's lifecycle around this.
+    async fn run_units(&mut self, limit: Option<usize>) -> Result<bool> {
         // Use the limit from the parameter if provided, otherwise use config
         let effective_limit = limit.or(self.config.limit);
 
@@ -398,11 +422,7 @@ impl ReconcileJob {
 
             // If we're done, return true
             if done {
-                // Release the single-flight guard now that the pass is complete,
-                // letting a subsequent fix-enabled pass acquire it.
-                self.fix_guard = None;
-                let report = self.report();
-                info!("Reconciliation complete: {:?}", report);
+                info!("Reconciliation complete: {:?}", self.report());
                 return Ok(true);
             }
 
@@ -416,6 +436,13 @@ impl ReconcileJob {
         }
 
         Ok(false)
+    }
+
+    /// Release the single-flight guard and re-arm the mode decision so the next
+    /// `run` starts fresh (re-acquiring the guard if still fix-enabled).
+    fn release_fix_mode(&mut self) {
+        self.fix_guard = None;
+        self.fix_decided = false;
     }
 
     /// Process the next unit of work in the reconciliation
@@ -857,8 +884,7 @@ impl ReconcileJob {
         };
         // Release the single-flight guard and re-arm the mode decision so the
         // next `run` starts a fresh pass.
-        self.fix_guard = None;
-        self.fix_decided = false;
+        self.release_fix_mode();
     }
 }
 
@@ -1475,15 +1501,24 @@ mod tests {
     /// sealed mismatch to correct. Returns the catalog, the segment's partition
     /// and index, the original (mismatched) manifest size, and the corrected
     /// (on-disk) size a fix should write.
-    async fn setup_sealed_size_mismatch(
-    ) -> (TempDir, Arc<Catalog>, PartitionId, SegmentIndex, usize, usize) {
+    async fn setup_sealed_size_mismatch() -> (
+        TempDir,
+        Arc<Catalog>,
+        PartitionId,
+        SegmentIndex,
+        usize,
+        usize,
+    ) {
         let (dir, catalog) = create_test_catalog().await;
 
         let topic_name = "broken";
         let partition_name = "p0";
         let topic = catalog.get_topic(topic_name).await;
         topic
-            .extend_records(partition_name, &test_records(&["record1", "record2", "record3"]))
+            .extend_records(
+                partition_name,
+                &test_records(&["record1", "record2", "record3"]),
+            )
             .await
             .unwrap();
         topic.commit().await.unwrap();
@@ -1696,6 +1731,47 @@ mod tests {
         let mut other = ReconcileJob::with_config(catalog.clone(), fix_config());
         assert!(other.run(None).await?);
         assert_eq!(other.report().mode, ReconcileMode::Fixing);
+
+        Ok(())
+    }
+
+    /// An error partway through a fix-enabled pass still releases the
+    /// single-flight guard, so a failed pass never wedges single-flight. The
+    /// `run` loop has many possible error exits; this exercises one of them.
+    #[test_log::test(tokio::test)]
+    async fn test_guard_released_on_error() -> Result<()> {
+        let (_dir, catalog) = create_test_catalog().await;
+
+        let topic_name = "broken-dir";
+        let partition_name = "p0";
+        let topic = catalog.get_topic(topic_name).await;
+        topic
+            .extend_records(partition_name, &test_records(&["a", "b", "c"]))
+            .await?;
+        topic.commit().await?;
+        drop(topic);
+        catalog.checkpoint().await;
+
+        // Replace the topic directory with a regular file so the orphan-detection
+        // phase's `read_dir` fails, forcing the pass to error mid-flight. The
+        // topic is already cached in the catalog, so the pass never tries to
+        // re-open it from disk.
+        let topic_path = Topic::partition_root(catalog.topic_root(), topic_name);
+        fs::remove_dir_all(&topic_path).await?;
+        fs::write(&topic_path, b"not a directory").await?;
+
+        let mut job = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(
+            job.run(None).await.is_err(),
+            "pass should error when reading the topic directory"
+        );
+
+        // The guard must have been released despite the error, so a fresh
+        // fix-enabled actor can acquire it.
+        assert!(
+            catalog.reconcile_fix_guard().try_lock_owned().is_ok(),
+            "single-flight guard must be released after an errored fix pass"
+        );
 
         Ok(())
     }

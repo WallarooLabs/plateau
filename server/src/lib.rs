@@ -94,8 +94,7 @@ pub async fn task_from_catalog_config(
             // single completed pass becomes queryable.
             match reconciler.run(None).await {
                 Ok(_) => {
-                    publish_catalog
-                        .publish_reconcile_report(Arc::new(reconciler.report().clone()));
+                    publish_catalog.publish_reconcile_report(Arc::new(reconciler.report().clone()));
                     tracing::info!("reconciliation completed successfully");
                 }
                 Err(e) => {

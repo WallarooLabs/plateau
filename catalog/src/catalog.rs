@@ -6,7 +6,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use arc_swap::ArcSwapOption;
 use bytesize::ByteSize;
 use chrono::Utc;
 use futures::future::join_all;
@@ -14,7 +13,7 @@ use metrics::gauge;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{Mutex, RwLock, RwLockReadGuard},
+    sync::{watch, Mutex, RwLock, RwLockReadGuard},
     time,
 };
 use tokio_stream::wrappers::IntervalStream;
@@ -109,10 +108,12 @@ pub struct Catalog {
     /// fix-enabled pass that cannot acquire it degrades to report-only instead
     /// of overlapping. Report-only passes never take it.
     reconcile_fix_guard: Arc<Mutex<()>>,
-    /// The latest completed reconciliation report, published lock-free so
-    /// readers (e.g. the `/info` handler) can snapshot it without blocking on an
-    /// in-flight pass. `None` until the first pass completes.
-    latest_reconcile_report: ArcSwapOption<ReconcileReport>,
+    /// The latest completed reconciliation report. Whoever finishes a pass
+    /// publishes it here; readers (e.g. the `/info` handler) snapshot the
+    /// current value without blocking on an in-flight pass. `None` until the
+    /// first pass completes. A [watch] channel also lets future consumers await
+    /// new reports, which the continuous reconciliation loop will want.
+    reconcile_report: watch::Sender<Option<Arc<ReconcileReport>>>,
 }
 
 #[derive(Debug)]
@@ -165,7 +166,7 @@ impl Catalog {
             }),
             disk_monitor,
             reconcile_fix_guard: Arc::new(Mutex::new(())),
-            latest_reconcile_report: ArcSwapOption::empty(),
+            reconcile_report: watch::channel(None).0,
         }
     }
 
@@ -489,14 +490,21 @@ impl Catalog {
     }
 
     /// Snapshot the latest completed reconciliation report, if any pass has
-    /// finished. This is a lock-free read and never blocks on an in-flight pass.
+    /// finished. Cheap to call and never blocks on an in-flight pass.
     pub fn latest_reconcile_report(&self) -> Option<Arc<ReconcileReport>> {
-        self.latest_reconcile_report.load_full()
+        self.reconcile_report.borrow().clone()
     }
 
-    /// Publish a completed reconciliation report as the latest snapshot.
+    /// A receiver for observing reconciliation reports as they are published.
+    /// The current value is `None` until the first pass completes.
+    pub fn subscribe_reconcile_report(&self) -> watch::Receiver<Option<Arc<ReconcileReport>>> {
+        self.reconcile_report.subscribe()
+    }
+
+    /// Publish a completed reconciliation report as the latest snapshot. Uses
+    /// `send_replace` so it succeeds even when there are no subscribers.
     pub fn publish_reconcile_report(&self, report: Arc<ReconcileReport>) {
-        self.latest_reconcile_report.store(Some(report));
+        self.reconcile_report.send_replace(Some(report));
     }
 }
 

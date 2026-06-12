@@ -54,7 +54,6 @@ arrow-ipc = "55.2.0"
 plateau-data.workspace = true
 plateau-client.workspace = true
 plateau-transport.workspace = true
-arc-swap = "1"
 
 
 [dev-dependencies]
