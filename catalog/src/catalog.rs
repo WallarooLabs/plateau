@@ -13,7 +13,7 @@ use metrics::gauge;
 use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    sync::{RwLock, RwLockReadGuard},
+    sync::{watch, Mutex, RwLock, RwLockReadGuard},
     time,
 };
 use tokio_stream::wrappers::IntervalStream;
@@ -23,6 +23,7 @@ use crate::data::limit::Retention;
 use crate::manifest::Manifest;
 use crate::manifest::Scope;
 use crate::partition;
+use crate::reconcile::ReconcileReport;
 use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;
 
@@ -102,6 +103,17 @@ pub struct Catalog {
     topic_root: PathBuf,
     state: RwLock<State>,
     disk_monitor: DiskMonitor,
+    /// Single-flight guard for fix-enabled reconciliation passes. Held for the
+    /// duration of a pass (see [crate::reconcile::ReconcileJob]); a second
+    /// fix-enabled pass that cannot acquire it degrades to report-only instead
+    /// of overlapping. Report-only passes never take it.
+    reconcile_fix_guard: Arc<Mutex<()>>,
+    /// The latest completed reconciliation report. Whoever finishes a pass
+    /// publishes it here; readers (e.g. the `/info` handler) snapshot the
+    /// current value without blocking on an in-flight pass. `None` until the
+    /// first pass completes. A [watch] channel also lets future consumers await
+    /// new reports, which the continuous reconciliation loop will want.
+    reconcile_report: watch::Sender<Option<Arc<ReconcileReport>>>,
 }
 
 #[derive(Debug)]
@@ -153,6 +165,8 @@ impl Catalog {
                 last_checkpoint: SystemTime::now(),
             }),
             disk_monitor,
+            reconcile_fix_guard: Arc::new(Mutex::new(())),
+            reconcile_report: watch::channel(None).0,
         }
     }
 
@@ -466,6 +480,31 @@ impl Catalog {
     /// Get a reference to the manifest
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
+    }
+
+    /// A handle to the single-flight guard for fix-enabled reconciliation
+    /// passes. Reconciliation acquires this lazily (via `try_lock_owned`) and
+    /// holds it for the duration of a fix-enabled pass.
+    pub fn reconcile_fix_guard(&self) -> Arc<Mutex<()>> {
+        self.reconcile_fix_guard.clone()
+    }
+
+    /// Snapshot the latest completed reconciliation report, if any pass has
+    /// finished. Cheap to call and never blocks on an in-flight pass.
+    pub fn latest_reconcile_report(&self) -> Option<Arc<ReconcileReport>> {
+        self.reconcile_report.borrow().clone()
+    }
+
+    /// A receiver for observing reconciliation reports as they are published.
+    /// The current value is `None` until the first pass completes.
+    pub fn subscribe_reconcile_report(&self) -> watch::Receiver<Option<Arc<ReconcileReport>>> {
+        self.reconcile_report.subscribe()
+    }
+
+    /// Publish a completed reconciliation report as the latest snapshot. Uses
+    /// `send_replace` so it succeeds even when there are no subscribers.
+    pub fn publish_reconcile_report(&self, report: Arc<ReconcileReport>) {
+        self.reconcile_report.send_replace(Some(report));
     }
 }
 

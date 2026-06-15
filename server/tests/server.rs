@@ -992,6 +992,21 @@ async fn info_endpoint() -> Result<()> {
     // hack until we have a true commit mechanism
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    // /info no longer runs reconciliation inline; it reads the latest published
+    // report. Run a pass and publish it (as the background task would) so the
+    // reconcile-derived fields below are populated.
+    let mut reconciler = catalog::ReconcileJob::with_config(
+        server.catalog.clone(),
+        catalog::ReconcileConfig {
+            track_files: true,
+            ..Default::default()
+        },
+    );
+    assert!(reconciler.run(None).await?);
+    server
+        .catalog
+        .publish_reconcile_report(Arc::new(reconciler.report().clone()));
+
     // Now check the info endpoint
     let info_response = get_json(&client, &format!("{}/info", server.base())).await?;
 
@@ -1071,5 +1086,132 @@ async fn info_endpoint() -> Result<()> {
         assert!(entry["delta"].is_number());
     }
 
+    Ok(())
+}
+
+fn info_url(server: &TestServer) -> String {
+    format!("{}/info", server.base())
+}
+
+/// Before any reconcile pass has completed, /info returns promptly with a
+/// pending placeholder instead of blocking on a synchronous pass.
+#[test_log::test(tokio::test)]
+async fn info_pending_when_no_report() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        TEST_MESSAGE,
+        5,
+    )
+    .await;
+    server.catalog.checkpoint().await;
+
+    // No background reconcile is configured for TestServer, so nothing has been
+    // published. The handler must still return quickly.
+    let info = tokio::time::timeout(
+        Duration::from_secs(2),
+        get_json(&client, &info_url(&server)),
+    )
+    .await
+    .expect("/info must not block when no report exists")?;
+
+    assert_eq!(info["pending"], json::json!(true));
+    // Topics are still computed inline and reported.
+    assert_eq!(info["topics"].as_array().unwrap().len(), 1);
+    // Reconcile-derived fields are zeroed/empty placeholders.
+    assert_eq!(info["retention_stats"]["files_checked"], json::json!(0));
+    assert_eq!(info["retention_stats"]["size_mismatches"], json::json!(0));
+    assert!(info["active_segments"].as_array().unwrap().is_empty());
+
+    Ok(())
+}
+
+/// Once a reconcile pass is published, /info reflects its stats (and reports
+/// itself as no longer pending).
+#[test_log::test(tokio::test)]
+async fn info_reflects_published_report() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        TEST_MESSAGE,
+        5,
+    )
+    .await;
+    server.catalog.checkpoint().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Run a pass and publish it, mimicking the background task.
+    let mut job = catalog::ReconcileJob::with_config(
+        server.catalog.clone(),
+        catalog::ReconcileConfig {
+            track_files: true,
+            ..Default::default()
+        },
+    );
+    assert!(job.run(None).await?);
+    let files_checked = job.report().sealed.files_checked.len();
+    server
+        .catalog
+        .publish_reconcile_report(Arc::new(job.report().clone()));
+
+    let info = get_json(&client, &info_url(&server)).await?;
+    assert_eq!(info["pending"], json::json!(false));
+    assert_eq!(
+        info["retention_stats"]["files_checked"].as_u64().unwrap() as usize,
+        files_checked
+    );
+    assert!(files_checked > 0);
+    // The active tail of the freshly-written, unrolled partition is reported.
+    assert!(!info["active_segments"].as_array().unwrap().is_empty());
+
+    Ok(())
+}
+
+/// /info reads a lock-free snapshot, so it never blocks waiting for a
+/// long-running reconcile pass to finish.
+#[test_log::test(tokio::test)]
+async fn info_not_racy_with_reconcile() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    // Several partitions so the reconcile pass spans multiple units of work.
+    for p in 0..4 {
+        repeat_append(
+            &client,
+            append_url(&server, &topic_name, format!("p{p}")).as_str(),
+            TEST_MESSAGE,
+            3,
+        )
+        .await;
+    }
+    server.catalog.checkpoint().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // A large idle ratio inserts sleeps between units, keeping the pass running
+    // while we hit /info concurrently.
+    let mut job = catalog::ReconcileJob::with_config(
+        server.catalog.clone(),
+        catalog::ReconcileConfig {
+            track_files: true,
+            idle_ratio: 200.0,
+            ..Default::default()
+        },
+    );
+    let reconcile = tokio::spawn(async move { job.run(None).await });
+
+    // Each /info call returns promptly regardless of the in-flight pass.
+    for _ in 0..5 {
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            get_json(&client, &info_url(&server)),
+        )
+        .await
+        .expect("/info must not block on an in-flight reconcile")?;
+    }
+
+    reconcile.await??;
     Ok(())
 }

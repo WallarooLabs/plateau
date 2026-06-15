@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use crate::slog::SegmentIndex;
 
 use tokio::fs;
+use tokio::sync::OwnedMutexGuard;
 
 use crate::data::segment::Segment;
 use anyhow::Result;
@@ -65,6 +66,24 @@ pub enum ReconcileFix {
     // TODO: RemoveUntrackedSegments
 }
 
+/// Whether a pass is allowed to apply fixes, or is restricted to scanning and
+/// reporting only.
+///
+/// A fix-enabled pass must hold the catalog's single-flight guard before it may
+/// mutate the manifest. When two fix-enabled passes overlap, only one acquires
+/// the guard and runs in [ReconcileMode::Fixing]; the loser degrades to
+/// [ReconcileMode::ReportOnly] — it still scans and emits diffs, it just never
+/// calls the CAS fix. A pass configured without any fixes is always
+/// [ReconcileMode::ReportOnly] and never touches the guard.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReconcileMode {
+    /// Scan and report only; no manifest mutations.
+    #[default]
+    ReportOnly,
+    /// Holds the single-flight guard and applies configured fixes.
+    Fixing,
+}
+
 /// A reconciliation job that incrementally validates consistency between
 /// the manifest and files on disk.
 #[derive(Debug)]
@@ -75,6 +94,15 @@ pub struct ReconcileJob {
     state: ReconcileState,
     /// Configuration for the reconciliation job
     config: ReconcileConfig,
+    /// Single-flight guard held for the duration of a fix-enabled pass. Acquired
+    /// lazily on the first fix-enabled [Self::run] call and held until the pass
+    /// completes or [Self::reset] is called. `None` for report-only passes and
+    /// for fix-enabled passes that lost the single-flight race.
+    fix_guard: Option<OwnedMutexGuard<()>>,
+    /// Whether the single-flight decision has been made for the current pass.
+    /// Ensures the [ReconcileMode] is decided exactly once and never flips
+    /// mid-pass across multiple incremental `run` calls.
+    fix_decided: bool,
 }
 
 /// The current state of a reconciliation job
@@ -256,14 +284,28 @@ pub struct ReconcileReport {
     pub sealed: ReconcileStats,
     /// Informational per-partition active-segment reports.
     pub active: Vec<ActiveSegmentReport>,
+    /// Whether this pass applied fixes ([ReconcileMode::Fixing]) or only scanned
+    /// and reported ([ReconcileMode::ReportOnly]). A fix-enabled pass that loses
+    /// the single-flight race degrades to `ReportOnly`; see [Self::fixes_skipped].
+    pub mode: ReconcileMode,
+    /// Set when a fix-enabled pass was forced into [ReconcileMode::ReportOnly]
+    /// because another fix-enabled pass already held the single-flight guard.
+    /// `None` for passes that ran as configured (whether fixing or report-only).
+    pub fixes_skipped_reason: Option<String>,
 }
 
 impl ReconcileReport {
     fn with_path_tracking() -> Self {
         Self {
             sealed: ReconcileStats::with_path_tracking(),
-            active: Vec::new(),
+            ..Default::default()
         }
+    }
+
+    /// True when this pass was configured to fix but was demoted to report-only
+    /// because another fix-enabled pass held the single-flight guard.
+    pub fn fixes_skipped(&self) -> bool {
+        self.fixes_skipped_reason.is_some()
     }
 }
 
@@ -279,6 +321,53 @@ impl ReconcileJob {
             catalog,
             state: ReconcileState::new(config.track_files),
             config,
+            fix_guard: None,
+            fix_decided: false,
+        }
+    }
+
+    /// Whether this job is configured to apply any real fix (anything beyond the
+    /// [ReconcileFix::Noop] placeholder).
+    fn fixes_enabled(&self) -> bool {
+        self.config
+            .fixes
+            .iter()
+            .any(|fix| !matches!(fix, ReconcileFix::Noop))
+    }
+
+    /// Decide this pass's [ReconcileMode] exactly once, lazily on the first
+    /// fix-enabled `run`. Report-only passes never touch the single-flight
+    /// guard. A fix-enabled pass tries to acquire the guard; if another
+    /// fix-enabled pass already holds it, this pass degrades to report-only
+    /// rather than blocking or erroring.
+    fn ensure_fix_mode(&mut self) {
+        if self.fix_decided {
+            return;
+        }
+        self.fix_decided = true;
+
+        if !self.fixes_enabled() {
+            // Report-only configuration: never take the guard.
+            self.state.report.mode = ReconcileMode::ReportOnly;
+            return;
+        }
+
+        match self.catalog.reconcile_fix_guard().try_lock_owned() {
+            Ok(guard) => {
+                self.fix_guard = Some(guard);
+                self.state.report.mode = ReconcileMode::Fixing;
+            }
+            Err(_) => {
+                // Another fix-enabled pass is in flight. Fall back to
+                // report-only: still scan, still emit diffs, just skip the CAS
+                // fix. Do not block, do not error.
+                self.state.report.mode = ReconcileMode::ReportOnly;
+                self.state.report.fixes_skipped_reason =
+                    Some("another fix-enabled reconcile pass is already in flight".to_string());
+                warn!(
+                    "fix-enabled reconcile fell back to report-only: another pass holds the single-flight guard"
+                );
+            }
         }
     }
 
@@ -288,6 +377,36 @@ impl ReconcileJob {
     /// true when the entire reconciliation is complete, false otherwise.
     /// If limit is None, run until completion.
     pub async fn run(&mut self, limit: Option<usize>) -> Result<bool> {
+        // Decide (once per pass) whether this pass fixes or only reports, and
+        // take the single-flight guard if it fixes. The guard is held across all
+        // incremental `run` calls until the pass ends (completes or errors) or
+        // `reset` is called.
+        self.ensure_fix_mode();
+
+        let result = self.run_units(limit).await;
+
+        // The guard is held only while a pass is still making progress
+        // (`Ok(false)`). Any terminal outcome ends the pass, so release it:
+        // - On completion the report keeps its `mode` as a record of the pass.
+        // - On error the pass is abandoned partway through, so we also re-arm the
+        //   mode decision. The error has many possible exit points inside
+        //   `run_units`; releasing here (rather than per-exit) guarantees a
+        //   failed fix-enabled pass never wedges single-flight, and that a retry
+        //   re-acquires the guard before any further fix runs — preserving the
+        //   "`mode == Fixing` implies the guard is held" invariant.
+        match &result {
+            Ok(true) => self.fix_guard = None,
+            Err(_) => self.release_fix_mode(),
+            Ok(false) => {}
+        }
+
+        result
+    }
+
+    /// Drive incremental units of work up to the effective limit, returning
+    /// `true` once the whole pass is complete. Does not touch the single-flight
+    /// guard; [Self::run] owns the guard's lifecycle around this.
+    async fn run_units(&mut self, limit: Option<usize>) -> Result<bool> {
         // Use the limit from the parameter if provided, otherwise use config
         let effective_limit = limit.or(self.config.limit);
 
@@ -303,8 +422,7 @@ impl ReconcileJob {
 
             // If we're done, return true
             if done {
-                let report = self.report();
-                info!("Reconciliation complete: {:?}", report);
+                info!("Reconciliation complete: {:?}", self.report());
                 return Ok(true);
             }
 
@@ -318,6 +436,13 @@ impl ReconcileJob {
         }
 
         Ok(false)
+    }
+
+    /// Release the single-flight guard and re-arm the mode decision so the next
+    /// `run` starts fresh (re-acquiring the guard if still fix-enabled).
+    fn release_fix_mode(&mut self) {
+        self.fix_guard = None;
+        self.fix_decided = false;
     }
 
     /// Process the next unit of work in the reconciliation
@@ -586,10 +711,14 @@ impl ReconcileJob {
                 total_actual_size.abs_diff(segment.size),
             );
 
-            if self
-                .config
-                .fixes
-                .contains(&ReconcileFix::UpdateManifestSizes)
+            // Only apply the CAS fix when this pass holds the single-flight
+            // guard (Fixing mode). A fix-enabled pass that lost the race runs in
+            // ReportOnly mode and records the mismatch above without mutating.
+            if self.state.report.mode == ReconcileMode::Fixing
+                && self
+                    .config
+                    .fixes
+                    .contains(&ReconcileFix::UpdateManifestSizes)
             {
                 // Apply the fix conditionally on the size we observed. If
                 // retention removed this segment (or another writer changed
@@ -753,6 +882,9 @@ impl ReconcileJob {
         } else {
             ReconcileReport::default()
         };
+        // Release the single-flight guard and re-arm the mode decision so the
+        // next `run` starts a fresh pass.
+        self.release_fix_mode();
     }
 }
 
@@ -1350,6 +1482,295 @@ mod tests {
             active[0].delta > 0,
             "expected positive delta, got {}",
             active[0].delta
+        );
+
+        Ok(())
+    }
+
+    /// A fix-enabled reconcile configuration.
+    fn fix_config() -> ReconcileConfig {
+        ReconcileConfig {
+            track_files: true,
+            fixes: BTreeSet::from([ReconcileFix::UpdateManifestSizes]),
+            ..Default::default()
+        }
+    }
+
+    /// Build a catalog with a single sealed segment whose on-disk size exceeds
+    /// the size recorded in the manifest, giving a fix-enabled pass exactly one
+    /// sealed mismatch to correct. Returns the catalog, the segment's partition
+    /// and index, the original (mismatched) manifest size, and the corrected
+    /// (on-disk) size a fix should write.
+    async fn setup_sealed_size_mismatch() -> (
+        TempDir,
+        Arc<Catalog>,
+        PartitionId,
+        SegmentIndex,
+        usize,
+        usize,
+    ) {
+        let (dir, catalog) = create_test_catalog().await;
+
+        let topic_name = "broken";
+        let partition_name = "p0";
+        let topic = catalog.get_topic(topic_name).await;
+        topic
+            .extend_records(
+                partition_name,
+                &test_records(&["record1", "record2", "record3"]),
+            )
+            .await
+            .unwrap();
+        topic.commit().await.unwrap();
+        drop(topic);
+        catalog.checkpoint().await;
+
+        let topic_path = Topic::partition_root(catalog.topic_root(), topic_name);
+        if !topic_path.exists() {
+            fs::create_dir_all(&topic_path).await.unwrap();
+        }
+
+        let partition_id = PartitionId::new(topic_name, partition_name);
+        let segments: Vec<_> = catalog
+            .manifest()
+            .stream_segments(
+                &partition_id,
+                RecordIndex(0),
+                crate::data::index::Ordering::Forward,
+            )
+            .collect()
+            .await;
+        let segment = segments.first().expect("expected one segment").clone();
+        let original_size = segment.size;
+
+        let slog_name = Partition::slog_name(&partition_id);
+        let segment_file_name = format!("{}-{}", slog_name, segment.index.0);
+        let segment_file_path = topic_path.join(&segment_file_name);
+
+        // Overwrite the on-disk file with a larger one to force a mismatch.
+        let corrupted_size = original_size + 1000;
+        fs::write(&segment_file_path, vec![0u8; corrupted_size])
+            .await
+            .unwrap();
+
+        (
+            dir,
+            catalog,
+            partition_id,
+            segment.index,
+            original_size,
+            corrupted_size,
+        )
+    }
+
+    /// Two fix-enabled passes overlapping: exactly one acquires the single-flight
+    /// guard and fixes (Fixing), the other degrades to ReportOnly. The manifest
+    /// size is corrected exactly once.
+    #[test_log::test(tokio::test)]
+    async fn test_single_flight_only_one_pass_fixes() -> Result<()> {
+        let (_dir, catalog, partition_id, index, original, corrected) =
+            setup_sealed_size_mismatch().await;
+
+        // Coordinate the two passes so the loser deterministically attempts to
+        // acquire the guard while the holder still owns it.
+        let guard_held = Arc::new(tokio::sync::Notify::new());
+        let may_finish = Arc::new(tokio::sync::Notify::new());
+
+        let holder_catalog = catalog.clone();
+        let holder_guard_held = guard_held.clone();
+        let holder_may_finish = may_finish.clone();
+        let holder = tokio::spawn(async move {
+            let mut job = ReconcileJob::with_config(holder_catalog, fix_config());
+            // The first incremental step acquires the single-flight guard and
+            // starts the pass without completing it, so the guard stays held.
+            assert!(!job.run(Some(1)).await.unwrap());
+            holder_guard_held.notify_one();
+            // Hold the guard until the loser has run its full pass.
+            holder_may_finish.notified().await;
+            assert!(job.run(None).await.unwrap());
+            job.report().mode
+        });
+
+        let loser_catalog = catalog.clone();
+        let loser_guard_held = guard_held.clone();
+        let loser_may_finish = may_finish.clone();
+        let loser = tokio::spawn(async move {
+            // Only start once the holder definitely owns the guard.
+            loser_guard_held.notified().await;
+            let mut job = ReconcileJob::with_config(loser_catalog, fix_config());
+            assert!(job.run(None).await.unwrap());
+            let mode = job.report().mode;
+            loser_may_finish.notify_one();
+            mode
+        });
+
+        let holder_mode = holder.await.unwrap();
+        let loser_mode = loser.await.unwrap();
+
+        assert_eq!(holder_mode, ReconcileMode::Fixing);
+        assert_eq!(loser_mode, ReconcileMode::ReportOnly);
+
+        // The fix landed exactly once: the report-only loser never issues a CAS,
+        // so the manifest now reflects the on-disk size and nothing double-wrote.
+        let final_size = manifest_segment_size(&catalog, &partition_id, index)
+            .await
+            .expect("segment should still exist");
+        assert_eq!(final_size, corrected);
+        assert_ne!(final_size, original);
+
+        Ok(())
+    }
+
+    /// A fix-enabled pass that loses the single-flight race still scans and
+    /// reports the mismatch, but leaves the manifest untouched.
+    #[test_log::test(tokio::test)]
+    async fn test_fix_enabled_pass_demotes_to_report_only_when_guard_held() -> Result<()> {
+        let (_dir, catalog, partition_id, index, original, _corrected) =
+            setup_sealed_size_mismatch().await;
+
+        // Hold the guard directly to stand in for another fix-enabled pass.
+        let held = catalog.reconcile_fix_guard().lock_owned().await;
+
+        let mut job = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(job.run(None).await?);
+
+        let report = job.report();
+        assert_eq!(report.mode, ReconcileMode::ReportOnly);
+        assert!(
+            report.fixes_skipped(),
+            "a demoted fix pass should flag that fixes were skipped"
+        );
+        // It saw the mismatch but, having lost the race, did not fix it.
+        assert_eq!(report.sealed.size_mismatches.len(), 1);
+        let after = manifest_segment_size(&catalog, &partition_id, index)
+            .await
+            .expect("segment should still exist");
+        assert_eq!(after, original, "demoted pass must not apply the fix");
+
+        drop(held);
+        Ok(())
+    }
+
+    /// A report-only configuration never contends for the single-flight guard:
+    /// it completes even while a fix-enabled pass holds the guard, and it is not
+    /// marked as a demoted fix pass.
+    #[test_log::test(tokio::test)]
+    async fn test_report_only_pass_does_not_take_guard() -> Result<()> {
+        let (_dir, catalog, _partition_id, _index, _original, _corrected) =
+            setup_sealed_size_mismatch().await;
+
+        // Hold the guard to simulate a fix-enabled pass in flight.
+        let held = catalog.reconcile_fix_guard().lock_owned().await;
+
+        let config = ReconcileConfig {
+            track_files: true,
+            ..Default::default()
+        };
+        let mut job = ReconcileJob::with_config(catalog.clone(), config);
+        // Completes without blocking on the held guard.
+        assert!(job.run(None).await?);
+
+        let report = job.report();
+        assert_eq!(report.mode, ReconcileMode::ReportOnly);
+        assert!(
+            !report.fixes_skipped(),
+            "a configured report-only pass is not a demoted fix pass"
+        );
+        // It still scans and surfaces the sealed mismatch.
+        assert_eq!(report.sealed.size_mismatches.len(), 1);
+
+        drop(held);
+        Ok(())
+    }
+
+    /// After a fix-enabled pass completes it releases the guard, so a subsequent
+    /// fix-enabled pass acquires it and runs in Fixing mode.
+    #[test_log::test(tokio::test)]
+    async fn test_single_flight_releases_on_completion() -> Result<()> {
+        let (_dir, catalog, partition_id, index, _original, corrected) =
+            setup_sealed_size_mismatch().await;
+
+        let mut first = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(first.run(None).await?);
+        assert_eq!(first.report().mode, ReconcileMode::Fixing);
+
+        // The guard is released on completion, so the next fix pass can fix too.
+        let mut second = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(second.run(None).await?);
+        assert_eq!(second.report().mode, ReconcileMode::Fixing);
+
+        let final_size = manifest_segment_size(&catalog, &partition_id, index)
+            .await
+            .expect("segment should still exist");
+        assert_eq!(final_size, corrected);
+
+        Ok(())
+    }
+
+    /// `reset` releases the guard so the same job can start a fresh pass that
+    /// re-acquires it.
+    #[test_log::test(tokio::test)]
+    async fn test_reset_releases_guard() -> Result<()> {
+        let (_dir, catalog, _partition_id, _index, _original, _corrected) =
+            setup_sealed_size_mismatch().await;
+
+        let mut job = ReconcileJob::with_config(catalog.clone(), fix_config());
+        // Start a pass (acquires the guard) without completing it.
+        assert!(!job.run(Some(1)).await?);
+        assert_eq!(job.report().mode, ReconcileMode::Fixing);
+
+        // While the job still holds the guard, a competing fix pass is demoted.
+        {
+            let mut other = ReconcileJob::with_config(catalog.clone(), fix_config());
+            assert!(other.run(None).await?);
+            assert_eq!(other.report().mode, ReconcileMode::ReportOnly);
+        }
+
+        // Resetting releases the guard, so a competing pass can now acquire it.
+        job.reset().await;
+        let mut other = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(other.run(None).await?);
+        assert_eq!(other.report().mode, ReconcileMode::Fixing);
+
+        Ok(())
+    }
+
+    /// An error partway through a fix-enabled pass still releases the
+    /// single-flight guard, so a failed pass never wedges single-flight. The
+    /// `run` loop has many possible error exits; this exercises one of them.
+    #[test_log::test(tokio::test)]
+    async fn test_guard_released_on_error() -> Result<()> {
+        let (_dir, catalog) = create_test_catalog().await;
+
+        let topic_name = "broken-dir";
+        let partition_name = "p0";
+        let topic = catalog.get_topic(topic_name).await;
+        topic
+            .extend_records(partition_name, &test_records(&["a", "b", "c"]))
+            .await?;
+        topic.commit().await?;
+        drop(topic);
+        catalog.checkpoint().await;
+
+        // Replace the topic directory with a regular file so the orphan-detection
+        // phase's `read_dir` fails, forcing the pass to error mid-flight. The
+        // topic is already cached in the catalog, so the pass never tries to
+        // re-open it from disk.
+        let topic_path = Topic::partition_root(catalog.topic_root(), topic_name);
+        fs::remove_dir_all(&topic_path).await?;
+        fs::write(&topic_path, b"not a directory").await?;
+
+        let mut job = ReconcileJob::with_config(catalog.clone(), fix_config());
+        assert!(
+            job.run(None).await.is_err(),
+            "pass should error when reading the topic directory"
+        );
+
+        // The guard must have been released despite the error, so a fresh
+        // fix-enabled actor can acquire it.
+        assert!(
+            catalog.reconcile_fix_guard().try_lock_owned().is_ok(),
+            "single-flight guard must be released after an errored fix pass"
         );
 
         Ok(())

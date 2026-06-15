@@ -86,11 +86,15 @@ pub async fn task_from_catalog_config(
         );
         let mut reconciler =
             catalog::ReconcileJob::with_config(catalog.clone(), reconcile_config.clone());
+        let publish_catalog = catalog.clone();
 
         tokio::spawn(async move {
-            // Run reconciliation once and exit
+            // Run reconciliation once and publish the result so /info can read
+            // the latest snapshot. The continuous loop comes later; for now this
+            // single completed pass becomes queryable.
             match reconciler.run(None).await {
                 Ok(_) => {
+                    publish_catalog.publish_reconcile_report(Arc::new(reconciler.report().clone()));
                     tracing::info!("reconciliation completed successfully");
                 }
                 Err(e) => {
