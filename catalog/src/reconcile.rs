@@ -480,7 +480,10 @@ impl ReconcileJob {
                         mode = ?report.mode,
                         "reconcile pass complete"
                     );
-                    gauge!("reconcile_last_pass_ms").set(elapsed.as_millis() as f64);
+                    // Record the pass duration in seconds (Duration's IntoF64
+                    // impl), matching the prometheus/openmetrics convention of
+                    // unitless-second gauges and preserving sub-second precision.
+                    gauge!("reconcile_last_pass").set(elapsed);
                     catalog.publish_reconcile_report(Arc::new(report));
                 }
                 Err(e) => {
@@ -2014,8 +2017,8 @@ mod tests {
             // The first pass completes promptly.
             rx.changed().await.unwrap();
             assert!(rx.borrow_and_update().is_some());
-            // The next pass must be gated by the 30s interval, so it does not
-            // publish within a short window.
+            // The second pass is gated by the 30s `pass_interval`, so it must
+            // not publish within a 300ms observation window (well short of 30s).
             let second = tokio::time::timeout(Duration::from_millis(300), rx.changed()).await;
             assert!(
                 second.is_err(),
