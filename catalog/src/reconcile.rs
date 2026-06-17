@@ -20,9 +20,11 @@ use tokio::sync::OwnedMutexGuard;
 use crate::data::segment::Segment;
 use anyhow::Result;
 use bytesize::ByteSize;
+use chrono::{DateTime, Utc};
 use futures::stream::StreamExt;
+use metrics::gauge;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::catalog::Catalog;
 use crate::data::RecordIndex;
@@ -41,7 +43,7 @@ fn is_sealed(sealed_ix: Option<SegmentIndex>, index: SegmentIndex) -> bool {
 }
 
 /// Configuration for the reconciliation job
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ReconcileConfig {
     /// Maximum units of work to process in a single run
@@ -55,6 +57,37 @@ pub struct ReconcileConfig {
     /// Set of fixes to apply during reconciliation
     #[serde(default)]
     pub fixes: BTreeSet<ReconcileFix>,
+    /// Delay between *completed* reconciliation passes in the continuous loop
+    /// ([ReconcileJob::run_loop]). `idle_ratio` paces work *within* a pass; this
+    /// paces the gap *between* passes so a healthy system reconciles
+    /// periodically rather than busy-looping. `None` runs passes back-to-back
+    /// (still paced by `idle_ratio`). Defaults to a few minutes.
+    #[serde(
+        default = "ReconcileConfig::default_pass_interval",
+        with = "humantime_serde"
+    )]
+    pub pass_interval: Option<Duration>,
+}
+
+impl Default for ReconcileConfig {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            idle_ratio: 0.0,
+            track_files: false,
+            fixes: BTreeSet::new(),
+            pass_interval: Self::default_pass_interval(),
+        }
+    }
+}
+
+impl ReconcileConfig {
+    /// Default gap between completed reconciliation passes. A few minutes keeps
+    /// the system's consistency view fresh without spending the box's IO budget
+    /// re-scanning back-to-back.
+    fn default_pass_interval() -> Option<Duration> {
+        Some(Duration::from_secs(300))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -292,6 +325,12 @@ pub struct ReconcileReport {
     /// because another fix-enabled pass already held the single-flight guard.
     /// `None` for passes that ran as configured (whether fixing or report-only).
     pub fixes_skipped_reason: Option<String>,
+    /// Wall-clock time the pass that produced this report completed. Stamped by
+    /// the continuous loop ([ReconcileJob::run_loop]) just before publishing, so
+    /// operators can tell from `/info` how fresh the consistency view is. `None`
+    /// on reports that were never published through the loop (e.g. a report read
+    /// directly off a [ReconcileJob] mid-pass, or constructed in tests).
+    pub last_pass_completed_at: Option<DateTime<Utc>>,
 }
 
 impl ReconcileReport {
@@ -401,6 +440,69 @@ impl ReconcileJob {
         }
 
         result
+    }
+
+    /// Run reconciliation continuously, one pass after another, until this
+    /// future is dropped. Cancellation is by drop: on server shutdown the
+    /// `select_all` race in the server task drops this future at its next await
+    /// point, releasing any single-flight guard held by the in-flight pass. The
+    /// loop therefore takes no explicit stop signal.
+    ///
+    /// Each completed pass publishes its report to the catalog (so `/info` reads
+    /// the freshest view) and stamps [ReconcileReport::last_pass_completed_at].
+    /// A single [ReconcileJob] is reused across passes via [Self::reset], which
+    /// re-arms the single-flight decision so each pass scans the catalog afresh.
+    ///
+    /// A pass that returns `Err` is logged at error level and does *not*
+    /// terminate the loop — the next pass simply starts after `pass_interval`.
+    /// Reconcile errors are rare but must never wedge this long-running task.
+    pub async fn run_loop(catalog: Arc<Catalog>, config: ReconcileConfig) {
+        let pass_interval = config.pass_interval;
+        let mut job = Self::with_config(catalog.clone(), config);
+
+        loop {
+            let started = Instant::now();
+            debug!("reconcile pass starting");
+            match job.run(None).await {
+                Ok(_) => {
+                    let elapsed = started.elapsed();
+                    // Stamp completion time on the published report so freshness
+                    // is observable from /info and tests.
+                    let mut report = job.report().clone();
+                    report.last_pass_completed_at = Some(Utc::now());
+                    info!(
+                        elapsed_ms = elapsed.as_millis(),
+                        files_checked = report.sealed.files_checked.len(),
+                        size_mismatches = report.sealed.size_mismatches.len(),
+                        missing_files = report.sealed.missing_files.len(),
+                        untracked_files = report.sealed.untracked_files.len(),
+                        active_segments = report.active.len(),
+                        mode = ?report.mode,
+                        "reconcile pass complete"
+                    );
+                    // Record the pass duration in seconds (Duration's IntoF64
+                    // impl), matching the prometheus/openmetrics convention of
+                    // unitless-second gauges and preserving sub-second precision.
+                    gauge!("reconcile_last_pass").set(elapsed);
+                    catalog.publish_reconcile_report(Arc::new(report));
+                }
+                Err(e) => {
+                    // Swallow the error and keep the loop alive; a transient
+                    // failure on one pass must not stop reconciliation forever.
+                    error!("reconcile pass failed, continuing loop: {e:?}");
+                }
+            }
+
+            // Re-arm for a fresh pass (also releases the single-flight guard if
+            // the completed pass held it).
+            job.reset().await;
+
+            // Pace between completed passes. `idle_ratio` already paces within a
+            // pass; this is the gap before the next one starts.
+            if let Some(interval) = pass_interval {
+                tokio::time::sleep(interval).await;
+            }
+        }
     }
 
     /// Drive incremental units of work up to the effective limit, returning
@@ -1772,6 +1874,166 @@ mod tests {
             catalog.reconcile_fix_guard().try_lock_owned().is_ok(),
             "single-flight guard must be released after an errored fix pass"
         );
+
+        Ok(())
+    }
+
+    /// Seed a catalog with a single committed partition and flush it to disk so
+    /// reconciliation passes have real work to do.
+    async fn seed_catalog(catalog: &Catalog, topic_name: &str, partition_name: &str) {
+        let topic = catalog.get_topic(topic_name).await;
+        topic
+            .extend_records(partition_name, &test_records(&["a", "b", "c"]))
+            .await
+            .unwrap();
+        topic.commit().await.unwrap();
+        drop(topic);
+        catalog.checkpoint().await;
+    }
+
+    /// The continuous loop runs passes back-to-back: with a short `pass_interval`
+    /// the ArcSwap-published snapshot advances at least twice within a bounded
+    /// time. Cancellation is by dropping the loop future (here via `select!`).
+    #[test_log::test(tokio::test)]
+    async fn test_loop_runs_multiple_passes() -> Result<()> {
+        let (_tmp, catalog) = create_test_catalog().await;
+        seed_catalog(&catalog, "t", "p").await;
+
+        let config = ReconcileConfig {
+            track_files: true,
+            pass_interval: Some(Duration::from_millis(1)),
+            ..Default::default()
+        };
+
+        let mut rx = catalog.subscribe_reconcile_report();
+        let observe = async {
+            rx.changed().await.unwrap();
+            let first = rx
+                .borrow_and_update()
+                .clone()
+                .expect("first report published");
+            rx.changed().await.unwrap();
+            let second = rx
+                .borrow_and_update()
+                .clone()
+                .expect("second report published");
+            (first, second)
+        };
+
+        let (first, second) = tokio::select! {
+            _ = ReconcileJob::run_loop(catalog.clone(), config) => {
+                unreachable!("the loop runs until dropped")
+            }
+            out = tokio::time::timeout(Duration::from_secs(5), observe) => {
+                out.expect("two passes should complete within 5s")
+            }
+        };
+
+        // Each completed pass stamps its completion time and is a distinct
+        // publication.
+        assert!(first.last_pass_completed_at.is_some());
+        assert!(second.last_pass_completed_at.is_some());
+        assert!(
+            !Arc::ptr_eq(&first, &second),
+            "each pass should publish a fresh report"
+        );
+
+        Ok(())
+    }
+
+    /// An error inside a pass is logged and swallowed: the loop keeps going and
+    /// publishes a successful pass once the underlying problem is cleared.
+    #[test_log::test(tokio::test)]
+    async fn test_loop_survives_pass_error() -> Result<()> {
+        let (_tmp, catalog) = create_test_catalog().await;
+        let topic_name = "broken-loop";
+        let partition_name = "p0";
+        seed_catalog(&catalog, topic_name, partition_name).await;
+
+        // Replace the topic directory with a regular file so the orphan-detection
+        // `read_dir` fails and every pass errors until we repair it.
+        let topic_path = Topic::partition_root(catalog.topic_root(), topic_name);
+        fs::remove_dir_all(&topic_path).await?;
+        fs::write(&topic_path, b"not a directory").await?;
+
+        let config = ReconcileConfig {
+            track_files: true,
+            pass_interval: Some(Duration::from_millis(10)),
+            ..Default::default()
+        };
+
+        let mut rx = catalog.subscribe_reconcile_report();
+        let observe = async {
+            // Let the loop attempt (and fail) at least one pass. No report can be
+            // published while the directory is broken.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                rx.borrow_and_update().is_none(),
+                "no pass should complete while the topic directory is broken"
+            );
+
+            // Repair the directory; subsequent passes succeed.
+            fs::remove_file(&topic_path).await.unwrap();
+            fs::create_dir_all(&topic_path).await.unwrap();
+
+            // The loop must have survived the errors and now publishes a pass.
+            rx.changed().await.unwrap();
+            rx.borrow_and_update()
+                .clone()
+                .expect("a report after recovery")
+        };
+
+        let report = tokio::select! {
+            _ = ReconcileJob::run_loop(catalog.clone(), config) => {
+                unreachable!("the loop runs until dropped")
+            }
+            out = tokio::time::timeout(Duration::from_secs(5), observe) => {
+                out.expect("the loop should recover within 5s")
+            }
+        };
+
+        assert!(report.last_pass_completed_at.is_some());
+
+        Ok(())
+    }
+
+    /// `pass_interval` gates the gap between passes: with a long interval the
+    /// second pass does not start until the delay elapses, even though
+    /// `idle_ratio` is zero (no within-pass pacing).
+    #[test_log::test(tokio::test)]
+    async fn test_pass_interval_gates_next_pass() -> Result<()> {
+        let (_tmp, catalog) = create_test_catalog().await;
+        seed_catalog(&catalog, "t", "p").await;
+
+        let config = ReconcileConfig {
+            track_files: true,
+            idle_ratio: 0.0,
+            pass_interval: Some(Duration::from_secs(30)),
+            ..Default::default()
+        };
+
+        let mut rx = catalog.subscribe_reconcile_report();
+        let observe = async {
+            // The first pass completes promptly.
+            rx.changed().await.unwrap();
+            assert!(rx.borrow_and_update().is_some());
+            // The second pass is gated by the 30s `pass_interval`, so it must
+            // not publish within a 300ms observation window (well short of 30s).
+            let second = tokio::time::timeout(Duration::from_millis(300), rx.changed()).await;
+            assert!(
+                second.is_err(),
+                "second pass must wait for pass_interval before starting"
+            );
+        };
+
+        tokio::select! {
+            _ = ReconcileJob::run_loop(catalog.clone(), config) => {
+                unreachable!("the loop runs until dropped")
+            }
+            out = tokio::time::timeout(Duration::from_secs(5), observe) => {
+                out.expect("the first pass should complete within 5s")
+            }
+        }
 
         Ok(())
     }

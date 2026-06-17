@@ -1215,3 +1215,138 @@ async fn info_not_racy_with_reconcile() -> Result<()> {
     reconcile.await??;
     Ok(())
 }
+
+/// Repeatedly hit `/info` until `pred` holds, returning the matching response.
+/// Panics if the condition is not reached within a bounded time.
+async fn poll_info_until<F>(client: &Client, url: &str, mut pred: F) -> json::Value
+where
+    F: FnMut(&json::Value) -> bool,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(info) = get_json(client, url).await {
+                if pred(&info) {
+                    return info;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("/info did not reach the expected state within 10s")
+}
+
+/// The continuous reconciliation loop keeps `/info` current: a pass reports a
+/// freshly-introduced orphan, and once the orphan is removed a later pass
+/// reports the partition clean. `/info` always reflects the most recent pass,
+/// including an advancing completion timestamp.
+#[test_log::test(tokio::test)]
+async fn info_reflects_latest_reconcile_pass() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+
+    // Write and flush a partition so its topic directory exists on disk.
+    repeat_append(
+        &client,
+        append_url(&server, &topic_name, PARTITION_NAME).as_str(),
+        TEST_MESSAGE,
+        5,
+    )
+    .await;
+    server.catalog.checkpoint().await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Drop an orphan file into the topic directory so the next pass flags it.
+    let topic_dir = server.catalog.topic_root().join(&topic_name);
+    let orphan = topic_dir.join("orphan-reconcile-loop");
+    std::fs::write(&orphan, b"orphan").unwrap();
+
+    // Run the continuous loop against this catalog: report-only, fast passes.
+    let loop_handle = tokio::spawn(catalog::ReconcileJob::run_loop(
+        server.catalog.clone(),
+        catalog::ReconcileConfig {
+            track_files: true,
+            pass_interval: Some(Duration::from_millis(10)),
+            ..Default::default()
+        },
+    ));
+
+    // A pass reports the orphan; /info reflects it and stamps a completion time.
+    let dirty = poll_info_until(&client, &info_url(&server), |info| {
+        info["pending"] == json::json!(false)
+            && info["retention_stats"]["untracked_files"].as_u64() == Some(1)
+    })
+    .await;
+    let first_ts = dirty["last_reconcile_pass_completed_at"].clone();
+    assert!(
+        first_ts.is_string(),
+        "a completed pass must stamp a completion timestamp"
+    );
+
+    // Clear the underlying issue; a strictly newer pass must report it clean.
+    std::fs::remove_file(&orphan).unwrap();
+    let clean = poll_info_until(&client, &info_url(&server), |info| {
+        info["retention_stats"]["untracked_files"].as_u64() == Some(0)
+            && info["last_reconcile_pass_completed_at"].is_string()
+            && info["last_reconcile_pass_completed_at"] != first_ts
+    })
+    .await;
+    assert_ne!(
+        clean["last_reconcile_pass_completed_at"], first_ts,
+        "/info must reflect a newer reconcile pass"
+    );
+
+    loop_handle.abort();
+    Ok(())
+}
+
+/// The reconciliation loop joins the server's shutdown race: when the stop
+/// signal fires, the loop is dropped and the server task returns a clean close
+/// within a bounded time (no hang, no panic).
+#[test_log::test(tokio::test)]
+async fn reconcile_loop_cancels_on_shutdown() -> Result<()> {
+    use plateau::Catalog;
+
+    let temp = tempfile::tempdir()?;
+    let config = PlateauConfig {
+        data_path: temp.path().to_path_buf(),
+        http: http::Config::localhost(),
+        reconcile: Some(catalog::ReconcileConfig {
+            track_files: true,
+            pass_interval: Some(Duration::from_millis(10)),
+            ..Default::default()
+        }),
+        ..PlateauConfig::default()
+    };
+
+    let catalog =
+        Arc::new(Catalog::attach(config.data_path.clone(), config.catalog.clone()).await?);
+
+    // Watch pass completions without retaining a Catalog Arc: the receiver is
+    // independent of the catalog handle, so `close_arc` can still unwrap the
+    // last reference during shutdown.
+    let mut report_rx = catalog.subscribe_reconcile_report();
+
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let stop = Box::pin(async move {
+        let _ = stop_rx.await;
+    });
+    let task = tokio::spawn(plateau::task_from_catalog_config(catalog, config, stop));
+
+    // Let the loop complete at least one pass so it is genuinely running.
+    tokio::time::timeout(Duration::from_secs(5), report_rx.changed())
+        .await
+        .expect("a reconcile pass should complete before shutdown")?;
+
+    // Trigger shutdown: the loop future is dropped by the select_all race.
+    stop_tx.send(()).unwrap();
+
+    let clean = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("server task must shut down within 5s")?;
+    assert!(
+        clean,
+        "catalog should close cleanly after the loop is cancelled"
+    );
+
+    Ok(())
+}

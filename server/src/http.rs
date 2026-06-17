@@ -543,37 +543,44 @@ async fn get_info(
     // into the catalog on completion; here we take a lock-free snapshot so the
     // response never blocks on an in-flight pass. If no pass has completed yet,
     // return a pending placeholder with zeroed stats.
-    let (retention_stats, active_segments, pending) = match catalog.latest_reconcile_report() {
-        Some(report) => {
-            let sealed = &report.sealed;
-            let retention_stats = ReconcileStats {
-                files_checked: sealed.files_checked.len(),
-                untracked_files: sealed.untracked_files.len(),
-                size_mismatches: sealed.size_mismatches.len(),
-                missing_files: sealed.missing_files.len(),
-                expected_size: sealed.expected_size.as_u64() as usize,
-                actual_size: sealed.actual_size.as_u64() as usize,
-            };
-            let active_segments = report
-                .active
-                .iter()
-                .map(|a| ActiveSegmentReport {
-                    topic: a.topic.clone(),
-                    partition: a.partition.clone(),
-                    manifest_size: a.manifest_size,
-                    disk_size: a.disk_size,
-                    delta: a.delta,
-                })
-                .collect();
-            (retention_stats, active_segments, false)
-        }
-        None => (ReconcileStats::default(), Vec::new(), true),
-    };
+    let (retention_stats, active_segments, last_reconcile_pass_completed_at, pending) =
+        match catalog.latest_reconcile_report() {
+            Some(report) => {
+                let sealed = &report.sealed;
+                let retention_stats = ReconcileStats {
+                    files_checked: sealed.files_checked.len(),
+                    untracked_files: sealed.untracked_files.len(),
+                    size_mismatches: sealed.size_mismatches.len(),
+                    missing_files: sealed.missing_files.len(),
+                    expected_size: sealed.expected_size.as_u64() as usize,
+                    actual_size: sealed.actual_size.as_u64() as usize,
+                };
+                let active_segments = report
+                    .active
+                    .iter()
+                    .map(|a| ActiveSegmentReport {
+                        topic: a.topic.clone(),
+                        partition: a.partition.clone(),
+                        manifest_size: a.manifest_size,
+                        disk_size: a.disk_size,
+                        delta: a.delta,
+                    })
+                    .collect();
+                (
+                    retention_stats,
+                    active_segments,
+                    report.last_pass_completed_at,
+                    false,
+                )
+            }
+            None => (ReconcileStats::default(), Vec::new(), None, true),
+        };
 
     Ok(Response::ok(InfoResponse {
         topics,
         retention_stats,
         active_segments,
+        last_reconcile_pass_completed_at,
         pending,
     }))
 }
