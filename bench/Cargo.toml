@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 humantime-serde = "1"
 
@@ -38,3 +39,6 @@ plateau-client = { workspace = true, features = ["health"] }
 
 [[bin]]
 name = "cv"
+
+[[bin]]
+name = "load"

@@ -524,6 +524,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "async-trait",
+ "clap",
  "futures",
  "hdrhistogram",
  "humantime-serde",

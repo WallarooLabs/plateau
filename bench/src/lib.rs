@@ -80,19 +80,9 @@ pub trait TaskBuilder {
 
 pub type WorkerTask = Box<dyn TaskBuilder>;
 
-pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) {
-    let path = Path::new("./data");
-    if !path.exists() {
-        fs::create_dir(path).unwrap();
-    }
-
-    let (tx_exit, rx_exit) = tokio::sync::oneshot::channel();
-    let exit = rx_exit.map(|_| ()).boxed();
-    let config = PlateauConfig::default();
-    let plateau_server = tokio::spawn(plateau_server::task_from_config(config, exit));
-
+pub async fn run_external(url: &str, mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) {
     let config = Config {
-        client: Client::new("http://localhost:3030").unwrap(),
+        client: Client::new(url).unwrap(),
     };
 
     config
@@ -101,6 +91,13 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
         .await
         .unwrap();
 
+    let strings = run_tasks(&config, &mut tasks, test_duration).await;
+    for up in strings {
+        info!("{}", up);
+    }
+}
+
+async fn run_tasks(config: &Config, tasks: &mut Vec<Box<dyn TaskBuilder>>, test_duration: Duration) -> Vec<String> {
     let mut rng = rand::thread_rng();
     let seed = rng.next_u64();
     debug!("seed: {}", seed);
@@ -113,7 +110,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
     let mut updates = vec![];
     let mut fins = vec![];
     let mut r = Random::new();
-    for builder in tasks {
+    for builder in tasks.iter() {
         let worker_config = builder.config();
         let group = worker_config.stats_group.clone();
         let (stats, _) = stat_groups
@@ -207,6 +204,32 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
         let value = handle.await.unwrap();
         debug!("{}: {}", name, value);
     }
+
+    strings
+}
+
+pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) {
+    let path = Path::new("./data");
+    if !path.exists() {
+        fs::create_dir(path).unwrap();
+    }
+
+    let (tx_exit, rx_exit) = tokio::sync::oneshot::channel();
+    let exit = rx_exit.map(|_| ()).boxed();
+    let config = PlateauConfig::default();
+    let plateau_server = tokio::spawn(plateau_server::task_from_config(config, exit));
+
+    let config = Config {
+        client: Client::new("http://localhost:3030").unwrap(),
+    };
+
+    config
+        .client
+        .healthy(Duration::from_secs(10), Duration::from_millis(10))
+        .await
+        .unwrap();
+
+    let strings = run_tasks(&config, &mut tasks, test_duration).await;
 
     let start = Instant::now();
     info!("shutting down plateau");
