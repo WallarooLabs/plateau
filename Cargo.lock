@@ -527,6 +527,7 @@ dependencies = [
  "clap",
  "futures",
  "hdrhistogram",
+ "humantime",
  "humantime-serde",
  "plateau-client",
  "plateau-server",
@@ -538,6 +539,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "toml 0.8.12",
  "tracing",
  "tracing-subscriber",
 ]

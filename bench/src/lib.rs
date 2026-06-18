@@ -15,6 +15,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, trace};
 
+pub mod batch;
 pub mod load;
 pub mod read;
 pub mod status;
