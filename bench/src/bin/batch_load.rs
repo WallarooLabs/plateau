@@ -5,36 +5,27 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 use bench::batch::{run_batch, BatchConfig};
 
-/// Batch-oriented load generator for an existing Plateau server.
+/// Batch-job load generator for an existing Plateau server.
 ///
-/// Simulates staggered batch jobs: each topic has its own schema, each
-/// partition fires on a fixed schedule with an evenly-spread stagger offset.
-/// A state file records the last completed batch per partition; on restart
-/// the tool catches up any missed batches immediately before resuming the
-/// normal schedule.
-///
-/// Per-topic settings (partitions, rows, batch_interval) live on each topic.
-/// A [defaults] table supplies fallbacks for any topic that omits them.
+/// Generates a pool of topics with synthetic schemas (random column counts and
+/// types), then simulates staggered batch jobs over a sliding active window.
+/// A state file and a directory of Arrow schema files are written on first run
+/// so the tool can be safely stopped and restarted.
 ///
 /// Example config (batch-config.toml):
 ///
-///   speed = 60.0          # 1h batches fire every 1 minute
+///   speed = 60.0            # compress time: 1h intervals fire every 1 minute
+///   schemas_dir = "batch-schemas"
 ///
-///   [defaults]
+///   [topics]
+///   count = 200             # total topic pool
+///   active = 8              # topics writing at once
+///   rotation_interval = "1h"  # how often the active window advances
+///   columns_min = 3         # min data columns per topic (excludes `time`)
+///   columns_max = 35        # max data columns per topic (exclusive)
+///   batch_interval = "1h"  # real-world interval between batches per partition
 ///   partitions = 4
 ///   rows = 10000
-///   batch_interval = "1h"
-///
-///   [[topics]]
-///   name = "transactions"
-///   sample = "samples/list-ccfraud.arrow"
-///   batch_interval = "15m"   # this job runs more often
-///
-///   [[topics]]
-///   name = "images"
-///   sample = "samples/image_224x224.arrow"
-///   partitions = 2
-///   rows = 50
 #[derive(Parser)]
 #[command(about, verbatim_doc_comment)]
 struct Args {
@@ -42,7 +33,7 @@ struct Args {
     #[arg(long, default_value = "batch-config.toml")]
     config: PathBuf,
 
-    /// Plateau server URL (overrides nothing in config; config has no URL field).
+    /// Plateau server URL.
     #[arg(long, default_value = "http://localhost:3030")]
     url: String,
 

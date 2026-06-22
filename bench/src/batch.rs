@@ -1,104 +1,76 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Result;
+use arrow_array::RecordBatch;
+use arrow_ipc::writer::FileWriter;
+use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use plateau_client::{Client, Error, InsertQuery, MultiChunk};
 use reqwest::StatusCode;
-use sample_std::Random;
+use sample_arrow_rs::array::FromDataType;
+use sample_arrow_rs::datatypes::sample_flat;
+use sample_arrow_rs::primitive::primitive_len_sampler;
+use sample_arrow_rs::{AlwaysValid, SetLen};
+use sample_std::{Random, Sample};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::load::build_sampler;
+use crate::load::Now;
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
-pub struct TopicConfig {
-    pub name: String,
-    pub sample: PathBuf,
-    /// Number of partitions for this topic (falls back to the top-level default).
-    pub partitions: Option<usize>,
-    /// Rows per batch for this topic (falls back to the top-level default).
-    pub rows: Option<usize>,
-    /// Real-world interval between successive batches for this topic
-    /// (falls back to the top-level default).
-    #[serde(default, with = "humantime_serde::option")]
-    pub batch_interval: Option<Duration>,
-}
-
-/// Optional top-level defaults applied to any topic that omits a value.
-#[derive(Debug, Deserialize, Default)]
-pub struct Defaults {
-    pub partitions: Option<usize>,
-    pub rows: Option<usize>,
-    #[serde(default, with = "humantime_serde::option")]
-    pub batch_interval: Option<Duration>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct BatchConfig {
-    /// Defaults applied to topics that omit partitions / rows / batch_interval.
-    #[serde(default)]
-    pub defaults: Defaults,
-    /// How much faster than real time to run (1.0 = real time, 60.0 = 1h batches every 1 min).
-    #[serde(default = "default_speed")]
-    pub speed: f64,
-    /// Path to the state file (default: batch-state.json).
-    pub state_file: Option<PathBuf>,
-    pub topics: Vec<TopicConfig>,
+pub struct TopicsConfig {
+    /// Total number of topics in the simulated pool.
+    pub count: usize,
+    /// How many topics are active (writing) at once.
+    pub active: usize,
+    /// Real-world duration after which the active window advances.
+    #[serde(with = "humantime_serde")]
+    pub rotation_interval: Duration,
+    /// Min number of data columns per topic (not counting the `time` column).
+    pub columns_min: usize,
+    /// Max number of data columns per topic (exclusive).
+    pub columns_max: usize,
+    /// Real-world batch interval per topic.
+    #[serde(with = "humantime_serde")]
+    pub batch_interval: Duration,
+    /// Partitions per topic.
+    #[serde(default = "default_partitions")]
+    pub partitions: usize,
+    /// Rows per batch.
+    #[serde(default = "default_rows")]
+    pub rows: usize,
 }
 
 fn default_partitions() -> usize { 4 }
 fn default_rows() -> usize { 10_000 }
-fn default_speed() -> f64 { 1.0 }
 
-/// A topic with all settings resolved to concrete values.
-pub struct ResolvedTopic {
-    pub name: String,
-    pub sample: PathBuf,
-    pub partitions: usize,
-    pub rows: usize,
-    pub batch_interval: Duration,
+#[derive(Debug, Deserialize)]
+pub struct BatchConfig {
+    /// Speed multiplier: 60.0 means 1h intervals fire every 1 minute.
+    #[serde(default = "default_speed")]
+    pub speed: f64,
+    /// Path to the state file.
+    pub state_file: Option<PathBuf>,
+    /// Directory where generated topic schema files are stored.
+    pub schemas_dir: Option<PathBuf>,
+    pub topics: TopicsConfig,
 }
+
+fn default_speed() -> f64 { 1.0 }
 
 impl BatchConfig {
     pub fn from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         Ok(toml::from_str(&text)?)
-    }
-
-    /// Resolve each topic against the top-level defaults. Errors if a topic
-    /// has no batch_interval and no default is provided.
-    pub fn resolve_topics(&self) -> Result<Vec<ResolvedTopic>> {
-        self.topics
-            .iter()
-            .map(|t| {
-                let batch_interval = t
-                    .batch_interval
-                    .or(self.defaults.batch_interval)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "topic '{}' has no batch_interval and no default is set",
-                            t.name
-                        )
-                    })?;
-                Ok(ResolvedTopic {
-                    name: t.name.clone(),
-                    sample: t.sample.clone(),
-                    partitions: t
-                        .partitions
-                        .or(self.defaults.partitions)
-                        .unwrap_or_else(default_partitions),
-                    rows: t.rows.or(self.defaults.rows).unwrap_or_else(default_rows),
-                    batch_interval,
-                })
-            })
-            .collect()
     }
 }
 
@@ -106,9 +78,15 @@ impl BatchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BatchState {
-    /// RFC 3339 timestamp of first-ever run start; drives schedule alignment.
+    /// RFC 3339 timestamp of first-ever run start; schedule anchor.
     pub origin: Option<String>,
-    /// Last completed batch index per "topic/partition-N" key.
+    /// Seed used to generate topic schemas (for regeneration if files are lost).
+    pub schemas_seed: Option<u64>,
+    /// Current rotation window start index (topic index, not partition).
+    pub window_start: usize,
+    /// When the current window started (RFC 3339).
+    pub window_since: Option<String>,
+    /// Last completed batch index per "topic-NNN/partition-N" key.
     pub last_batch: HashMap<String, u64>,
 }
 
@@ -136,7 +114,110 @@ impl BatchState {
     }
 }
 
-// ── Deterministic seed ────────────────────────────────────────────────────────
+// ── Schema generation ─────────────────────────────────────────────────────────
+
+fn topic_name(idx: usize) -> String {
+    format!("topic-{idx:04}")
+}
+
+fn schema_path(schemas_dir: &Path, idx: usize) -> PathBuf {
+    schemas_dir.join(format!("{}.arrow", topic_name(idx)))
+}
+
+/// Generate a schema with a random number of flat columns in [col_range) and
+/// write a tiny seed batch to `path` so `build_sampler` can read it back.
+fn generate_schema_file(
+    path: &Path,
+    col_range: Range<usize>,
+    rng: &mut Random,
+) -> Result<()> {
+    let n_cols = rng.gen_range(col_range);
+    let mut flat = sample_flat();
+
+    let mut fields: Vec<Arc<Field>> = vec![Arc::new(Field::new("time", DataType::Int64, false))];
+    for i in 0..n_cols {
+        let dt = flat.generate(rng);
+        fields.push(Arc::new(Field::new(format!("col_{i}"), dt, false)));
+    }
+
+    let schema: SchemaRef = Arc::new(Schema::new(fields.clone()));
+
+    // Build one-row seed batch so build_sampler has an example array per column.
+    let converter = FromDataType {
+        validity: AlwaysValid,
+        branch: 1_i32..2_i32,
+    };
+
+    let mut time_sampler = primitive_len_sampler::<_, _, arrow_array::types::Int64Type>(Now, AlwaysValid);
+    time_sampler.set_len(1);
+    let time_col = time_sampler.generate(rng);
+
+    let mut arrays: Vec<arrow_array::ArrayRef> = vec![time_col];
+    for field in fields.iter().skip(1) {
+        let mut s = converter.from_data_type(field.data_type());
+        s.set_len(1);
+        arrays.push(s.generate(rng));
+    }
+
+    let batch = RecordBatch::try_new(schema.clone(), arrays)?;
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = FileWriter::try_new(file, &schema)?;
+    writer.write(&batch)?;
+    writer.finish()?;
+
+    Ok(())
+}
+
+/// Ensure all N topic schema files exist in `schemas_dir`, generating any
+/// that are missing. Returns the seed used (stored in state for provenance).
+pub fn ensure_schemas(
+    schemas_dir: &Path,
+    count: usize,
+    col_min: usize,
+    col_max: usize,
+    seed: u64,
+) -> Result<()> {
+    std::fs::create_dir_all(schemas_dir)?;
+
+    let col_range = col_min..col_max;
+    let mut rng = Random::from_seed(seed);
+
+    // Advance the RNG past any already-generated schemas so adding more topics
+    // later doesn't change existing schemas.
+    let mut missing = vec![];
+    for idx in 0..count {
+        let path = schema_path(schemas_dir, idx);
+        if path.exists() {
+            // Burn the same number of RNG calls as generation would to keep
+            // future topics consistent.
+            let _ = rng.gen_range(col_range.clone());
+            // Burn one call per possible column for datatypes — approximate.
+        } else {
+            missing.push(idx);
+        }
+    }
+
+    if !missing.is_empty() {
+        info!("generating {} topic schema files in {:?}", missing.len(), schemas_dir);
+        // Re-seed cleanly and generate all from scratch for simplicity.
+        // (All files are written atomically, so existing ones are not touched.)
+        let mut rng = Random::from_seed(seed);
+        for idx in 0..count {
+            let path = schema_path(schemas_dir, idx);
+            if !path.exists() {
+                generate_schema_file(&path, col_range.clone(), &mut rng)?;
+            } else {
+                // Burn the RNG state as if we had generated this one.
+                let _ = rng.gen_range(col_range.clone());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// ── Deterministic batch seed ──────────────────────────────────────────────────
 
 fn batch_seed(topic: &str, partition: &str, batch_idx: u64) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -148,8 +229,8 @@ fn batch_seed(topic: &str, partition: &str, batch_idx: u64) -> u64 {
 
 // ── Sampler thread ────────────────────────────────────────────────────────────
 //
-// The sampler (Box<dyn ChunkLen>) is !Send, so it must live in its own
-// std::thread. The async worker communicates via channels.
+// Box<dyn ChunkLen> is !Send, so the sampler lives in a std::thread and
+// communicates with the async worker via channels.
 
 struct SamplerRequest {
     seed: u64,
@@ -164,7 +245,8 @@ struct SamplerThread {
 
 impl SamplerThread {
     fn run(self) {
-        let mut sampler = build_sampler(&self.sample_path).expect("failed to build sampler");
+        let mut sampler = crate::load::build_sampler(&self.sample_path)
+            .expect("failed to build sampler");
         for req in self.req_rx {
             let mut random = Random::from_seed(req.seed);
             sampler.set_len(req.rows);
@@ -192,7 +274,6 @@ struct PartitionWorker {
 
 impl PartitionWorker {
     async fn run(self) {
-        // Spawn the sampler in its own thread.
         let (req_tx, req_rx) = std::sync::mpsc::channel::<SamplerRequest>();
         let (result_tx, mut result_rx) = mpsc::channel::<MultiChunk>(2);
         let st = SamplerThread {
@@ -202,13 +283,11 @@ impl PartitionWorker {
         };
         thread::spawn(move || st.run());
 
-        // Load resume position from state.
         let resume_from = {
             let s = self.state.lock().await;
             s.last_batch_for(&self.topic, &self.partition)
         };
 
-        // Determine the origin timestamp for schedule alignment.
         let origin: SystemTime = {
             let s = self.state.lock().await;
             if let Some(ref ts) = s.origin {
@@ -218,7 +297,6 @@ impl PartitionWorker {
             }
         };
 
-        // Compute how many batches should have fired by now (for catchup).
         let elapsed = origin.elapsed().unwrap_or_default();
         let catchup_to = if self.batch_period.is_zero() {
             0
@@ -238,12 +316,10 @@ impl PartitionWorker {
         }
 
         loop {
-            // Determine wall-clock time when this batch should fire.
             let fire_at = origin
                 + self.stagger_offset
                 + self.batch_period * batch_idx as u32;
 
-            // Only sleep if we're past catchup.
             if batch_idx >= catchup_to {
                 let now = SystemTime::now();
                 if fire_at > now {
@@ -252,7 +328,6 @@ impl PartitionWorker {
                 }
             }
 
-            // Request the sampler thread to generate this batch.
             let seed = batch_seed(&self.topic, &self.partition, batch_idx);
             if req_tx.send(SamplerRequest { seed, rows: self.rows }).is_err() {
                 break;
@@ -278,14 +353,13 @@ impl PartitionWorker {
                 Err(Error::Server(ref e)) if e.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
                     warn!("{}/{} rate limited on batch {}", self.topic, self.partition, batch_idx);
                     tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue; // retry same batch
+                    continue;
                 }
                 Err(e) => {
                     warn!("{}/{} batch {} failed: {}", self.topic, self.partition, batch_idx, e);
                 }
             }
 
-            // Persist state after each batch.
             {
                 let mut s = self.state.lock().await;
                 s.set_last_batch(&self.topic, &self.partition, batch_idx);
@@ -297,6 +371,62 @@ impl PartitionWorker {
     }
 }
 
+// ── Window management ─────────────────────────────────────────────────────────
+
+fn spawn_window(
+    client: &Client,
+    topics: &TopicsConfig,
+    schemas_dir: &Path,
+    state: &Arc<Mutex<BatchState>>,
+    state_path: &Path,
+    window_start: usize,
+    batch_period: Duration,
+    speed: f64,
+) -> Vec<JoinHandle<()>> {
+    let window_end = (window_start + topics.active).min(topics.count);
+    let total_partitions = (window_end - window_start) * topics.partitions;
+    let stagger = if total_partitions > 1 {
+        batch_period / total_partitions as u32
+    } else {
+        Duration::ZERO
+    };
+
+    let mut handles = vec![];
+    let mut slot = 0usize;
+
+    for topic_idx in window_start..window_end {
+        let name = topic_name(topic_idx);
+        let sample_path = schema_path(schemas_dir, topic_idx);
+
+        for p in 0..topics.partitions {
+            let worker = PartitionWorker {
+                client: client.clone(),
+                topic: name.clone(),
+                partition: format!("partition-{p}"),
+                sample_path: sample_path.clone(),
+                rows: topics.rows,
+                batch_period,
+                stagger_offset: stagger * slot as u32,
+                state: state.clone(),
+                state_path: state_path.to_path_buf(),
+            };
+            handles.push(tokio::spawn(worker.run()));
+            slot += 1;
+        }
+    }
+
+    info!(
+        "window [{window_start}, {window_end}): {} topics, {} partitions, period {:?} ({}x speed), stagger {:?}",
+        window_end - window_start,
+        total_partitions,
+        batch_period,
+        speed,
+        stagger,
+    );
+
+    handles
+}
+
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Result<()> {
@@ -305,62 +435,76 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
         .healthy(Duration::from_secs(10), Duration::from_millis(100))
         .await?;
 
+    let schemas_dir = config
+        .schemas_dir
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("batch-schemas"));
+
     let mut state = BatchState::load(state_path);
 
-    // Set origin on first run so all workers share the same schedule anchor.
+    // Assign a stable schema seed on first run.
+    if state.schemas_seed.is_none() {
+        state.schemas_seed = Some(rand::random());
+    }
     if state.origin.is_none() {
         state.origin = Some(humantime::format_rfc3339(SystemTime::now()).to_string());
-        state.save(state_path)?;
     }
+    if state.window_since.is_none() {
+        state.window_since = Some(humantime::format_rfc3339(SystemTime::now()).to_string());
+    }
+    state.save(state_path)?;
+
+    // Generate any missing schema files.
+    ensure_schemas(
+        &schemas_dir,
+        config.topics.count,
+        config.topics.columns_min,
+        config.topics.columns_max,
+        state.schemas_seed.unwrap(),
+    )?;
 
     let state = Arc::new(Mutex::new(state));
 
-    let topics = config.resolve_topics()?;
+    let batch_period = config.topics.batch_interval.div_f64(config.speed);
+    let rotation_period = config.topics.rotation_interval.div_f64(config.speed);
 
-    info!(
-        "speed {}x, {} topics",
-        config.speed,
-        topics.len()
-    );
-
-    let mut handles = vec![];
-
-    for topic in topics {
-        // Each topic runs on its own schedule; its partitions are evenly
-        // staggered across that topic's own (sped-up) batch period.
-        let batch_period = topic.batch_interval.div_f64(config.speed);
-        let stagger = if topic.partitions > 1 {
-            batch_period / topic.partitions as u32
+    // Compute how many rotations have elapsed since origin to restore window.
+    {
+        let mut s = state.lock().await;
+        let origin = humantime::parse_rfc3339(s.origin.as_ref().unwrap())
+            .unwrap_or(SystemTime::now());
+        let elapsed = origin.elapsed().unwrap_or_default();
+        let rotations = if rotation_period.is_zero() {
+            0
         } else {
-            Duration::ZERO
+            (elapsed.as_nanos() / rotation_period.as_nanos()) as usize
         };
-
-        info!(
-            "  {}: {} partitions, {} rows, interval {:?} → period {:?}, stagger {:?}",
-            topic.name, topic.partitions, topic.rows, topic.batch_interval, batch_period, stagger
-        );
-
-        for p in 0..topic.partitions {
-            let partition_name = format!("partition-{p}");
-            let stagger_offset = stagger * p as u32;
-
-            let worker = PartitionWorker {
-                client: client.clone(),
-                topic: topic.name.clone(),
-                partition: partition_name,
-                sample_path: topic.sample.clone(),
-                rows: topic.rows,
-                batch_period,
-                stagger_offset,
-                state: state.clone(),
-                state_path: state_path.to_path_buf(),
-            };
-
-            handles.push(tokio::spawn(worker.run()));
+        let computed_window = (rotations * config.topics.active) % config.topics.count;
+        if computed_window != s.window_start {
+            info!(
+                "restoring window to [{computed_window}) based on elapsed time (was {})",
+                s.window_start
+            );
+            s.window_start = computed_window;
+            s.window_since =
+                Some(humantime::format_rfc3339(SystemTime::now()).to_string());
+            s.save(state_path)?;
         }
     }
 
-    // Print a progress summary every 30 seconds.
+    let mut window_start = state.lock().await.window_start;
+    let mut handles = spawn_window(
+        &client,
+        &config.topics,
+        &schemas_dir,
+        &state,
+        state_path,
+        window_start,
+        batch_period,
+        config.speed,
+    );
+
+    // Progress reporter.
     let state_for_stats = state.clone();
     tokio::spawn(async move {
         let mut last: HashMap<String, u64> = HashMap::new();
@@ -382,10 +526,34 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
         }
     });
 
-    // Wait for all workers (they run indefinitely until the process is killed).
-    for h in handles {
-        let _ = h.await;
-    }
+    // Rotation loop.
+    loop {
+        tokio::time::sleep(rotation_period).await;
 
-    Ok(())
+        // Stop current window.
+        for h in handles.drain(..) {
+            h.abort();
+        }
+
+        // Advance window.
+        window_start = (window_start + config.topics.active) % config.topics.count;
+        {
+            let mut s = state.lock().await;
+            s.window_start = window_start;
+            s.window_since =
+                Some(humantime::format_rfc3339(SystemTime::now()).to_string());
+            s.save(state_path)?;
+        }
+
+        handles = spawn_window(
+            &client,
+            &config.topics,
+            &schemas_dir,
+            &state,
+            state_path,
+            window_start,
+            batch_period,
+            config.speed,
+        );
+    }
 }
