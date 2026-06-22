@@ -13,20 +13,28 @@ use bench::batch::{run_batch, BatchConfig};
 /// the tool catches up any missed batches immediately before resuming the
 /// normal schedule.
 ///
+/// Per-topic settings (partitions, rows, batch_interval) live on each topic.
+/// A [defaults] table supplies fallbacks for any topic that omits them.
+///
 /// Example config (batch-config.toml):
 ///
+///   speed = 60.0          # 1h batches fire every 1 minute
+///
+///   [defaults]
 ///   partitions = 4
 ///   rows = 10000
 ///   batch_interval = "1h"
-///   speed = 60.0          # 1h batches fire every 1 minute
 ///
 ///   [[topics]]
 ///   name = "transactions"
 ///   sample = "samples/list-ccfraud.arrow"
+///   batch_interval = "15m"   # this job runs more often
 ///
 ///   [[topics]]
 ///   name = "images"
 ///   sample = "samples/image_224x224.arrow"
+///   partitions = 2
+///   rows = 50
 #[derive(Parser)]
 #[command(about, verbatim_doc_comment)]
 struct Args {

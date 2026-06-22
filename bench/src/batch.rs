@@ -21,23 +21,30 @@ use crate::load::build_sampler;
 pub struct TopicConfig {
     pub name: String,
     pub sample: PathBuf,
-    /// Override global partitions count for this topic.
+    /// Number of partitions for this topic (falls back to the top-level default).
     pub partitions: Option<usize>,
-    /// Override global rows per batch for this topic.
+    /// Rows per batch for this topic (falls back to the top-level default).
     pub rows: Option<usize>,
+    /// Real-world interval between successive batches for this topic
+    /// (falls back to the top-level default).
+    #[serde(default, with = "humantime_serde::option")]
+    pub batch_interval: Option<Duration>,
+}
+
+/// Optional top-level defaults applied to any topic that omits a value.
+#[derive(Debug, Deserialize, Default)]
+pub struct Defaults {
+    pub partitions: Option<usize>,
+    pub rows: Option<usize>,
+    #[serde(default, with = "humantime_serde::option")]
+    pub batch_interval: Option<Duration>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct BatchConfig {
-    /// Number of partitions per topic (unless overridden per-topic).
-    #[serde(default = "default_partitions")]
-    pub partitions: usize,
-    /// Rows per batch (unless overridden per-topic).
-    #[serde(default = "default_rows")]
-    pub rows: usize,
-    /// Real-world interval between successive batches for each partition.
-    #[serde(with = "humantime_serde")]
-    pub batch_interval: Duration,
+    /// Defaults applied to topics that omit partitions / rows / batch_interval.
+    #[serde(default)]
+    pub defaults: Defaults,
     /// How much faster than real time to run (1.0 = real time, 60.0 = 1h batches every 1 min).
     #[serde(default = "default_speed")]
     pub speed: f64,
@@ -50,14 +57,48 @@ fn default_partitions() -> usize { 4 }
 fn default_rows() -> usize { 10_000 }
 fn default_speed() -> f64 { 1.0 }
 
+/// A topic with all settings resolved to concrete values.
+pub struct ResolvedTopic {
+    pub name: String,
+    pub sample: PathBuf,
+    pub partitions: usize,
+    pub rows: usize,
+    pub batch_interval: Duration,
+}
+
 impl BatchConfig {
     pub fn from_file(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)?;
         Ok(toml::from_str(&text)?)
     }
 
-    pub fn batch_period(&self) -> Duration {
-        self.batch_interval.div_f64(self.speed)
+    /// Resolve each topic against the top-level defaults. Errors if a topic
+    /// has no batch_interval and no default is provided.
+    pub fn resolve_topics(&self) -> Result<Vec<ResolvedTopic>> {
+        self.topics
+            .iter()
+            .map(|t| {
+                let batch_interval = t
+                    .batch_interval
+                    .or(self.defaults.batch_interval)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "topic '{}' has no batch_interval and no default is set",
+                            t.name
+                        )
+                    })?;
+                Ok(ResolvedTopic {
+                    name: t.name.clone(),
+                    sample: t.sample.clone(),
+                    partitions: t
+                        .partitions
+                        .or(self.defaults.partitions)
+                        .unwrap_or_else(default_partitions),
+                    rows: t.rows.or(self.defaults.rows).unwrap_or_else(default_rows),
+                    batch_interval,
+                })
+            })
+            .collect()
     }
 }
 
@@ -274,39 +315,41 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
 
     let state = Arc::new(Mutex::new(state));
 
-    let batch_period = config.batch_period();
-    let total_partitions: usize = config.topics.iter()
-        .map(|t| t.partitions.unwrap_or(config.partitions))
-        .sum();
-    let stagger = if total_partitions > 1 {
-        batch_period / total_partitions as u32
-    } else {
-        Duration::ZERO
-    };
+    let topics = config.resolve_topics()?;
 
     info!(
-        "batch period: {:?}, stagger: {:?}, {} topics, {} total partitions",
-        batch_period, stagger, config.topics.len(), total_partitions
+        "speed {}x, {} topics",
+        config.speed,
+        topics.len()
     );
 
     let mut handles = vec![];
-    let mut global_partition_idx: usize = 0;
 
-    for topic in config.topics {
-        let n_partitions = topic.partitions.unwrap_or(config.partitions);
-        let rows = topic.rows.unwrap_or(config.rows);
+    for topic in topics {
+        // Each topic runs on its own schedule; its partitions are evenly
+        // staggered across that topic's own (sped-up) batch period.
+        let batch_period = topic.batch_interval.div_f64(config.speed);
+        let stagger = if topic.partitions > 1 {
+            batch_period / topic.partitions as u32
+        } else {
+            Duration::ZERO
+        };
 
-        for p in 0..n_partitions {
+        info!(
+            "  {}: {} partitions, {} rows, interval {:?} → period {:?}, stagger {:?}",
+            topic.name, topic.partitions, topic.rows, topic.batch_interval, batch_period, stagger
+        );
+
+        for p in 0..topic.partitions {
             let partition_name = format!("partition-{p}");
-            let stagger_offset = stagger * global_partition_idx as u32;
-            global_partition_idx += 1;
+            let stagger_offset = stagger * p as u32;
 
             let worker = PartitionWorker {
                 client: client.clone(),
                 topic: topic.name.clone(),
                 partition: partition_name,
                 sample_path: topic.sample.clone(),
-                rows,
+                rows: topic.rows,
                 batch_period,
                 stagger_offset,
                 state: state.clone(),
