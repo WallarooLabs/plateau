@@ -23,9 +23,13 @@ use bench::batch::{run_batch, BatchConfig};
 ///   rotation_interval = "1h"  # how often the active window advances
 ///   columns_min = 3         # min data columns per topic (excludes `time`)
 ///   columns_max = 35        # max data columns per topic (exclusive)
+///   partitions_min = 1      # partitions drawn per topic from [min, max)
+///   partitions_max = 8
+///   rows_min = 1000         # overall rows-per-insert distribution; each topic
+///   rows_max = 50000        #   draws its own sub-range, sampled per insert
 ///   batch_interval = "1h"  # real-world interval between batches per partition
-///   partitions = 4
-///   rows = 10000
+///
+/// All values drawn from a range use a clamped normal distribution.
 #[derive(Parser)]
 #[command(about, verbatim_doc_comment)]
 struct Args {

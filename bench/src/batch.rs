@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher as _};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
@@ -39,19 +38,20 @@ pub struct TopicsConfig {
     pub columns_min: usize,
     /// Max number of data columns per topic (exclusive).
     pub columns_max: usize,
+    /// Min partitions per topic.
+    pub partitions_min: usize,
+    /// Max partitions per topic (exclusive).
+    pub partitions_max: usize,
+    /// Min of the overall rows-per-insert distribution. Each topic draws its
+    /// own [min, max] sub-range from this distribution; every insert then
+    /// samples a row count from that per-topic range.
+    pub rows_min: usize,
+    /// Max of the overall rows-per-insert distribution (exclusive).
+    pub rows_max: usize,
     /// Real-world batch interval per topic.
     #[serde(with = "humantime_serde")]
     pub batch_interval: Duration,
-    /// Partitions per topic.
-    #[serde(default = "default_partitions")]
-    pub partitions: usize,
-    /// Rows per batch.
-    #[serde(default = "default_rows")]
-    pub rows: usize,
 }
-
-fn default_partitions() -> usize { 4 }
-fn default_rows() -> usize { 10_000 }
 
 #[derive(Debug, Deserialize)]
 pub struct BatchConfig {
@@ -72,6 +72,16 @@ impl BatchConfig {
         let text = std::fs::read_to_string(path)?;
         Ok(toml::from_str(&text)?)
     }
+}
+
+/// Per-topic parameters derived deterministically from the schema seed.
+#[derive(Debug, Clone)]
+pub struct TopicParams {
+    pub columns: usize,
+    pub partitions: usize,
+    /// Inclusive-min / exclusive-max row count for each insert into this topic.
+    pub rows_min: usize,
+    pub rows_max: usize,
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -114,6 +124,62 @@ impl BatchState {
     }
 }
 
+// ── Range sampling (normal distribution) ──────────────────────────────────────
+
+/// Draw an integer in [min, max) from a normal distribution centered on the
+/// midpoint, with σ = range/4 (so ~95% of mass lands in range), clamped to
+/// [min, max). Uses the Box-Muller transform.
+fn normal_range(rng: &mut Random, min: usize, max: usize) -> usize {
+    if max <= min + 1 {
+        return min;
+    }
+    let lo = min as f64;
+    let hi = (max - 1) as f64;
+    let mean = (lo + hi) / 2.0;
+    let std = (hi - lo) / 4.0;
+
+    // u1 in (0, 1] to keep ln() finite.
+    let u1: f64 = 1.0 - rng.gen_range(0.0..1.0);
+    let u2: f64 = rng.gen_range(0.0..1.0);
+    let z = (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos();
+
+    (mean + z * std).round().clamp(lo, hi) as usize
+}
+
+// ── Per-topic parameter derivation ────────────────────────────────────────────
+
+/// Stable per-topic RNG seed derived from the schema seed and topic index.
+fn topic_seed(seed: u64, idx: usize) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h);
+    idx.hash(&mut h);
+    h.finish()
+}
+
+/// Deterministically derive a topic's parameters. The same `rng` is then used
+/// to generate the schema, so params and schema stay consistent.
+fn draw_params(rng: &mut Random, t: &TopicsConfig) -> TopicParams {
+    let columns = normal_range(rng, t.columns_min, t.columns_max);
+    let partitions = normal_range(rng, t.partitions_min, t.partitions_max).max(1);
+    // Each topic draws two values from the global rows distribution to form its
+    // own [min, max] sub-range; per-insert counts are sampled from that range.
+    let a = normal_range(rng, t.rows_min, t.rows_max);
+    let b = normal_range(rng, t.rows_min, t.rows_max);
+    let (rmin, rmax) = if a <= b { (a, b) } else { (b, a) };
+    TopicParams {
+        columns,
+        partitions,
+        rows_min: rmin,
+        rows_max: rmax + 1,
+    }
+}
+
+/// Recompute a topic's parameters without touching the filesystem.
+fn topic_params(seed: u64, idx: usize, t: &TopicsConfig) -> TopicParams {
+    let mut rng = Random::from_seed(topic_seed(seed, idx));
+    draw_params(&mut rng, t)
+}
+
 // ── Schema generation ─────────────────────────────────────────────────────────
 
 fn topic_name(idx: usize) -> String {
@@ -124,14 +190,10 @@ fn schema_path(schemas_dir: &Path, idx: usize) -> PathBuf {
     schemas_dir.join(format!("{}.arrow", topic_name(idx)))
 }
 
-/// Generate a schema with a random number of flat columns in [col_range) and
-/// write a tiny seed batch to `path` so `build_sampler` can read it back.
-fn generate_schema_file(
-    path: &Path,
-    col_range: Range<usize>,
-    rng: &mut Random,
-) -> Result<()> {
-    let n_cols = rng.gen_range(col_range);
+/// Generate a schema with `n_cols` flat columns and write a one-row seed batch
+/// to `path` so `build_sampler` can read it back. `rng` must already have had
+/// `draw_params` applied (so its state follows the params draw).
+fn generate_schema_file(path: &Path, n_cols: usize, rng: &mut Random) -> Result<()> {
     let mut flat = sample_flat();
 
     let mut fields: Vec<Arc<Field>> = vec![Arc::new(Field::new("time", DataType::Int64, false))];
@@ -148,7 +210,8 @@ fn generate_schema_file(
         branch: 1_i32..2_i32,
     };
 
-    let mut time_sampler = primitive_len_sampler::<_, _, arrow_array::types::Int64Type>(Now, AlwaysValid);
+    let mut time_sampler =
+        primitive_len_sampler::<_, _, arrow_array::types::Int64Type>(Now, AlwaysValid);
     time_sampler.set_len(1);
     let time_col = time_sampler.generate(rng);
 
@@ -169,49 +232,26 @@ fn generate_schema_file(
     Ok(())
 }
 
-/// Ensure all N topic schema files exist in `schemas_dir`, generating any
-/// that are missing. Returns the seed used (stored in state for provenance).
-pub fn ensure_schemas(
-    schemas_dir: &Path,
-    count: usize,
-    col_min: usize,
-    col_max: usize,
-    seed: u64,
-) -> Result<()> {
+/// Ensure every topic's schema file exists, generating any that are missing.
+/// Each topic is generated from its own stable seed, so files are reproducible
+/// and independent — regenerating one never disturbs the others.
+pub fn ensure_schemas(schemas_dir: &Path, t: &TopicsConfig, seed: u64) -> Result<()> {
     std::fs::create_dir_all(schemas_dir)?;
 
-    let col_range = col_min..col_max;
-    let mut rng = Random::from_seed(seed);
-
-    // Advance the RNG past any already-generated schemas so adding more topics
-    // later doesn't change existing schemas.
-    let mut missing = vec![];
-    for idx in 0..count {
+    let mut generated = 0;
+    for idx in 0..t.count {
         let path = schema_path(schemas_dir, idx);
         if path.exists() {
-            // Burn the same number of RNG calls as generation would to keep
-            // future topics consistent.
-            let _ = rng.gen_range(col_range.clone());
-            // Burn one call per possible column for datatypes — approximate.
-        } else {
-            missing.push(idx);
+            continue;
         }
+        let mut rng = Random::from_seed(topic_seed(seed, idx));
+        let params = draw_params(&mut rng, t);
+        generate_schema_file(&path, params.columns, &mut rng)?;
+        generated += 1;
     }
 
-    if !missing.is_empty() {
-        info!("generating {} topic schema files in {:?}", missing.len(), schemas_dir);
-        // Re-seed cleanly and generate all from scratch for simplicity.
-        // (All files are written atomically, so existing ones are not touched.)
-        let mut rng = Random::from_seed(seed);
-        for idx in 0..count {
-            let path = schema_path(schemas_dir, idx);
-            if !path.exists() {
-                generate_schema_file(&path, col_range.clone(), &mut rng)?;
-            } else {
-                // Burn the RNG state as if we had generated this one.
-                let _ = rng.gen_range(col_range.clone());
-            }
-        }
+    if generated > 0 {
+        info!("generated {generated} topic schema files in {schemas_dir:?}");
     }
 
     Ok(())
@@ -234,7 +274,8 @@ fn batch_seed(topic: &str, partition: &str, batch_idx: u64) -> u64 {
 
 struct SamplerRequest {
     seed: u64,
-    rows: usize,
+    rows_min: usize,
+    rows_max: usize,
 }
 
 struct SamplerThread {
@@ -249,7 +290,9 @@ impl SamplerThread {
             .expect("failed to build sampler");
         for req in self.req_rx {
             let mut random = Random::from_seed(req.seed);
-            sampler.set_len(req.rows);
+            // Sample this insert's row count from the topic's range (normal).
+            let rows = normal_range(&mut random, req.rows_min, req.rows_max);
+            sampler.set_len(rows);
             let multi = sampler.generate(&mut random);
             if self.result_tx.blocking_send(multi).is_err() {
                 break;
@@ -265,7 +308,8 @@ struct PartitionWorker {
     topic: String,
     partition: String,
     sample_path: PathBuf,
-    rows: usize,
+    rows_min: usize,
+    rows_max: usize,
     batch_period: Duration,
     stagger_offset: Duration,
     state: Arc<Mutex<BatchState>>,
@@ -329,7 +373,12 @@ impl PartitionWorker {
             }
 
             let seed = batch_seed(&self.topic, &self.partition, batch_idx);
-            if req_tx.send(SamplerRequest { seed, rows: self.rows }).is_err() {
+            let req = SamplerRequest {
+                seed,
+                rows_min: self.rows_min,
+                rows_max: self.rows_max,
+            };
+            if req_tx.send(req).is_err() {
                 break;
             }
             let multi = match result_rx.recv().await {
@@ -373,6 +422,7 @@ impl PartitionWorker {
 
 // ── Window management ─────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_window(
     client: &Client,
     topics: &TopicsConfig,
@@ -382,9 +432,16 @@ fn spawn_window(
     window_start: usize,
     batch_period: Duration,
     speed: f64,
+    schemas_seed: u64,
 ) -> Vec<JoinHandle<()>> {
     let window_end = (window_start + topics.active).min(topics.count);
-    let total_partitions = (window_end - window_start) * topics.partitions;
+
+    // Resolve each topic's parameters; partitions vary per topic.
+    let params: Vec<(usize, TopicParams)> = (window_start..window_end)
+        .map(|idx| (idx, topic_params(schemas_seed, idx, topics)))
+        .collect();
+
+    let total_partitions: usize = params.iter().map(|(_, p)| p.partitions).sum();
     let stagger = if total_partitions > 1 {
         batch_period / total_partitions as u32
     } else {
@@ -394,17 +451,18 @@ fn spawn_window(
     let mut handles = vec![];
     let mut slot = 0usize;
 
-    for topic_idx in window_start..window_end {
-        let name = topic_name(topic_idx);
-        let sample_path = schema_path(schemas_dir, topic_idx);
+    for (topic_idx, tp) in &params {
+        let name = topic_name(*topic_idx);
+        let sample_path = schema_path(schemas_dir, *topic_idx);
 
-        for p in 0..topics.partitions {
+        for p in 0..tp.partitions {
             let worker = PartitionWorker {
                 client: client.clone(),
                 topic: name.clone(),
                 partition: format!("partition-{p}"),
                 sample_path: sample_path.clone(),
-                rows: topics.rows,
+                rows_min: tp.rows_min,
+                rows_max: tp.rows_max,
                 batch_period,
                 stagger_offset: stagger * slot as u32,
                 state: state.clone(),
@@ -454,14 +512,10 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
     }
     state.save(state_path)?;
 
+    let schemas_seed = state.schemas_seed.unwrap();
+
     // Generate any missing schema files.
-    ensure_schemas(
-        &schemas_dir,
-        config.topics.count,
-        config.topics.columns_min,
-        config.topics.columns_max,
-        state.schemas_seed.unwrap(),
-    )?;
+    ensure_schemas(&schemas_dir, &config.topics, schemas_seed)?;
 
     let state = Arc::new(Mutex::new(state));
 
@@ -502,6 +556,7 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
         window_start,
         batch_period,
         config.speed,
+        schemas_seed,
     );
 
     // Progress reporter.
@@ -554,6 +609,93 @@ pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Res
             window_start,
             batch_period,
             config.speed,
+            schemas_seed,
         );
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn cfg() -> TopicsConfig {
+        TopicsConfig {
+            count: 16,
+            active: 4,
+            rotation_interval: Duration::from_secs(60),
+            columns_min: 3,
+            columns_max: 35,
+            partitions_min: 1,
+            partitions_max: 8,
+            rows_min: 1000,
+            rows_max: 50000,
+            batch_interval: Duration::from_secs(60),
+        }
+    }
+
+    #[test]
+    fn normal_range_stays_in_bounds() {
+        let mut rng = Random::from_seed(7);
+        for _ in 0..10_000 {
+            let v = normal_range(&mut rng, 3, 35);
+            assert!((3..35).contains(&v), "out of range: {v}");
+        }
+        // Degenerate ranges.
+        assert_eq!(normal_range(&mut rng, 5, 5), 5);
+        assert_eq!(normal_range(&mut rng, 5, 6), 5);
+    }
+
+    #[test]
+    fn topic_params_are_deterministic() {
+        let t = cfg();
+        for idx in 0..t.count {
+            let a = topic_params(42, idx, &t);
+            let b = topic_params(42, idx, &t);
+            assert_eq!(a.columns, b.columns);
+            assert_eq!(a.partitions, b.partitions);
+            assert_eq!(a.rows_min, b.rows_min);
+            assert_eq!(a.rows_max, b.rows_max);
+            assert!(a.partitions >= 1);
+            assert!((t.columns_min..t.columns_max).contains(&a.columns));
+            assert!(a.rows_min < a.rows_max);
+        }
+        // Different seeds should generally differ.
+        let p1 = topic_params(1, 0, &t);
+        let p2 = topic_params(2, 0, &t);
+        assert!(p1.columns != p2.columns || p1.partitions != p2.partitions || p1.rows_min != p2.rows_min);
+    }
+
+    #[test]
+    fn generated_schemas_are_loadable_and_stable() {
+        let t = cfg();
+        let dir = std::env::temp_dir().join(format!("batch-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        ensure_schemas(&dir, &t, 99).unwrap();
+
+        for idx in 0..t.count {
+            let path = schema_path(&dir, idx);
+            assert!(path.exists(), "missing schema {idx}");
+            // build_sampler must read it back and produce rows.
+            let mut sampler = crate::load::build_sampler(&path).unwrap();
+            sampler.set_len(10);
+            let mut rng = Random::from_seed(idx as u64);
+            let multi = sampler.generate(&mut rng);
+            let cols = multi.schema.fields().len();
+            let expected = topic_params(99, idx, &t).columns + 1; // + time column
+            assert_eq!(cols, expected, "topic {idx} column count mismatch");
+        }
+
+        // Re-running must not regenerate (files already present).
+        let before: Vec<_> = (0..t.count)
+            .map(|i| std::fs::metadata(schema_path(&dir, i)).unwrap().modified().unwrap())
+            .collect();
+        ensure_schemas(&dir, &t, 99).unwrap();
+        let after: Vec<_> = (0..t.count)
+            .map(|i| std::fs::metadata(schema_path(&dir, i)).unwrap().modified().unwrap())
+            .collect();
+        assert_eq!(before, after, "schemas were unexpectedly regenerated");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
