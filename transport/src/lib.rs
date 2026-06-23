@@ -491,6 +491,15 @@ pub struct ReconcileStats {
     pub missing_files: usize,
     pub expected_size: usize,
     pub actual_size: usize,
+    /// Count of untracked segment files the high-water filter suppressed because
+    /// they sit above their partition's highest committed segment — the active
+    /// tail or a just-rolled segment whose manifest row has not been written
+    /// yet. These are in-flight, not orphans; surfaced so a persistently nonzero
+    /// `untracked_files` can be told apart from normal write churn.
+    ///
+    /// Defaulted on deserialization so older clients and payloads remain valid.
+    #[serde(default)]
+    pub active_tail_skipped: usize,
 }
 
 /// Wire form of a reconciliation report for the active (writeable) tail segment

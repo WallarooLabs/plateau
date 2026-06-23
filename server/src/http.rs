@@ -554,6 +554,7 @@ async fn get_info(
                     missing_files: sealed.missing_files.len(),
                     expected_size: sealed.expected_size.as_u64() as usize,
                     actual_size: sealed.actual_size.as_u64() as usize,
+                    active_tail_skipped: report.active_tail_skipped,
                 };
                 let active_segments = report
                     .active

@@ -1070,6 +1070,7 @@ async fn info_endpoint() -> Result<()> {
     assert!(retention_stats["missing_files"].is_number());
     assert!(retention_stats["expected_size"].is_number());
     assert!(retention_stats["actual_size"].is_number());
+    assert!(retention_stats["active_tail_skipped"].is_number());
 
     // The active-segment bucket is part of the wire format. The freshly written
     // partitions have not rolled, so their active tails should be reported here.
