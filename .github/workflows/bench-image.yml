@@ -1,43 +1,14 @@
-name: Rust
+name: Bench Image
 
 on:
   workflow_dispatch: {}
-  push:
-    branches:
-      - main
-    tags:
-      - v**
-  pull_request:
-    branches:
-      - main
 
 env:
-  CARGO_TERM_COLOR: always
-  REGISTRY_IMAGE: ghcr.io/wallaroolabs/plateau
+  BENCH_REGISTRY_IMAGE: ghcr.io/wallaroolabs/plateau-bench
   RUST_VERSION: 1.84.1
 
 jobs:
-  check:
-    runs-on: "8x32g"
-    steps:
-    - uses: actions/checkout@v4
-    - name: Announce Rust
-      shell: bash
-      run: cargo --version && rustc --version && rustup --version
-    - uses: Swatinem/rust-cache@v2
-      with:
-        shared-key: "20240509"
-    - name: Check formatting
-      shell: bash
-      run: make check-fmt
-    - name: Lint
-      shell: bash
-      run: make lint
-    - name: Run tests
-      shell: bash
-      run: make test
-
-  build-multi-amd64:
+  build-bench-amd64:
     runs-on:
       - ubuntu-latest
     steps:
@@ -49,11 +20,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY_IMAGE }}
+          images: ${{ env.BENCH_REGISTRY_IMAGE }}
           labels: |
             org.opencontainers.image.vendor="Wallaroo Labs"
             org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
-            org.opencontainers.image.title="plateau"
+            org.opencontainers.image.title="plateau-bench"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -76,9 +47,9 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          target: plateau
+          target: batch-load
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.BENCH_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
             RUST_VERSION=${{ env.RUST_VERSION }}
 
@@ -91,12 +62,12 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_ARCH }}
+          name: bench-digests-${{ env.PLATFORM_ARCH }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  build-multi-arm64:
+  build-bench-arm64:
     runs-on:
       - buildjet-4vcpu-ubuntu-2204-arm
     steps:
@@ -108,11 +79,11 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY_IMAGE }}
+          images: ${{ env.BENCH_REGISTRY_IMAGE }}
           labels: |
             org.opencontainers.image.vendor="Wallaroo Labs"
             org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
-            org.opencontainers.image.title="plateau"
+            org.opencontainers.image.title="plateau-bench"
 
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -135,9 +106,9 @@ jobs:
         id: build
         uses: docker/build-push-action@v6
         with:
-          target: plateau
+          target: batch-load
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,name=${{ env.BENCH_REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
             RUST_VERSION=${{ env.RUST_VERSION }}
 
@@ -150,22 +121,22 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_ARCH }}
+          name: bench-digests-${{ env.PLATFORM_ARCH }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
-  merge:
+  merge-bench:
     runs-on: ubuntu-latest
     needs:
-      - build-multi-amd64
-      - build-multi-arm64
+      - build-bench-amd64
+      - build-bench-arm64
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
           path: /tmp/digests
-          pattern: digests-*
+          pattern: bench-digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
@@ -175,7 +146,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY_IMAGE }}
+          images: ${{ env.BENCH_REGISTRY_IMAGE }}
           tags: |
             type=sha
             type=ref,event=branch
@@ -183,7 +154,7 @@ jobs:
           labels: |
             org.opencontainers.image.vendor="Wallaroo Labs"
             org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
-            org.opencontainers.image.title="plateau"
+            org.opencontainers.image.title="plateau-bench"
 
       - name: Login to ghcr.io
         uses: docker/login-action@v3
@@ -196,9 +167,8 @@ jobs:
         working-directory: /tmp/digests
         run: |
           docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+            $(printf '${{ env.BENCH_REGISTRY_IMAGE }}@sha256:%s ' *)
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
-
+          docker buildx imagetools inspect ${{ env.BENCH_REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
