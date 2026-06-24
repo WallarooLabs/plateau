@@ -5,7 +5,7 @@
 //! - Verify file sizes on disk match sizes in the manifest
 //! - Detect files that don't belong to any segment in their directory
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::iter;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -40,6 +40,26 @@ use crate::topic::Topic;
 /// sealed durably yet) every segment is treated as active.
 fn is_sealed(sealed_ix: Option<SegmentIndex>, index: SegmentIndex) -> bool {
     sealed_ix.is_some_and(|watermark| index <= watermark)
+}
+
+/// Parse the partition name and segment index out of a segment file *stem* of
+/// the form `{topic}-{partition}-{index}` (see [Partition::slog_name] and
+/// [Slog::segment_path]). Callers pass the file stem so a segment's auxiliary
+/// files (`-{index}.arrows` cache, `.recovery`/`.recovered`) — which share the
+/// base path with one extension — parse to the same locator as the main file.
+///
+/// The index is the final dash-delimited, purely numeric token, so partition
+/// names containing dashes parse correctly. Returns `None` for names that are
+/// not segment files (foreign files), which the high-water filter then leaves
+/// reported as genuine orphans.
+fn parse_segment_locator(topic: &str, file_stem: &str) -> Option<(String, SegmentIndex)> {
+    let rest = file_stem.strip_prefix(topic)?.strip_prefix('-')?;
+    let (partition, index) = rest.rsplit_once('-')?;
+    if partition.is_empty() {
+        return None;
+    }
+    let index: usize = index.parse().ok()?;
+    Some((partition.to_string(), SegmentIndex(index)))
 }
 
 /// Configuration for the reconciliation job
@@ -331,6 +351,13 @@ pub struct ReconcileReport {
     /// on reports that were never published through the loop (e.g. a report read
     /// directly off a [ReconcileJob] mid-pass, or constructed in tests).
     pub last_pass_completed_at: Option<DateTime<Utc>>,
+    /// How many untracked segment files the high-water filter suppressed because
+    /// their index sits *above* the highest segment present in the partition's
+    /// manifest snapshot — the active tail, or a just-rolled segment whose row
+    /// has not been committed yet (rows are written by an async commit thread
+    /// after the file appears on disk). These are in-flight, not orphans:
+    /// counted here for visibility rather than reported as untracked.
+    pub active_tail_skipped: usize,
 }
 
 impl ReconcileReport {
@@ -643,9 +670,52 @@ impl ReconcileJob {
             partition_files.len()
         );
 
+        // Highest segment index present in the tracked (manifest) snapshot per
+        // partition. The high-water filter judges untracked segment files
+        // against this: a file whose index exceeds its partition's max is one
+        // that rolled after the snapshot, or whose manifest row has not been
+        // committed yet — the in-flight active tail, not an orphan. Deriving the
+        // bound from `tracked_files` (rather than re-reading `sealed_ix`) keeps
+        // it consistent with the very set we are diffing against, so a segment
+        // that sealed mid-pass cannot fall through the gap between the two.
+        let mut max_tracked: HashMap<String, SegmentIndex> = HashMap::new();
+        for path in &tracked_files {
+            if let Some((partition, index)) = path
+                .file_stem()
+                .and_then(|n| n.to_str())
+                .and_then(|stem| parse_segment_locator(topic_name, stem))
+            {
+                max_tracked
+                    .entry(partition)
+                    .and_modify(|m| *m = (*m).max(index))
+                    .or_insert(index);
+            }
+        }
+
         for file_path in partition_files {
             debug!("Checking file: {:?}", file_path);
             if !tracked_files.contains(&file_path) {
+                // High-water filter: suppress in-flight segment files (and their
+                // auxiliary files) sitting above the partition's highest tracked
+                // segment. A partition with no tracked segments has no ceiling,
+                // so any of its segment files is in-flight. Files that do not
+                // parse as a segment (foreign files) are always reported.
+                if let Some((partition, index)) = file_path
+                    .file_stem()
+                    .and_then(|n| n.to_str())
+                    .and_then(|stem| parse_segment_locator(topic_name, stem))
+                {
+                    let in_flight = max_tracked.get(&partition).is_none_or(|max| index > *max);
+                    if in_flight {
+                        debug!(
+                            "Skipping in-flight segment file above tracked max: {:?}",
+                            file_path
+                        );
+                        self.state.report.active_tail_skipped += 1;
+                        continue;
+                    }
+                }
+
                 warn!("Untracked file in topic {:?}: {:?}", topic_name, file_path);
                 // Add the untracked path to our stats
                 let file_size = fs::metadata(&file_path)
@@ -1260,6 +1330,87 @@ mod tests {
                 assert_eq!(paths[0], orphan_file_path);
             }
             PathStats::Counter(_) => panic!("Expected Paths variant when track_files is enabled"),
+        }
+
+        Ok(())
+    }
+
+    /// The high-water filter suppresses an in-flight segment file — one whose
+    /// index sits above the partition's highest tracked (manifest) segment, as a
+    /// just-rolled-but-uncommitted segment does — counting it in
+    /// `active_tail_skipped` rather than reporting it as untracked. A genuinely
+    /// foreign file in the same directory is still reported.
+    #[test_log::test(tokio::test)]
+    async fn test_high_water_skips_inflight_segment_file() -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        // Roll after 2 rows so segment 0 seals and segment 1 becomes the tail.
+        let (_tmpdir, catalog) = create_test_catalog_rolling(2).await;
+        let topic_name = "high-water";
+        let partition_name = "p0";
+
+        let topic = catalog.get_topic(topic_name).await;
+        topic
+            .extend_records(partition_name, &test_records(&["a", "b", "c"]))
+            .await?;
+        topic
+            .extend_records(partition_name, &test_records(&["d", "e", "f"]))
+            .await?;
+        drop(topic);
+        catalog.checkpoint().await;
+        catalog
+            .get_topic(topic_name)
+            .await
+            .ensure_index(partition_name, RecordIndex(6))
+            .await?;
+        catalog.checkpoint().await;
+
+        // Segments 0 and 1 are tracked, so the partition's high-water mark is 1.
+        let partition_id = PartitionId::new(topic_name, partition_name);
+        let topic_path = Topic::partition_root(catalog.topic_root(), topic_name);
+        let slog_name = Partition::slog_name(&partition_id);
+
+        // An in-flight segment file well above the tracked max, with no manifest
+        // row: exactly what a just-rolled-but-uncommitted segment looks like on
+        // disk before the async commit thread writes its row.
+        let inflight = Slog::segment_path(&topic_path, &slog_name, SegmentIndex(5));
+        {
+            let mut f = fs::File::create(&inflight).await?;
+            f.write_all(b"in-flight segment, no manifest row yet")
+                .await?;
+            f.flush().await?;
+        }
+        // A genuinely foreign file that does not parse as a segment: the
+        // high-water filter must not touch it, so it stays reported as untracked.
+        let foreign = topic_path.join("not-a-segment.tmp");
+        {
+            let mut f = fs::File::create(&foreign).await?;
+            f.write_all(b"foreign").await?;
+            f.flush().await?;
+        }
+
+        let config = ReconcileConfig {
+            track_files: true,
+            ..Default::default()
+        };
+        let mut reconciler = ReconcileJob::with_config(catalog.clone(), config);
+        assert!(reconciler.run(Some(100)).await?);
+        let report = reconciler.report();
+
+        // The above-watermark segment file is suppressed and counted; only the
+        // foreign file remains as a genuine untracked orphan.
+        assert!(
+            report.active_tail_skipped >= 1,
+            "in-flight segment file above the watermark must be skipped, not reported"
+        );
+        assert_eq!(
+            report.sealed.untracked_files.len(),
+            1,
+            "only the foreign file should remain untracked"
+        );
+        match &report.sealed.untracked_files.paths {
+            PathStats::Paths(paths) => assert_eq!(paths[0], foreign),
+            PathStats::Counter(_) => panic!("expected Paths variant with track_files"),
         }
 
         Ok(())

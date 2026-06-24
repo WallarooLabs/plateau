@@ -1070,6 +1070,7 @@ async fn info_endpoint() -> Result<()> {
     assert!(retention_stats["missing_files"].is_number());
     assert!(retention_stats["expected_size"].is_number());
     assert!(retention_stats["actual_size"].is_number());
+    assert!(retention_stats["active_tail_skipped"].is_number());
 
     // The active-segment bucket is part of the wire format. The freshly written
     // partitions have not rolled, so their active tails should be reported here.
@@ -1348,5 +1349,146 @@ async fn reconcile_loop_cancels_on_shutdown() -> Result<()> {
         "catalog should close cleanly after the loop is cancelled"
     );
 
+    Ok(())
+}
+
+/// Integration soak/torture test for continuous reconciliation racing writes
+/// and retention. Three things hammer the same partitions at once: a writer
+/// flooding randomised batches over HTTP, retention retiring the oldest sealed
+/// segment on nearly every roll (tiny `max_segment_count`), and the reconcile
+/// loop sweeping back-to-back with fixes enabled. Segments seal every few rows
+/// (`max_rows`), so there is almost always a just-rolled segment whose manifest
+/// row has not committed yet — the case the high-water filter must suppress.
+///
+/// Reconcile only fixes manifest size entries and never removes files, so the
+/// rare retention races (a missing/orphan diff for a segment retired mid-pass)
+/// are harmless, transient, self-healing noise; we deliberately do not assert
+/// the diff buckets are empty mid-storm. What we assert is:
+///
+/// - Liveness: the loop survives the storm and keeps publishing fresh passes.
+/// - Coverage: `active_tail_skipped > 0` is observed, proving the high-water
+///   filter actually fires under real concurrency. Unlike a retention race this
+///   is reliable, because an in-flight segment is essentially always present
+///   under load.
+/// - Convergence: once writes quiesce, a fresh pass reports fully clean (no
+///   missing, untracked, or size mismatch), proving the filter did not mask a
+///   persistent inconsistency.
+#[test_log::test(tokio::test)]
+async fn reconcile_torture_under_retention_churn() -> Result<()> {
+    let server = TestServer::localhost_with_config(PlateauConfig {
+        catalog: catalog::Config {
+            partition: partition::Config {
+                // Seal a segment every few rows so the sealed population churns.
+                roll: limit::Rolling {
+                    max_rows: 4,
+                    ..Default::default()
+                },
+                // Keep only a handful of sealed segments: retention retires the
+                // oldest on nearly every roll, racing the reconcile scan.
+                retain: limit::Retention {
+                    max_segment_count: Some(3),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        ..PlateauConfig::default()
+    })
+    .await?;
+
+    let client = Client::new();
+    let topic = random_topic();
+    let partitions = ["p0", "p1", "p2"];
+
+    // Reconcile continuously, fixes enabled, back-to-back fast passes with no
+    // idle gap so it sweeps as hard as possible against the writer.
+    let loop_handle = tokio::spawn(catalog::ReconcileJob::run_loop(
+        server.catalog.clone(),
+        catalog::ReconcileConfig {
+            track_files: true,
+            idle_ratio: 0.0,
+            pass_interval: Some(Duration::from_millis(1)),
+            fixes: [catalog::reconcile::ReconcileFix::UpdateManifestSizes]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        },
+    ));
+
+    // Deterministic xorshift so a failing run reproduces from the seed below.
+    let seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut rng = seed;
+    let mut next = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng
+    };
+
+    let mut max_active_tail_skipped = 0usize;
+    let mut saw_completed_pass = false;
+    const ROUNDS: usize = 400;
+    for round in 0..ROUNDS {
+        // Randomised batch size (1..=9 rows) across rotating partitions widens
+        // the timing window and varies segment sizes.
+        let count = 1 + (next() % 9) as usize;
+        let partition = partitions[round % partitions.len()];
+        repeat_append(
+            &client,
+            append_url(&server, &topic, partition).as_str(),
+            TEST_MESSAGE,
+            count,
+        )
+        .await;
+
+        // Periodically flush so segments seal durably and retention can act.
+        if round % 4 == 0 {
+            server.catalog.checkpoint().await;
+        }
+
+        // Sample the latest published report (lock-free, typed). The high-water
+        // filter should be suppressing in-flight segments throughout the storm.
+        if let Some(report) = server.catalog.latest_reconcile_report() {
+            saw_completed_pass = true;
+            max_active_tail_skipped = max_active_tail_skipped.max(report.active_tail_skipped);
+        }
+    }
+
+    tracing::info!(seed, max_active_tail_skipped, "torture writer finished");
+
+    // Liveness: the loop kept up and published at least one pass during the storm.
+    assert!(
+        saw_completed_pass,
+        "reconcile loop should publish at least one pass during the storm"
+    );
+    // Coverage: the high-water filter demonstrably fired under real concurrency.
+    assert!(
+        max_active_tail_skipped > 0,
+        "expected the high-water filter to suppress in-flight segments under churn; \
+         if this is flaky, the writer is not rolling fast enough"
+    );
+
+    // Quiesce: stop writing, flush, and wait for a strictly-newer pass over the
+    // settled catalog. With nothing racing and all rolls committed, that pass
+    // must be fully clean — no missing, untracked, or size-mismatch diffs.
+    server.catalog.checkpoint().await;
+    let before_ts = get_json(&client, &info_url(&server))
+        .await?
+        .get("last_reconcile_pass_completed_at")
+        .cloned()
+        .unwrap_or(json::Value::Null);
+    let clean = poll_info_until(&client, &info_url(&server), |info| {
+        let stats = &info["retention_stats"];
+        info["pending"] == json::json!(false)
+            && info["last_reconcile_pass_completed_at"] != before_ts
+            && stats["missing_files"] == json::json!(0)
+            && stats["untracked_files"] == json::json!(0)
+            && stats["size_mismatches"] == json::json!(0)
+    })
+    .await;
+    assert_eq!(clean["retention_stats"]["untracked_files"], json::json!(0));
+
+    loop_handle.abort();
     Ok(())
 }
