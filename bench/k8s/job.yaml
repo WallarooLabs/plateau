@@ -56,6 +56,11 @@ spec:
         app: batch-load
     spec:
       restartPolicy: OnFailure
+      # Reuse the same ghcr.io pull secret the plateau pods use. Find its name
+      # with `kubectl get secrets -n <ns> --field-selector
+      # type=kubernetes.io/dockerconfigjson` and set it here.
+      imagePullSecrets:
+        - name: ghcr-pull
       containers:
         - name: batch-load
           image: ghcr.io/wallaroolabs/plateau-bench:dev
