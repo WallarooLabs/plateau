@@ -9,7 +9,7 @@ use anyhow::Result;
 use arrow_array::RecordBatch;
 use arrow_ipc::writer::FileWriter;
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use plateau_client::{Client, Error, InsertQuery, MultiChunk};
+use plateau_client::{Client, Error, MultiChunk};
 use reqwest::StatusCode;
 use sample_arrow_rs::array::FromDataType;
 use sample_arrow_rs::datatypes::sample_flat;
@@ -317,7 +317,7 @@ struct PartitionWorker {
 }
 
 impl PartitionWorker {
-    async fn run(self) {
+    async fn run(mut self) {
         let (req_tx, req_rx) = std::sync::mpsc::channel::<SamplerRequest>();
         let (result_tx, mut result_rx) = mpsc::channel::<MultiChunk>(2);
         let st = SamplerThread {
@@ -388,17 +388,18 @@ impl PartitionWorker {
 
             let start = Instant::now();
             let r = self.client
-                .append_records(&self.topic, &self.partition, &InsertQuery::default(), multi)
+                .append_queue(&self.topic, &self.partition, multi)
                 .await;
 
             match r {
-                Ok(ok) => {
+                Ok(Some(ok)) => {
                     let rows = ok.span.end - ok.span.start;
                     tracing::debug!(
                         "{}/{} batch {} → {} rows in {:?}",
                         self.topic, self.partition, batch_idx, rows, start.elapsed()
                     );
                 }
+                Ok(None) => {}
                 Err(Error::Server(ref e)) if e.status() == Some(StatusCode::TOO_MANY_REQUESTS) => {
                     warn!("{}/{} rate limited on batch {}", self.topic, self.partition, batch_idx);
                     tokio::time::sleep(Duration::from_secs(1)).await;
