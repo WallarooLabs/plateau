@@ -386,6 +386,7 @@ impl PartitionWorker {
                 None => break,
             };
 
+            let batch_rows: usize = multi.chunks.iter().map(|c| c.num_rows()).sum();
             let start = Instant::now();
             let r = self.client
                 .append_queue(&self.topic, &self.partition, multi)
@@ -406,7 +407,10 @@ impl PartitionWorker {
                     continue;
                 }
                 Err(e) => {
-                    warn!("{}/{} batch {} failed: {}", self.topic, self.partition, batch_idx, e);
+                    warn!(
+                        "{}/{} batch {} failed ({} rows): {}",
+                        self.topic, self.partition, batch_idx, batch_rows, e
+                    );
                 }
             }
 
@@ -489,7 +493,9 @@ fn spawn_window(
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub async fn run_batch(url: &str, config: BatchConfig, state_path: &Path) -> Result<()> {
-    let client = Client::new(url)?;
+    // Stay well under the server's 10MB DefaultBodyLimit; append_queue will
+    // auto-split any batch that exceeds this threshold.
+    let client = Client::new(url)?.with_max_batch_bytes(8 * 1024 * 1024);
     client
         .healthy(Duration::from_secs(10), Duration::from_millis(100))
         .await?;

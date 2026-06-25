@@ -222,6 +222,13 @@ impl Client {
         url.parse().map_err(|e| Error::UrlParse(e, url.to_owned()))
     }
 
+    /// Override the maximum bytes per request batch. Useful when the server's
+    /// body limit differs from [DEFAULT_MAX_BATCH_BYTES].
+    pub fn with_max_batch_bytes(mut self, max: usize) -> Self {
+        self.max_batch_bytes = max;
+        self
+    }
+
     /// Wait until the server is healthy.
     ///
     /// Returns either `Ok(elapsed)` or the `Error` from the last healthcheck attempt.
