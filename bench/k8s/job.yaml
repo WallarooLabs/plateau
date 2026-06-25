@@ -1,0 +1,89 @@
+# In-cluster batch-load runner.
+#
+# Talks directly to the plateau Service (no port-forward), so the spurious
+# "Failed to buffer the request body" errors from a choked tunnel go away.
+#
+# Edit before applying:
+#   - image:        the tag you built and pushed
+#   - PLATEAU_URL:  http://<plateau-service>.<namespace>.svc.cluster.local:3030
+#   - namespace:    via `kubectl apply -n <ns> -f job.yaml`
+#
+# The schemas dir and state file live on a PVC so a restarted Job resumes the
+# same topic pool and schedule. For a throwaway run, swap the PVC for an
+# `emptyDir: {}` volume.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: batch-load-config
+data:
+  batch-config.toml: |
+    speed = 60.0
+    schemas_dir = "/data/batch-schemas"
+    state_file = "/data/batch-state.json"
+
+    [topics]
+    count = 200
+    active = 8
+    rotation_interval = "1h"
+    columns_min = 3
+    columns_max = 35
+    partitions_min = 1
+    partitions_max = 8
+    rows_min = 1000
+    rows_max = 50000
+    batch_interval = "1h"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: batch-load-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: batch-load
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels:
+        app: batch-load
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: batch-load
+          image: ghcr.io/wallaroolabs/plateau-bench:dev
+          command: ["./batch-load"]
+          args:
+            - "--config=/config/batch-config.toml"
+            - "--url=$(PLATEAU_URL)"
+          env:
+            - name: PLATEAU_URL
+              value: "http://plateau.default.svc.cluster.local:3030"
+            - name: RUST_LOG
+              value: "warn,bench=info"
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+      volumes:
+        - name: config
+          configMap:
+            name: batch-load-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: batch-load-data
