@@ -69,7 +69,13 @@ impl CatalogRetention {
         match self {
             Self::Fixed(r) => Ok(r.clone()),
             Self::RootMountTotal => {
-                let mount_size = storage::path_mount_stat(root.to_owned()).await?.total;
+                let stat = storage::path_mount_stat(root.to_owned()).await?;
+                // `total` includes blocks reserved for root (typically ~5% on
+                // ext4), which are never usable by plateau. Use avail + used
+                // (i.e. total - reserved) so retention fires before the storage
+                // monitor's min_available threshold.
+                let used = stat.total.0.saturating_sub(stat.free.0);
+                let mount_size = ByteSize(stat.avail.0.saturating_add(used));
                 info!(?root, %mount_size, "resolved size for retention");
 
                 Ok(Retention {
