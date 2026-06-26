@@ -79,6 +79,19 @@ pub struct State {
     fin: oneshot::Receiver<()>,
 }
 
+/// Order in which a segment's manifest entry and backing data are removed.
+#[derive(Clone, Copy, Debug)]
+enum RemovalOrder {
+    /// Remove the manifest entry first, then destroy the backing data. The
+    /// steady-state order used by ongoing retention.
+    ManifestFirst,
+    /// Destroy the backing data first, then remove the manifest entry. Used by
+    /// the startup reclaim when the disk is already full: the manifest update
+    /// is a SQLite write that itself needs free space, so removing it first
+    /// fails ("database or disk is full") before any space has been reclaimed.
+    DataFirst,
+}
+
 fn merge_ranges<T: Ord>(a: Range<T>, b: Range<T>) -> Range<T> {
     std::cmp::min(a.start, b.start)..std::cmp::max(a.end, b.end)
 }
@@ -397,6 +410,16 @@ impl Partition {
         state.remove_oldest(self).await;
     }
 
+    /// Reclaim the oldest segment by destroying its backing data before
+    /// removing its manifest entry. Used by the startup reclaim pass to make
+    /// progress against a full disk; see [RemovalOrder::DataFirst].
+    pub(crate) async fn reclaim_oldest(&self) {
+        let state = self.state.read().await;
+        state
+            .remove_oldest_in_order(self, RemovalOrder::DataFirst)
+            .await;
+    }
+
     pub(crate) async fn close(self) {
         self.state.into_inner().close().await;
     }
@@ -588,14 +611,33 @@ impl State {
     }
 
     async fn remove_oldest(&self, partition: &Partition) {
+        self.remove_oldest_in_order(partition, RemovalOrder::ManifestFirst)
+            .await;
+    }
+
+    async fn remove_oldest_in_order(&self, partition: &Partition, order: RemovalOrder) {
         if let Some(ix) = partition.manifest.get_min_segment(&partition.id).await {
-            // TODO ensure we handle failure if this call
-            partition
-                .manifest
-                .remove_segment(ix.to_id(&partition.id))
-                .await;
-            // succeeds but this does not complete e.g. due to node failure
-            self.messages.destroy(ix).expect("segment destroyed");
+            match order {
+                RemovalOrder::ManifestFirst => {
+                    // TODO ensure we handle failure if this call
+                    partition
+                        .manifest
+                        .remove_segment(ix.to_id(&partition.id))
+                        .await;
+                    // succeeds but this does not complete e.g. due to node failure
+                    self.messages.destroy(ix).expect("segment destroyed");
+                }
+                RemovalOrder::DataFirst => {
+                    // Free the backing data before touching the manifest so the
+                    // manifest update (which itself needs free space to journal)
+                    // cannot fail before any disk has been reclaimed.
+                    self.messages.destroy(ix).expect("segment destroyed");
+                    partition
+                        .manifest
+                        .remove_segment(ix.to_id(&partition.id))
+                        .await;
+                }
+            }
             info!("retain {}: destroyed {:?}", partition.id, ix);
             counter!(
                 "partition_segments_destroyed",
