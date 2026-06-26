@@ -76,6 +76,12 @@ pub async fn task_from_catalog_config(
     config: config::PlateauConfig,
     stop: future::BoxFuture<'_, ()>,
 ) -> bool {
+    // Before the steady-state checkpoint/retention loops start, run a one-shot
+    // reclaim. If the process is starting against a full disk, ongoing
+    // retention (which removes the manifest entry before the backing data)
+    // cannot free space, so reclaim the oldest segment data-first to unblock it.
+    catalog.reclaim().await;
+
     let (addr, end_tx, server) = http::serve(config.clone(), catalog.clone()).await;
 
     {

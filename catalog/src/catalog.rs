@@ -233,6 +233,36 @@ impl Catalog {
             .await;
     }
 
+    /// One-shot retention reclaim, run once at startup *before* the
+    /// steady-state checkpoint/retention loops begin.
+    ///
+    /// [retain] removes a segment's manifest entry before destroying its
+    /// backing data. When the process starts against a disk that is already
+    /// full that order cannot make progress: deleting the manifest row is a
+    /// SQLite write that itself needs free space to journal, so it fails
+    /// ("database or disk is full") before any data is freed.
+    ///
+    /// To break out of that state, perform a single retention check and, if we
+    /// are over the limit, destroy the backing data of the oldest segment
+    /// *first* and only then remove its manifest entry. Reclaiming that space
+    /// leaves room for the manifest update to succeed, after which the regular
+    /// retention loop can make progress on its own.
+    pub async fn reclaim(&self) {
+        if !self.over_retention_limit().await {
+            return;
+        }
+
+        let Some(oldest) = self.manifest.get_oldest_segment(None).await else {
+            error!("over retention limit at startup but no segment to reclaim");
+            return;
+        };
+
+        info!("startup reclaim: removing oldest segment {:?}", oldest);
+        let topic = self.get_topic(oldest.topic()).await;
+        let partition = topic.get_partition(oldest.partition()).await;
+        partition.reclaim_oldest().await;
+    }
+
     pub async fn retain(&self) {
         trace!("begin global retention check");
         self.gauge_topics().await;
@@ -667,6 +697,46 @@ mod test {
         let topic = catalog.get_topic("oldest").await;
         let partition = topic.get_partition("default").await;
         assert!(partition.byte_size().await < old_size);
+
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
+    async fn test_reclaim() -> Result<()> {
+        let (_root, mut catalog) = catalog().await;
+        catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
+        catalog.config.headroom = ByteSize::b(0);
+
+        let data = "x".to_string().repeat(500);
+
+        // build several sealed segments so there is a clear "oldest" to reclaim
+        let records = build_records((0..10).map(|_| (0, data.clone())));
+        let topic = catalog.get_topic("topic").await;
+        let partition = topic.get_partition("default").await;
+        for _ in 0..6 {
+            partition.extend_records(&records).await?;
+            partition.compact().await;
+        }
+        partition.extend_records(&records).await?;
+
+        let oldest_before = catalog.manifest.get_oldest_segment(None).await.unwrap();
+        let size_before = catalog.byte_size().await;
+        assert!(size_before > catalog.total_byte_limit());
+
+        // reclaim removes exactly one (the oldest) segment, freeing space so the
+        // steady-state loop can take over.
+        catalog.reclaim().await;
+
+        let size_after = catalog.byte_size().await;
+        assert!(size_after < size_before);
+
+        let oldest_after = catalog.manifest.get_oldest_segment(None).await.unwrap();
+        assert_eq!(oldest_after.partition(), oldest_before.partition());
+        assert!(oldest_after.segment > oldest_before.segment);
+
+        // a second reclaim continues making progress one segment at a time
+        catalog.reclaim().await;
+        assert!(catalog.byte_size().await < size_after);
 
         Ok(())
     }
