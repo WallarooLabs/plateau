@@ -3,7 +3,7 @@
 # All range values (columns / partitions / rows) are drawn from a clamped
 # normal distribution. See `batch-load --help` for full field docs.
 
-speed = 60.0                 # compress time: 1h intervals fire every minute
+speed = 200.0                 # compress time: 1h intervals fire every minute
 schemas_dir = "/data/batch-schemas"
 state_file = "/data/batch-state.json"
 

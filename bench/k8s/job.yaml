@@ -29,10 +29,10 @@ data:
     columns_min = 3
     columns_max = 35
     partitions_min = 1
-    partitions_max = 8
+    partitions_max = 2
     rows_min = 1000
     rows_max = 50000
-    batch_interval = "1h"
+    batch_interval = "15m"
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -60,7 +60,7 @@ spec:
       # with `kubectl get secrets -n <ns> --field-selector
       # type=kubernetes.io/dockerconfigjson` and set it here.
       imagePullSecrets:
-        - name: ghcr-pull
+        - name: regcred
       containers:
         - name: batch-load
           image: ghcr.io/wallaroolabs/plateau-bench:dev
@@ -70,7 +70,7 @@ spec:
             - "--url=$(PLATEAU_URL)"
           env:
             - name: PLATEAU_URL
-              value: "http://plateau.default.svc.cluster.local:3030"
+              value: "http://plateau.wallaroo.svc.cluster.local:3030"
             - name: RUST_LOG
               value: "warn,bench=info"
           volumeMounts:
