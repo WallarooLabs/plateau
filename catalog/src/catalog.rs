@@ -24,6 +24,7 @@ use crate::manifest::Manifest;
 use crate::manifest::Scope;
 use crate::partition;
 use crate::reconcile::ReconcileReport;
+use crate::slog::SegmentIndex;
 use crate::storage::{self, DiskMonitor};
 use crate::topic::Topic;
 
@@ -41,6 +42,8 @@ pub struct Config {
     #[serde(default = "Catalog::default_max_open_topics")]
     pub max_open_topics: usize,
     pub max_partition_bytes: ByteSize,
+    #[serde(default = "Catalog::default_max_active_partitions")]
+    pub max_active_partitions: usize,
 }
 
 impl Default for Config {
@@ -54,6 +57,7 @@ impl Default for Config {
             storage: Default::default(),
             max_open_topics: Catalog::default_max_open_topics(),
             max_partition_bytes: ByteSize::mib(3500),
+            max_active_partitions: Catalog::default_max_active_partitions(),
         }
     }
 }
@@ -69,8 +73,22 @@ impl CatalogRetention {
         match self {
             Self::Fixed(r) => Ok(r.clone()),
             Self::RootMountTotal => {
-                let mount_size = storage::path_mount_stat(root.to_owned()).await?.total;
-                info!(?root, %mount_size, "resolved size for retention");
+                let stat = storage::path_mount_stat(root.to_owned()).await?;
+                // `total` includes blocks reserved for root (typically ~5% on
+                // ext4), which are never usable by plateau. Use avail + used
+                // (i.e. total - reserved) so retention fires before the storage
+                // monitor's min_available threshold.
+                let used = stat.total.0.saturating_sub(stat.free.0);
+                let mount_size = ByteSize(stat.avail.0.saturating_add(used));
+                info!(
+                    ?root,
+                    total = %stat.total,
+                    free = %stat.free,
+                    avail = %stat.avail,
+                    %used,
+                    %mount_size,
+                    "resolved size for retention"
+                );
 
                 Ok(Retention {
                     max_bytes: mount_size,
@@ -233,6 +251,36 @@ impl Catalog {
             .await;
     }
 
+    /// One-shot retention reclaim, run once at startup *before* the
+    /// steady-state checkpoint/retention loops begin.
+    ///
+    /// [retain] removes a segment's manifest entry before destroying its
+    /// backing data. When the process starts against a disk that is already
+    /// full that order cannot make progress: deleting the manifest row is a
+    /// SQLite write that itself needs free space to journal, so it fails
+    /// ("database or disk is full") before any data is freed.
+    ///
+    /// To break out of that state, perform a single retention check and, if we
+    /// are over the limit, destroy the backing data of the oldest segment
+    /// *first* and only then remove its manifest entry. Reclaiming that space
+    /// leaves room for the manifest update to succeed, after which the regular
+    /// retention loop can make progress on its own.
+    pub async fn reclaim(&self) {
+        if !self.over_retention_limit().await {
+            return;
+        }
+
+        let Some(oldest) = self.manifest.get_oldest_segment(None).await else {
+            error!("over retention limit at startup but no segment to reclaim");
+            return;
+        };
+
+        info!("startup reclaim: removing oldest segment {:?}", oldest);
+        let topic = self.get_topic(oldest.topic()).await;
+        let partition = topic.get_partition(oldest.partition()).await;
+        partition.reclaim_oldest().await;
+    }
+
     pub async fn retain(&self) {
         trace!("begin global retention check");
         self.gauge_topics().await;
@@ -290,18 +338,22 @@ impl Catalog {
         }
 
         let mut bytes = 0;
+        // Keyed on (end time, topic, partition) so partitions that share an end
+        // time stay distinct entries rather than colliding (which would hide
+        // them from both the byte and active-count limits below).
         let mut ages = BTreeMap::default();
         for (topic_name, topic) in topics.iter() {
             for (partition_name, data) in topic.active_data().await {
-                ages.insert(*data.time.end(), (topic_name.clone(), partition_name));
+                ages.insert((*data.time.end(), topic_name.clone(), partition_name), ());
                 bytes += data.size;
             }
         }
 
         let max_bytes = self.config.max_partition_bytes.as_u64() as usize;
-        trace!(bytes, max_bytes);
-        while bytes > max_bytes {
-            let Some((time, (topic_name, partition_name))) = ages.pop_first() else {
+        let max_active = self.config.max_active_partitions;
+        trace!(bytes, max_bytes, active = ages.len(), max_active);
+        while bytes > max_bytes || ages.len() > max_active {
+            let Some(((time, topic_name, partition_name), ())) = ages.pop_first() else {
                 error!("ran out of topics while trying to prune");
                 return;
             };
@@ -313,7 +365,11 @@ impl Catalog {
             };
 
             let age = Utc::now().signed_duration_since(time).to_std();
-            info!("closing {topic_name}/{partition_name} (age {age:?}, {bytes} > {max_bytes})");
+            info!(
+                "closing {topic_name}/{partition_name} (age {age:?}, {bytes} > {max_bytes} bytes, \
+                 {} > {max_active} active)",
+                ages.len() + 1
+            );
             let Some(data) = topic.close_partition(&partition_name).await else {
                 error!("invalid partition {partition_name}");
                 continue;
@@ -388,6 +444,24 @@ impl Catalog {
         }
     }
 
+    /// Read a partition's `sealed_ix` watermark *without* loading the topic or
+    /// partition into memory.
+    ///
+    /// Returns `None` when the partition (or its topic) is not currently
+    /// resident: a non-resident partition is quiescent — no writer can extend
+    /// its tail, and a future reopen begins a brand-new segment — so every
+    /// persisted segment is immutable. Returns `Some(watermark)` when resident,
+    /// where `watermark` is the in-memory `sealed_ix` (segments at or below it
+    /// are durably sealed).
+    pub async fn resident_sealed_ix(
+        &self,
+        topic: &str,
+        partition: &str,
+    ) -> Option<Option<SegmentIndex>> {
+        let state = self.state.read().await;
+        state.topics.get(topic)?.resident_sealed_ix(partition).await
+    }
+
     /// Returns true if the Catalog is not accepting log writes.
     pub fn is_readonly(&self) -> bool {
         self.disk_monitor.is_readonly()
@@ -425,6 +499,12 @@ impl Catalog {
     /// Default number of topics to keep in-memory.
     pub fn default_max_open_topics() -> usize {
         128
+    }
+
+    /// Default number of active (in-memory, writable) partitions to keep open
+    /// across the catalog.
+    pub fn default_max_active_partitions() -> usize {
+        256
     }
 
     pub async fn close(self) {
@@ -672,6 +752,46 @@ mod test {
     }
 
     #[test_log::test(tokio::test)]
+    async fn test_reclaim() -> Result<()> {
+        let (_root, mut catalog) = catalog().await;
+        catalog.config.retain.max_bytes = ByteSize::b(8000 + catalog.manifest.db_bytes() as u64);
+        catalog.config.headroom = ByteSize::b(0);
+
+        let data = "x".to_string().repeat(500);
+
+        // build several sealed segments so there is a clear "oldest" to reclaim
+        let records = build_records((0..10).map(|_| (0, data.clone())));
+        let topic = catalog.get_topic("topic").await;
+        let partition = topic.get_partition("default").await;
+        for _ in 0..6 {
+            partition.extend_records(&records).await?;
+            partition.compact().await;
+        }
+        partition.extend_records(&records).await?;
+
+        let oldest_before = catalog.manifest.get_oldest_segment(None).await.unwrap();
+        let size_before = catalog.byte_size().await;
+        assert!(size_before > catalog.total_byte_limit());
+
+        // reclaim removes exactly one (the oldest) segment, freeing space so the
+        // steady-state loop can take over.
+        catalog.reclaim().await;
+
+        let size_after = catalog.byte_size().await;
+        assert!(size_after < size_before);
+
+        let oldest_after = catalog.manifest.get_oldest_segment(None).await.unwrap();
+        assert_eq!(oldest_after.partition(), oldest_before.partition());
+        assert!(oldest_after.segment > oldest_before.segment);
+
+        // a second reclaim continues making progress one segment at a time
+        catalog.reclaim().await;
+        assert!(catalog.byte_size().await < size_after);
+
+        Ok(())
+    }
+
+    #[test_log::test(tokio::test)]
     async fn test_max_open_topics() -> Result<()> {
         let (_root, catalog) = catalog_config(Config {
             max_open_topics: 1,
@@ -787,6 +907,47 @@ mod test {
             // comes back but does not invoke the byte limit
             assert_eq!(catalog.active_partitions().await, 2);
         }
+
+        Ok(())
+    }
+
+    #[test(tokio::test)]
+    async fn test_partition_active_count_limit() -> Result<()> {
+        // High byte limit so only the count limit is exercised.
+        let (_root, catalog) = catalog_config(Config {
+            max_active_partitions: 2,
+            ..Default::default()
+        })
+        .await;
+
+        let time = Utc::now()
+            .checked_sub_signed(TimeDelta::try_seconds(10).unwrap())
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+
+        let record = Record {
+            time,
+            message: "hello".bytes().collect(),
+        };
+
+        // Three distinct topics, each with one active partition.
+        for ix in 0..3 {
+            let name = format!("topic-{ix}");
+            let topic = catalog.get_topic(&name).await;
+            let insert = topic
+                .extend_records("default", slice::from_ref(&record))
+                .await?;
+            topic
+                .ensure_index("default", RecordIndex(insert.end.0 - 1))
+                .await?;
+        }
+
+        assert_eq!(catalog.active_partitions().await, 3);
+
+        // Pruning closes the oldest active partition down to the count limit.
+        catalog.prune_topics().await;
+        assert_eq!(catalog.active_partitions().await, 2);
 
         Ok(())
     }
