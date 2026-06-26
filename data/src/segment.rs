@@ -228,7 +228,9 @@ impl Segment {
             .parts()
             .map(|part| fs::metadata(part).map(|p| p.len()).unwrap_or(0))
             .sum();
-        let cache_size = fs::metadata(self.cache_path()).map(|p| p.len()).unwrap_or(0);
+        let cache_size = fs::metadata(self.cache_path())
+            .map(|p| p.len())
+            .unwrap_or(0);
         Ok(usize::try_from(main_size + part_size + cache_size)?)
     }
 }
