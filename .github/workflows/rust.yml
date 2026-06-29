@@ -97,7 +97,7 @@ jobs:
 
   build-multi-arm64:
     runs-on:
-      - buildjet-4vcpu-ubuntu-2204-arm
+      - ubuntu-24.04-arm
     steps:
       - name: Prepare
         run: |
