@@ -20,22 +20,22 @@ jobs:
   check:
     runs-on: "8x32g"
     steps:
-    - uses: actions/checkout@v4
-    - name: Announce Rust
-      shell: bash
-      run: cargo --version && rustc --version && rustup --version
-    - uses: Swatinem/rust-cache@v2
-      with:
-        shared-key: "20240509"
-    - name: Check formatting
-      shell: bash
-      run: make check-fmt
-    - name: Lint
-      shell: bash
-      run: make lint
-    - name: Run tests
-      shell: bash
-      run: make test
+      - uses: actions/checkout@v7
+      - name: Announce Rust
+        shell: bash
+        run: cargo --version && rustc --version && rustup --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "20240509"
+      - name: Check formatting
+        shell: bash
+        run: make check-fmt
+      - name: Lint
+        shell: bash
+        run: make lint
+      - name: Run tests
+        shell: bash
+        run: make test
 
   build-multi-amd64:
     runs-on:
@@ -47,7 +47,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
           labels: |
@@ -56,17 +56,17 @@ jobs:
             org.opencontainers.image.title="plateau"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to ghcr.io
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.PUSH_CONTAINER_TOKEN }}
 
       - name: Login to us-docker.pkg.dev/wallaroo-dev-253816/docker-hub-us
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: us-docker.pkg.dev
           username: _json_key
@@ -74,7 +74,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -88,7 +88,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_ARCH }}
           path: /tmp/digests/*
@@ -105,7 +105,7 @@ jobs:
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
           labels: |
@@ -114,17 +114,17 @@ jobs:
             org.opencontainers.image.title="plateau"
 
       - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Login to ghcr.io
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.PUSH_CONTAINER_TOKEN }}
 
       - name: Login to us-docker.pkg.dev/wallaroo-dev-253816/docker-hub-us
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: us-docker.pkg.dev
           username: _json_key
@@ -132,7 +132,7 @@ jobs:
 
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
@@ -146,7 +146,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ env.PLATFORM_ARCH }}
           path: /tmp/digests/*
@@ -160,18 +160,18 @@ jobs:
       - build-multi-arm64
     steps:
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Docker meta
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY_IMAGE }}
           tags: |
@@ -184,7 +184,7 @@ jobs:
             org.opencontainers.image.title="plateau"
 
       - name: Login to ghcr.io
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
