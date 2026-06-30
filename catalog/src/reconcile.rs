@@ -720,8 +720,7 @@ impl ReconcileJob {
                 // Add the untracked path to our stats
                 let file_size = fs::metadata(&file_path)
                     .await
-                    .map(|m| m.len() as usize)
-                    .unwrap_or(0);
+                    .map_or(0, |m| m.len() as usize);
                 self.state
                     .report
                     .sealed

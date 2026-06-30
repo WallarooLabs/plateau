@@ -151,7 +151,7 @@ impl Writer {
     }
 
     pub(super) fn size(&self) -> u64 {
-        fs::metadata(&self.path).map(|p| p.len()).unwrap_or(0)
+        fs::metadata(&self.path).map_or(0, |p| p.len())
     }
 }
 
