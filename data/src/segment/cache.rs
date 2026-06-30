@@ -82,6 +82,7 @@ impl ActiveChunk {
         Ok(())
     }
 
+    #[expect(dead_code)]
     pub fn size(&self) -> u64 {
         self.writer.as_ref().map_or(0, |w| w.size())
     }
