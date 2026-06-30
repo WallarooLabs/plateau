@@ -103,7 +103,7 @@ pub async fn task_from_catalog_config(
             tasks.push(Box::pin(replication::run(replicate, addr)));
         }
 
-        future::select_all(tasks.into_iter()).await;
+        future::select_all(tasks).await;
     }
 
     tracing::info!("shutting down");

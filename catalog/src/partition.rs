@@ -247,9 +247,9 @@ impl Partition {
         match order {
             Ordering::Forward => stored
                 .filter(move |data| future::ready(!cached_segments.contains(&data.index)))
-                .chain(stream::iter(cached.into_iter()))
+                .chain(stream::iter(cached))
                 .boxed(),
-            Ordering::Reverse => stream::iter(cached.into_iter())
+            Ordering::Reverse => stream::iter(cached)
                 .chain(
                     stored
                         .filter(move |data| future::ready(!cached_segments.contains(&data.index))),
@@ -319,7 +319,7 @@ impl Partition {
 
             let boolean_values: Vec<bool> = indices_array
                 .into_iter()
-                .zip(times_array.into_iter())
+                .zip(times_array)
                 .map(|(index, time)| {
                     index.is_some_and(|idx| idx >= (start.0 as i32))
                         && time.is_some_and(|t| times.contains(&parse_time(t)))
@@ -344,7 +344,7 @@ impl Partition {
             .await
             .iter()
             .map(|data| data.records.clone())
-            .chain(stored.into_iter())
+            .chain(stored)
             .reduce(merge_ranges)
     }
 
