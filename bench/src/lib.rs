@@ -154,11 +154,9 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
             while let Some((dn, d)) = rx.recv().await {
                 let elapsed = start.elapsed().as_secs();
                 total += dn;
-                let nps = if elapsed > 0 {
-                    ((total as u64) / elapsed).to_string()
-                } else {
-                    String::from("-")
-                };
+                let nps = (total as u64)
+                    .checked_div(elapsed)
+                    .map_or_else(|| String::from("-"), |v| v.to_string());
                 h.record(d.as_millis() as u64).unwrap();
                 let p50 = Duration::from_millis(h.value_at_percentile(50.));
                 let p90 = Duration::from_millis(h.value_at_percentile(90.));
