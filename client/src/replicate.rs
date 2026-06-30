@@ -269,12 +269,12 @@ impl ReplicationWorker {
 
         let hosts_ref = &hosts;
 
-        let partitions = stream::iter(replicate.partitions.into_iter())
+        let partitions = stream::iter(replicate.partitions)
             .flat_map(move |part| stream::once(part.into_job(hosts_ref)))
             .try_collect()
             .await?;
 
-        let topics = stream::iter(replicate.topics.into_iter())
+        let topics = stream::iter(replicate.topics)
             .flat_map(move |topic| stream::once(topic.into_job(hosts_ref)))
             .try_collect()
             .await?;

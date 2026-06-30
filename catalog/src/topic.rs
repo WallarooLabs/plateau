@@ -123,7 +123,7 @@ impl Topic {
             })
             .flat_map(|(name, p)| {
                 f(p).into_stream()
-                    .flat_map(|v| stream::iter(v.into_iter()))
+                    .flat_map(stream::iter)
                     .map(move |v| (name.clone(), v))
             })
             .collect()
