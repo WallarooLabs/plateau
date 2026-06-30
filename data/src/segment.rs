@@ -223,14 +223,12 @@ impl Segment {
     /// Return an estimate of the on-disk size of the corresponding file(s),
     /// including the active chunk cache if present.
     pub fn size_estimate(&self) -> Result<usize> {
-        let main_size = fs::metadata(&self.path).map(|p| p.len()).unwrap_or(0);
+        let main_size = fs::metadata(&self.path).map_or(0, |p| p.len());
         let part_size: u64 = self
             .parts()
-            .map(|part| fs::metadata(part).map(|p| p.len()).unwrap_or(0))
+            .map(|part| fs::metadata(part).map_or(0, |p| p.len()))
             .sum();
-        let cache_size = fs::metadata(self.cache_path())
-            .map(|p| p.len())
-            .unwrap_or(0);
+        let cache_size = fs::metadata(self.cache_path()).map_or(0, |p| p.len());
         Ok(usize::try_from(main_size + part_size + cache_size)?)
     }
 }

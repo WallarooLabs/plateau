@@ -192,9 +192,7 @@ async fn healthcheck(
     State(AppState(catalog, config)): State<AppState>,
 ) -> Result<Response<serde_json::Value>, ErrorReply> {
     let duration = SystemTime::now().duration_since(catalog.last_checkpoint().await);
-    let healthy = duration
-        .map(|d| d < config.catalog.checkpoint_interval * 10)
-        .unwrap_or(true);
+    let healthy = duration.map_or(true, |d| d < config.catalog.checkpoint_interval * 10);
     if healthy {
         Ok(Response::ok(json!({"ok": "true"})))
     } else {
