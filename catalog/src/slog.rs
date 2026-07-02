@@ -674,11 +674,11 @@ fn spawn_slog_thread(
                     full_chunks,
                     active_chunk,
                 })) => {
-                    trace!(%name, ?records, "received request");
+                    trace!(name, ?records, "received request");
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
-                            trace!(%name, ?id, ?segment, "segment change");
+                            trace!(name, ?id, ?segment, "segment change");
                             writer.close().expect("sealed segment");
                             None
                         } else {
@@ -686,7 +686,7 @@ fn spawn_slog_thread(
                         }
                     });
                     let (schema, ref mut writer, _) = current.get_or_insert_with(|| {
-                        trace!(%name, ?segment, "opening segment");
+                        trace!(name, ?segment, "opening segment");
                         (
                             schema.clone(),
                             new_segment
@@ -704,7 +704,7 @@ fn spawn_slog_thread(
                     let mut size = writer.size_estimate().expect("segment size estimate");
                     let record_len = records.end.0 - records.start.0;
                     debug!(
-                        %name,
+                        name,
                         ?segment,
                         end = ?records.end,
                         len = record_len,
@@ -724,7 +724,7 @@ fn spawn_slog_thread(
                         if let Some((_, w, _)) = current.take() {
                             size = w.close().expect("segment close");
                         }
-                        trace!(%size, %name, ?segment, ?records, "sealed");
+                        trace!(size, name, ?segment, ?records, "sealed");
                     }
 
                     let response = WriteResult {
@@ -737,9 +737,9 @@ fn spawn_slog_thread(
                         },
                         sealed: seal,
                     };
-                    trace!(%name, ?segment, end = ?records.end, "commit send");
+                    trace!(name, ?segment, end = ?records.end, "commit send");
                     tx_commits.blocking_send(response).expect("channel closed");
-                    trace!(%name, "commit sent");
+                    trace!(name, "commit sent");
                 }
                 Some(WriterMessage::Fin) | None => {
                     trace!("channel closed; shutting down");
@@ -754,7 +754,7 @@ fn spawn_slog_thread(
         }
 
         current.take().map(|(_, writer, _)| writer.close());
-        info!(%name, "writer closed");
+        info!(name, "writer closed");
     });
 
     (SlogThread { tx, tx_fin, handle }, rx_commits)

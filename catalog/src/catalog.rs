@@ -315,7 +315,7 @@ impl Catalog {
             info!(
                 open = topics.len(),
                 max_open = self.config.max_open_topics,
-                %to_drop,
+                to_drop,
                 "open topic limit hit, dropping topic"
             );
 
@@ -347,14 +347,14 @@ impl Catalog {
 
             // XXX - these errors should never happen as we hold the lock and just iterated above
             let Some(topic) = topics.get(&topic_name) else {
-                error!(%topic_name, "invalid topic");
+                error!(topic_name, "invalid topic");
                 continue;
             };
 
             let age = Utc::now().signed_duration_since(time).to_std();
             info!(
-                %topic_name,
-                %partition_name,
+                topic_name,
+                partition_name,
                 ?age,
                 bytes,
                 max_bytes,
@@ -363,7 +363,7 @@ impl Catalog {
                 "closing partition"
             );
             let Some(data) = topic.close_partition(&partition_name).await else {
-                error!(%partition_name, "invalid partition");
+                error!(partition_name, "invalid partition");
                 continue;
             };
 
@@ -448,7 +448,7 @@ impl Catalog {
             Err(read) => {
                 drop(read);
                 let mut write = self.state.write().await;
-                info!(%name, "creating new topic");
+                info!(name, "creating new topic");
                 let topic = Topic::attach(
                     self.topic_root.clone(),
                     self.manifest.clone(),
@@ -948,7 +948,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("topic-{}", ix % 3);
-            trace!(%name, record_ix = ix / 3, "checking record");
+            trace!(name, record_ix = ix / 3, "checking record");
             {
                 let topic = catalog.get_topic(&name).await;
                 assert_eq!(

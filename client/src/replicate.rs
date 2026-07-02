@@ -285,7 +285,7 @@ impl ReplicationWorker {
             .await?;
 
         for (id, (url, _)) in &hosts {
-            info!(host_id = %id, %url, "known host");
+            info!(host_id = id, url, "known host");
         }
 
         Ok(Self {

@@ -61,7 +61,7 @@ impl Worker {
             let (dn, status) = self.task.run(&self.config).await;
             let dt = start.elapsed();
             total += dn;
-            trace!(%status);
+            trace!(status);
             self.status.send(status).unwrap();
             self.stats.send((dn, dt)).await.unwrap();
             if self.delay > dt {
@@ -103,7 +103,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
 
     let mut rng = rand::thread_rng();
     let seed = rng.next_u64();
-    debug!(%seed);
+    debug!(seed);
     let mut rng = StdRng::seed_from_u64(seed);
     tasks.shuffle(&mut rng);
 
@@ -182,7 +182,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
         let mut update_strings: Vec<_> = updates.iter_mut().map(|up| up.borrow().clone()).collect();
         update_strings.sort();
         for up in update_strings {
-            debug!(%up, "worker status");
+            debug!(up, "worker status");
         }
 
         strings = stat_updates
@@ -191,7 +191,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
             .collect();
         strings.sort();
         for up in &strings {
-            debug!(%up, "stats update");
+            debug!(up, "stats update");
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -203,7 +203,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
 
     for (name, handle) in handles {
         let value = handle.await.unwrap();
-        debug!(worker = %name, total = %value, "worker finished");
+        debug!(worker = name, total = value, "worker finished");
     }
 
     let start = Instant::now();
@@ -216,6 +216,6 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
     info!(elapsed = ?start.elapsed(), "plateau shut down");
 
     for up in strings {
-        info!(%up, "stats update");
+        info!(up, "stats update");
     }
 }

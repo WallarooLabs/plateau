@@ -366,8 +366,8 @@ impl Client {
                 // reshape of a non-empty queue must also be non-empty
                 front = queue.front()?.unwrap();
                 warn!(
-                    %max_rows,
-                    bytes = %front.bytes.len(),
+                    max_rows,
+                    bytes = front.bytes.len(),
                     "decreasing inferred max row count"
                 );
             }
@@ -387,7 +387,7 @@ impl Client {
                 Err(e) => {
                     if let Error::RequestTooLong(request_size, MaxRequestSize(Some(s))) = e {
                         if front.rows > 1 {
-                            warn!(max_batch_bytes = %s, "detected new max plateau batch byte limit");
+                            warn!(max_batch_bytes = s, "detected new max plateau batch byte limit");
                             self.max_batch_bytes = s;
                             // return to sender: because we don't pop_front here
                             // we'll start again from the top with the new limit

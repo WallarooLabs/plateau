@@ -81,7 +81,7 @@ impl BatchClient {
             .await
             .map_err(|e| match e {
                 ClientError::RequestTooLong(_, MaxRequestSize(Some(s))) => {
-                    warn!(max_row_size = %s, "detected new max plateau row size");
+                    warn!(max_row_size = s, "detected new max plateau row size");
                     update_default_max_batch_bytes(s);
                     self.max_batch_bytes = s;
                     BatchSendError::Resize
@@ -153,7 +153,7 @@ pub trait Batch: Sized {
                 self.split_into(bytes / max_bytes + 1)
             } else if self.prune().is_none() {
                 error!(
-                    %bytes,
+                    bytes,
                     "inference log batch is too large to send, and cannot be reduced"
                 );
                 vec![]

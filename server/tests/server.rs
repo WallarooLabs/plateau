@@ -1014,7 +1014,7 @@ async fn info_endpoint() -> Result<()> {
     let pretty_json = serde_json::to_string_pretty(&info_response)?;
     tracing::debug!("Info endpoint response:");
     for line in pretty_json.lines() {
-        tracing::debug!(%line, "info endpoint response line");
+        tracing::debug!(line, "info endpoint response line");
     }
 
     // Should have 2 topics
