@@ -129,9 +129,7 @@ impl Segment {
     pub fn parts(&self) -> impl Iterator<Item = PathBuf> {
         let arrow_parts = arrow::Segment::new(self.path.clone())
             .map(|s| s.parts())
-            .inspect_err(
-                |e| error!(path = ?self.path, error = ?e, "error enumerating arrow parts"),
-            )
+            .inspect_err(|e| error!(path = ?self.path, error = ?e, "error enumerating arrow parts"))
             .ok();
 
         arrow_parts.into_iter().flatten()

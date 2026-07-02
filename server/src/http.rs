@@ -256,9 +256,7 @@ async fn topic_append_internal(
     let topic = catalog.get_topic(&topic_name).await;
     info!(
         len = chunk.0.len(),
-        topic_name,
-        partition_name,
-        "appending records"
+        topic_name, partition_name, "appending records"
     );
     let r = topic.extend(&partition_name, chunk.0).await;
 
