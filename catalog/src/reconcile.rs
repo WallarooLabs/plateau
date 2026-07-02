@@ -620,7 +620,7 @@ impl ReconcileJob {
         // Get the current topic name
         let topic_name = topics[current_topic_index].clone();
 
-        debug!(%topic_name, "reconciling topic");
+        debug!(topic_name, "reconciling topic");
 
         // Get all partitions for this topic
         let partitions = self.catalog.manifest().get_partitions(&topic_name).await;
@@ -645,7 +645,7 @@ impl ReconcileJob {
 
         // Process the current partition
         let partition_name = partitions[current_partition_index].clone();
-        debug!(%topic_name, %partition_name, "reconciling partition");
+        debug!(topic_name, partition_name, "reconciling partition");
 
         // Process this partition
         let partition_segments = self
@@ -733,7 +733,7 @@ impl ReconcileJob {
                     }
                 }
 
-                warn!(%topic_name, ?file_path, "untracked file in topic");
+                warn!(topic_name, ?file_path, "untracked file in topic");
                 // Add the untracked path to our stats
                 let file_size = fs::metadata(&file_path)
                     .await
@@ -762,7 +762,7 @@ impl ReconcileJob {
         let partition_id = PartitionId::new(topic_name, partition_name);
         let topic_path = Topic::partition_root(root, topic_name);
 
-        debug!(%topic_name, %partition_name, ?topic_path, "processing partition");
+        debug!(topic_name, partition_name, ?topic_path, "processing partition");
 
         // Classify this partition's segments once for the whole pass, *without*
         // loading it into memory. A partition that is not resident is quiescent:
@@ -815,7 +815,7 @@ impl ReconcileJob {
             let segment_file_name = format!("{}-{}", slog_name, segment.index.0);
             let segment_path = Slog::segment_path(&topic_path, &slog_name, segment.index);
 
-            debug!(%slog_name, ?segment_path, "checking segment file");
+            debug!(slog_name, ?segment_path, "checking segment file");
 
             // Mark this file as tracked regardless of bucket so the orphan
             // detection phase does not false-positive on active segment files.
@@ -893,7 +893,7 @@ impl ReconcileJob {
         );
         if total_actual_size.abs_diff(segment.size) > 0 {
             warn!(
-                %segment_file_name,
+                segment_file_name,
                 %expected_size,
                 %actual_size,
                 "size mismatch for segment"
@@ -930,17 +930,17 @@ impl ReconcileJob {
                     )
                     .await;
                 if applied {
-                    info!(%segment_file_name, "fixed size mismatch for segment");
+                    info!(segment_file_name, "fixed size mismatch for segment");
                 } else {
                     info!(
-                        %segment_file_name,
+                        segment_file_name,
                         "skipped stale size fix for segment (concurrently removed or changed)"
                     );
                 }
             }
         } else {
             debug!(
-                %segment_file_name,
+                segment_file_name,
                 expected = segment.size,
                 actual = total_actual_size,
                 "segment size ok"
@@ -975,9 +975,9 @@ impl ReconcileJob {
         let manifest_size = segment.size;
         let delta = disk_size as i64 - manifest_size as i64;
         debug!(
-            %segment_file_name,
-            %topic_name,
-            %partition_name,
+            segment_file_name,
+            topic_name,
+            partition_name,
             manifest_size,
             disk_size,
             delta,
@@ -1009,10 +1009,10 @@ impl ReconcileJob {
         match fs::metadata(segment_path).await {
             Ok(metadata) => {
                 total_actual_size += metadata.len() as usize;
-                debug!(%segment_file_name, size = metadata.len(), "segment file size");
+                debug!(segment_file_name, size = metadata.len(), "segment file size");
             }
             Err(e) => {
-                warn!(%segment_file_name, error = ?e, "error getting metadata for segment");
+                warn!(segment_file_name, error = ?e, "error getting metadata for segment");
             }
         }
 

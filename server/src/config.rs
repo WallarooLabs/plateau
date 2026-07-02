@@ -29,7 +29,7 @@ impl PlateauConfig {
         match self.to_string_pretty() {
             Ok(c) => {
                 for line in c.lines() {
-                    info!(%line, "config toml");
+                    info!(line, "config toml");
                 }
             }
             Err(e) => error!(%e, "failed to format config"),

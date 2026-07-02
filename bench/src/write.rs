@@ -117,7 +117,7 @@ impl Task for Writer {
             self.count += rows;
             (rows, (ok.span.start..ok.span.end))
         } else {
-            warn!(topic = %self.topic, partition = %self.partition, "rate limited");
+            warn!(topic = self.topic, partition = self.partition, "rate limited");
             (0, 0..0)
         };
 
