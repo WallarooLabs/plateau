@@ -762,7 +762,12 @@ impl ReconcileJob {
         let partition_id = PartitionId::new(topic_name, partition_name);
         let topic_path = Topic::partition_root(root, topic_name);
 
-        debug!(topic_name, partition_name, ?topic_path, "processing partition");
+        debug!(
+            topic_name,
+            partition_name,
+            ?topic_path,
+            "processing partition"
+        );
 
         // Classify this partition's segments once for the whole pass, *without*
         // loading it into memory. A partition that is not resident is quiescent:
@@ -976,12 +981,7 @@ impl ReconcileJob {
         let delta = disk_size as i64 - manifest_size as i64;
         debug!(
             segment_file_name,
-            topic_name,
-            partition_name,
-            manifest_size,
-            disk_size,
-            delta,
-            "active segment"
+            topic_name, partition_name, manifest_size, disk_size, delta, "active segment"
         );
 
         self.state.report.active.push(ActiveSegmentReport {
@@ -1009,7 +1009,11 @@ impl ReconcileJob {
         match fs::metadata(segment_path).await {
             Ok(metadata) => {
                 total_actual_size += metadata.len() as usize;
-                debug!(segment_file_name, size = metadata.len(), "segment file size");
+                debug!(
+                    segment_file_name,
+                    size = metadata.len(),
+                    "segment file size"
+                );
             }
             Err(e) => {
                 warn!(segment_file_name, error = ?e, "error getting metadata for segment");
