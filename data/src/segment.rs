@@ -44,7 +44,7 @@ fn remove_file_if_present(path: &Path) -> Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            warn!("attempted to remove missing file {:?}", path);
+            warn!(?path, "attempted to remove missing file");
             Ok(())
         }
         other => other.context(format!("removing {path:?}")),
@@ -98,7 +98,7 @@ impl Segment {
 
     fn file(&self) -> Result<fs::File> {
         if self.path.exists() {
-            warn!("truncating extant segment file at {}", self.path.display());
+            warn!(path = %self.path.display(), "truncating extant segment file");
         }
 
         Ok(fs::OpenOptions::new()
@@ -129,7 +129,9 @@ impl Segment {
     pub fn parts(&self) -> impl Iterator<Item = PathBuf> {
         let arrow_parts = arrow::Segment::new(self.path.clone())
             .map(|s| s.parts())
-            .inspect_err(|e| error!("error enumerating parquet parts for {:?}, {e:?}", self.path))
+            .inspect_err(
+                |e| error!(path = ?self.path, error = ?e, "error enumerating parquet parts"),
+            )
             .ok();
 
         arrow_parts.into_iter().flatten()
@@ -159,7 +161,7 @@ impl Segment {
         match self.iter() {
             Ok(_) => true,
             Err(err) => {
-                warn!("error validating segment: {err:?}");
+                warn!(?err, "error validating segment");
                 false
             }
         }
@@ -167,16 +169,12 @@ impl Segment {
 
     pub fn iter(&self) -> Result<impl SegmentIterator> {
         let cache = cache::read(self.cache_path()).unwrap_or_else(|err| {
-            error!("error reading cache at {:?}: {err:?}", self.cache_path());
+            error!(cache_path = ?self.cache_path(), ?err, "error reading cache");
             None
         });
 
         if self.path.exists() {
-            trace!(
-                "found segment file {:?}, cache: {}",
-                self.path,
-                cache.is_some()
-            );
+            trace!(path = ?self.path, has_cache = cache.is_some(), "found segment file");
             let mut file = fs::File::open(&self.path)?;
 
             // Check for a header
@@ -184,10 +182,10 @@ impl Segment {
             let arrow = arrow::check_file(&mut file);
             if let (Ok(parquet), Ok(arrow)) = (parquet, arrow) {
                 return if parquet {
-                    trace!("{:?} in parquet format", self.path);
+                    trace!(path = ?self.path, "in parquet format");
                     anyhow::bail!("parquet format is no longer supported");
                 } else if arrow {
-                    trace!("{:?} in arrow format", self.path);
+                    trace!(path = ?self.path, "in arrow format");
                     let segment = arrow::Segment::new(self.path.clone())?;
                     Ok(ReadFormat::Arrow(segment.read(cache)?))
                 } else {
@@ -195,7 +193,7 @@ impl Segment {
                 };
             }
 
-            trace!("empty segment file {:?}", self.path);
+            trace!(path = ?self.path, "empty segment file");
         }
 
         if let Some(data) = cache {
@@ -614,7 +612,7 @@ pub mod test {
 
         let all_counts = [1, 3, 4, 2, 1];
         for ix in 1..all_counts.len() {
-            trace!("iter: {ix} counts: 1 + {:?}", &all_counts[0..ix]);
+            trace!(ix, additional_counts = ?&all_counts[0..ix], "iter counts");
             let mut chunk = a.chunk.clone();
 
             let path = root.path().join(format!("{ix:?}.arrow"));

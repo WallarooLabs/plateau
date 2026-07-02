@@ -61,7 +61,7 @@ impl Worker {
             let (dn, status) = self.task.run(&self.config).await;
             let dt = start.elapsed();
             total += dn;
-            trace!("{}", status);
+            trace!(%status);
             self.status.send(status).unwrap();
             self.stats.send((dn, dt)).await.unwrap();
             if self.delay > dt {
@@ -103,7 +103,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
 
     let mut rng = rand::thread_rng();
     let seed = rng.next_u64();
-    debug!("seed: {}", seed);
+    debug!(%seed);
     let mut rng = StdRng::seed_from_u64(seed);
     tasks.shuffle(&mut rng);
 
@@ -178,11 +178,11 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
     let start = Instant::now();
     let mut strings = vec![];
     while start.elapsed() < test_duration {
-        debug!("{:->80}", "");
+        debug!("--------------------------------------------------------------------------------");
         let mut update_strings: Vec<_> = updates.iter_mut().map(|up| up.borrow().clone()).collect();
         update_strings.sort();
         for up in update_strings {
-            debug!("{}", up);
+            debug!(%up, "worker status");
         }
 
         strings = stat_updates
@@ -191,7 +191,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
             .collect();
         strings.sort();
         for up in &strings {
-            debug!("{}", up);
+            debug!(%up, "stats update");
         }
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -203,7 +203,7 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
 
     for (name, handle) in handles {
         let value = handle.await.unwrap();
-        debug!("{}: {}", name, value);
+        debug!(worker = %name, total = %value, "worker finished");
     }
 
     let start = Instant::now();
@@ -213,9 +213,9 @@ pub async fn run(mut tasks: Vec<Box<dyn TaskBuilder>>, test_duration: Duration) 
         plateau_server.await.unwrap(),
         "plateau failed to shutdown cleanly"
     );
-    info!("plateau shut down in {:?}", start.elapsed());
+    info!(elapsed = ?start.elapsed(), "plateau shut down");
 
     for up in strings {
-        info!("{}", up);
+        info!(%up, "stats update");
     }
 }

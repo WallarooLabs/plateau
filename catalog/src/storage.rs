@@ -78,7 +78,7 @@ impl DiskMonitor {
         let path = root.to_path_buf();
         let path = spawn_blocking(|| canonical_mount(path)).await??;
 
-        info!("storage monitor starting for {root:?} (mount point: {path:?})");
+        info!(?root, mount_point = ?path, "storage monitor starting");
 
         loop {
             let deadline = self

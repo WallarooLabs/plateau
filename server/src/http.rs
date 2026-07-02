@@ -171,7 +171,7 @@ pub async fn serve(
 
     let fut = server.with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
     let span = tracing::info_span!("Server::run", ?addr);
-    tracing::info!(parent: &span, "listening on http://{}", addr);
+    tracing::info!(parent: &span, %addr, "listening");
 
     (
         addr,
@@ -255,10 +255,10 @@ async fn topic_append_internal(
 
     let topic = catalog.get_topic(&topic_name).await;
     info!(
-        "appending {} to {}/{}",
-        chunk.0.len(),
-        topic_name,
-        partition_name
+        len = chunk.0.len(),
+        %topic_name,
+        %partition_name,
+        "appending records"
     );
     let r = topic.extend(&partition_name, chunk.0).await;
 

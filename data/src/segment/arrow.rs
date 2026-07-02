@@ -35,7 +35,7 @@ pub fn check_file(f: &mut fs::File) -> anyhow::Result<bool> {
     // Handle empty files
     match f.read_exact(&mut buffer) {
         Ok(_) => {
-            trace!("Read header bytes: {:?}", buffer);
+            trace!(?buffer, "read header bytes");
             Ok(buffer.into_iter().eq(ARROW_HEADER.bytes()))
         }
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
@@ -88,7 +88,7 @@ impl Segment {
     }
 
     fn recover(&self, cache: Option<cache::Data>) -> anyhow::Result<(usize, Reader)> {
-        warn!("beginning recovery of {:?}", self.path);
+        warn!(path = ?self.path, "beginning recovery");
 
         // Combine all readable data from a damaged (partially written) segment with
         // the data from cache into a new, "recovered" file.
@@ -104,7 +104,7 @@ impl Segment {
                 let schema = stream_reader.schema();
                 Ok((stream_reader, schema))
             })
-            .map_err(|e| error!("error reading {:?}: {e:?}", self.path))
+            .map_err(|e| error!(path = ?self.path, error = ?e, "error reading"))
             .ok()
             .unzip();
 
@@ -122,8 +122,8 @@ impl Segment {
                     // the cache as it should always have fewer rows than even a
                     // single chunk.
                     warn!(
-                        "segment schema does not match cache schema. discarding {} rows from cache",
-                        cache.rows.chunk.len()
+                        rows = cache.rows.chunk.len(),
+                        "segment schema does not match cache schema, discarding rows from cache"
                     );
                     (a, None)
                 } else {
@@ -170,8 +170,8 @@ impl Segment {
             }
         } else if let Some(chunk_ix) = chunk_ix {
             warn!(
-                "gap between chunks in file ({}) and cache index ({})",
-                recovered_chunks, chunk_ix
+                recovered_chunks,
+                chunk_ix, "gap between chunks in file and cache index"
             );
             cache_recovery = "(cache invalid)"
         }
@@ -179,8 +179,11 @@ impl Segment {
         writer.finish()?;
         writer.into_inner()?.sync_all()?;
         warn!(
-            "recovered {recovered_rows} rows in {recovered_chunks} chunks from {:?} {cache_recovery}",
-            self.path,
+            recovered_rows,
+            recovered_chunks,
+            path = ?self.path,
+            cache_recovery,
+            "recovered rows in chunks"
         );
 
         // Now, we should be able to read normally from the recovered file.

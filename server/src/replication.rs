@@ -45,13 +45,11 @@ pub async fn run(mut config: Config, addr: SocketAddr) {
 
     match ReplicationWorker::from_replicate(config.replicate).await {
         Ok(replication) => {
-            error!(
-                "unexpectedly exited loop: {:?}",
-                replication.run_forever(config.period, backoff).await
-            );
+            let result = replication.run_forever(config.period, backoff).await;
+            error!(?result, "unexpectedly exited loop");
         }
         Err(e) => {
-            error!("config error: {:?}", e)
+            error!(%e, "config error")
         }
     }
 }

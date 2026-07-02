@@ -99,7 +99,7 @@ impl Task for Writer {
     async fn run(&mut self, config: &Config) -> (usize, String) {
         let start = Instant::now();
         let multi = self.sample_rx.recv().await.unwrap();
-        trace!("{:?} {:?}", start.elapsed(), multi);
+        trace!(elapsed = ?start.elapsed(), ?multi, "received sample");
 
         let r = config
             .client
@@ -117,7 +117,7 @@ impl Task for Writer {
             self.count += rows;
             (rows, (ok.span.start..ok.span.end))
         } else {
-            warn!("{}/{} rate limited", self.topic, self.partition);
+            warn!(topic = %self.topic, partition = %self.partition, "rate limited");
             (0, 0..0)
         };
 

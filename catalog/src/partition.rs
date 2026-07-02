@@ -131,7 +131,7 @@ impl Partition {
         let (sealed_tx, sealed_ix) = watch::channel(initial_sealed);
         tokio::spawn(async move {
             while let Some(r) = writes.recv().await {
-                trace!("{} checkpoint: {:?}", commit_id, &r);
+                trace!(%commit_id, checkpoint = ?&r, "checkpoint");
                 commit_manifest.update(&commit_id, &r.data).await;
                 // the manifest update above is now durable. if it sealed the
                 // segment, advance the watermark, holding it monotonic against
@@ -148,7 +148,7 @@ impl Partition {
                 // ok if no receivers, that means nothing is awaiting a commit
                 commit_writer.send(r.data.records.end).ok();
             }
-            trace!("{} exit", commit_id);
+            trace!(%commit_id, "exit");
             fin_tx.send(()).ok();
         });
 
@@ -186,9 +186,9 @@ impl Partition {
                 index = match data {
                     Some(data) if valid => Some((ix.next(), data.records.end)),
                     _ => {
-                        error!("bad {:?} file: {} catalog: {}", ix, valid, data.is_some());
+                        error!(?ix, valid, in_catalog = data.is_some(), "bad segment file");
                         if let Err(e) = segment.destroy() {
-                            error!("error destroying {:?}: {}", ix, e);
+                            error!(?ix, %e, "error destroying segment");
                         }
                         manifest.remove_segment(ix.to_id(id)).await;
                         current = ix.prev();
@@ -350,7 +350,7 @@ impl Partition {
     pub async fn readable_ids(&self) -> Option<Range<RecordIndex>> {
         let read = self.state.read().await;
         let stored = self.manifest.get_partition_range(&self.id).await;
-        debug!("stored: {:?}", stored);
+        debug!(?stored);
 
         read.messages
             .cached_segment_data()
@@ -376,7 +376,7 @@ impl Partition {
         )
         .set(size as f64);
         if size > (retain.max_bytes.as_u64() as usize) {
-            info!("over limit {}: current size is {}", self.id, size);
+            info!(id = %self.id, size, "over limit");
             return true;
         }
 
@@ -401,7 +401,7 @@ impl Partition {
             )
             .set(segments as f64);
             if segments > count {
-                info!("over limit {}: {:?}..={:?}", self.id, min, max);
+                info!(id = %self.id, ?min, ?max, "over limit");
                 return true;
             }
         }
@@ -491,9 +491,9 @@ impl State {
 
             if *self.commits.borrow() != RecordIndex(0) {
                 warn!(
-                    "{}: schema change after {:?}",
-                    partition.id,
-                    *self.commits.borrow()
+                    id = %partition.id,
+                    commits = ?*self.commits.borrow(),
+                    "schema change after commits"
                 );
             }
 
@@ -506,9 +506,9 @@ impl State {
                 let dt = Instant::now() - self.last_roll;
                 if dt > d {
                     info!(
-                        "rolling {}: last roll was {}s ago",
-                        partition.id,
-                        dt.as_secs()
+                        id = %partition.id,
+                        last_roll_secs = dt.as_secs(),
+                        "rolling: last roll too long ago"
                     );
                     return self.roll(partition).await;
                 }
@@ -517,8 +517,10 @@ impl State {
             let current_len = data.records.end.0 - data.records.start.0;
             if current_len > roll.max_rows {
                 info!(
-                    "rolling {}: length {} > {}",
-                    partition.id, current_len, roll.max_rows
+                    id = %partition.id,
+                    current_len,
+                    max_rows = roll.max_rows,
+                    "rolling: length over limit"
                 );
                 return self.roll(partition).await;
             }
@@ -526,8 +528,10 @@ impl State {
             let max_bytes = roll.max_bytes.as_u64() as usize;
             if data.size > max_bytes {
                 info!(
-                    "rolling {}: current size {} > {}",
-                    partition.id, data.size, max_bytes
+                    id = %partition.id,
+                    size = data.size,
+                    max_bytes,
+                    "rolling: current size over limit"
                 );
                 return self.roll(partition).await;
             }
@@ -642,7 +646,7 @@ impl State {
                         .await;
                 }
             }
-            info!("retain {}: destroyed {:?}", partition.id, ix);
+            info!(id = %partition.id, ?ix, "retain: destroyed segment");
             counter!(
                 "partition_segments_destroyed",
                 "topic" => String::from(partition.id.topic()),
@@ -653,11 +657,11 @@ impl State {
     }
 
     async fn wait_for_record(&mut self, target: RecordIndex) {
-        trace!("waiting for commit including {:?}", target);
+        trace!(?target, "waiting for commit including");
         while *self.commits.borrow() < target {
             self.commits.changed().await.expect("commit watcher ended");
         }
-        trace!("notified of commit including {:?}", target);
+        trace!(?target, "notified of commit including");
     }
 
     #[cfg(test)]
@@ -671,7 +675,7 @@ impl State {
     pub(crate) async fn close(self) {
         self.messages.close().await;
         if let Err(e) = self.fin.await {
-            error!("error closing: {:?}", e)
+            error!(error = ?e, "error closing")
         }
     }
 }
@@ -1510,18 +1514,18 @@ pub mod test {
 
         // first, corrupt the last file.
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, last);
-        debug!("corrupting {last:?}");
+        debug!(?last, "corrupting");
         let f = fs::File::options().write(true).open(segment.path())?;
         f.set_len(16)?;
 
         // delete the next data entry from the manifest
         let ix = last.prev().unwrap();
-        debug!("removing manifest entry for {ix:?}");
+        debug!(?ix, "removing manifest entry");
         manifest.remove_segment(ix.to_id(&spec.1)).await;
 
         // delete the next file entirely
         let segment = Slog::segment_from_name(root.as_path(), &slog_name, ix.prev().unwrap());
-        debug!("deleting {:?}", ix.prev().unwrap());
+        debug!(ix = ?ix.prev().unwrap(), "deleting");
         segment.destroy()?;
 
         records.truncate(records.len() - 3 * 3);
