@@ -533,7 +533,7 @@ impl ReconcileJob {
                 Err(e) => {
                     // Swallow the error and keep the loop alive; a transient
                     // failure on one pass must not stop reconciliation forever.
-                    error!("reconcile pass failed, continuing loop: {e:?}");
+                    error!(error = ?e, "reconcile pass failed, continuing loop");
                 }
             }
 
@@ -568,7 +568,7 @@ impl ReconcileJob {
 
             // If we're done, return true
             if done {
-                info!("Reconciliation complete: {:?}", self.report());
+                info!(report = ?self.report(), "reconciliation complete");
                 return Ok(true);
             }
 
@@ -620,7 +620,7 @@ impl ReconcileJob {
         // Get the current topic name
         let topic_name = topics[current_topic_index].clone();
 
-        debug!("Reconciling topic: {}", topic_name);
+        debug!(%topic_name, "reconciling topic");
 
         // Get all partitions for this topic
         let partitions = self.catalog.manifest().get_partitions(&topic_name).await;
@@ -645,7 +645,7 @@ impl ReconcileJob {
 
         // Process the current partition
         let partition_name = partitions[current_partition_index].clone();
-        debug!("Reconciling partition: {}/{}", topic_name, partition_name);
+        debug!(%topic_name, %partition_name, "reconciling partition");
 
         // Process this partition
         let partition_segments = self
@@ -683,8 +683,8 @@ impl ReconcileJob {
             .files_checked
             .add_paths(partition_files.clone(), partition_bytes);
         debug!(
-            "Found {} files in partition directory",
-            partition_files.len()
+            files = partition_files.len(),
+            "found files in partition directory"
         );
 
         // Highest segment index present in the tracked (manifest) snapshot per
@@ -710,7 +710,7 @@ impl ReconcileJob {
         }
 
         for file_path in partition_files {
-            debug!("Checking file: {:?}", file_path);
+            debug!(?file_path, "checking file");
             if !tracked_files.contains(&file_path) {
                 // High-water filter: suppress in-flight segment files (and their
                 // auxiliary files) sitting above the partition's highest tracked
@@ -725,15 +725,15 @@ impl ReconcileJob {
                     let in_flight = max_tracked.get(&partition).is_none_or(|max| index > *max);
                     if in_flight {
                         debug!(
-                            "Skipping in-flight segment file above tracked max: {:?}",
-                            file_path
+                            ?file_path,
+                            "skipping in-flight segment file above tracked max"
                         );
                         self.state.report.active_tail_skipped += 1;
                         continue;
                     }
                 }
 
-                warn!("Untracked file in topic {:?}: {:?}", topic_name, file_path);
+                warn!(%topic_name, ?file_path, "untracked file in topic");
                 // Add the untracked path to our stats
                 let file_size = fs::metadata(&file_path)
                     .await
@@ -744,7 +744,7 @@ impl ReconcileJob {
                     .untracked_files
                     .add_path(file_path.clone(), file_size);
             } else {
-                debug!("Found tracked path {:?}", file_path);
+                debug!(?file_path, "found tracked path");
             }
         }
 
@@ -762,10 +762,7 @@ impl ReconcileJob {
         let partition_id = PartitionId::new(topic_name, partition_name);
         let topic_path = Topic::partition_root(root, topic_name);
 
-        debug!(
-            "Processing partition {}/{} with path {:?}",
-            topic_name, partition_name, topic_path
-        );
+        debug!(%topic_name, %partition_name, ?topic_path, "processing partition");
 
         // Classify this partition's segments once for the whole pass, *without*
         // loading it into memory. A partition that is not resident is quiescent:
@@ -800,11 +797,11 @@ impl ReconcileJob {
         let segments: Vec<SegmentData> = segments_stream.collect().await;
         if let Some((start, end)) = segments.first().zip(segments.last()) {
             debug!(
-                "Fetched {} segments: {} ..= {} (resident={})",
-                segments.len(),
-                start.index.0,
-                end.index.0,
-                matches!(seal_status, SealStatus::Resident(_)),
+                count = segments.len(),
+                start = start.index.0,
+                end = end.index.0,
+                resident = matches!(seal_status, SealStatus::Resident(_)),
+                "fetched segments"
             );
         } else {
             debug!("Found no segments")
@@ -812,13 +809,13 @@ impl ReconcileJob {
 
         // Validate each segment
         for segment in segments {
-            debug!("Validating segment: {:?}", segment.index);
+            debug!(index = ?segment.index, "validating segment");
 
             let slog_name = Partition::slog_name(&partition_id);
             let segment_file_name = format!("{}-{}", slog_name, segment.index.0);
             let segment_path = Slog::segment_path(&topic_path, &slog_name, segment.index);
 
-            debug!("Checking segment file: {} at {:?}", slog_name, segment_path);
+            debug!(%slog_name, ?segment_path, "checking segment file");
 
             // Mark this file as tracked regardless of bucket so the orphan
             // detection phase does not false-positive on active segment files.
@@ -866,7 +863,7 @@ impl ReconcileJob {
     ) {
         // Check if the file exists
         if !segment_path.exists() {
-            warn!("Missing file {:?}", segment_path);
+            warn!(?segment_path, "missing file");
             // Add the missing path to our stats
             self.state
                 .report
@@ -889,15 +886,17 @@ impl ReconcileJob {
 
         // Compare total size with expected size
         debug!(
-            "Comparing sizes - total_actual_size={}, segment.size={}, diff={}",
             total_actual_size,
-            segment.size,
-            total_actual_size.abs_diff(segment.size)
+            segment_size = segment.size,
+            diff = total_actual_size.abs_diff(segment.size),
+            "comparing sizes"
         );
         if total_actual_size.abs_diff(segment.size) > 0 {
             warn!(
-                "Size mismatch for segment {}. Expected {}, actual {}",
-                segment_file_name, expected_size, actual_size
+                %segment_file_name,
+                %expected_size,
+                %actual_size,
+                "size mismatch for segment"
             );
             // Add the mismatched path to our stats
             self.state.report.sealed.size_mismatches.add_path(
@@ -931,18 +930,20 @@ impl ReconcileJob {
                     )
                     .await;
                 if applied {
-                    info!("Fixed size mismatch for segment {}", segment_file_name);
+                    info!(%segment_file_name, "fixed size mismatch for segment");
                 } else {
                     info!(
-                        "Skipped stale size fix for segment {} (concurrently removed or changed)",
-                        segment_file_name
+                        %segment_file_name,
+                        "skipped stale size fix for segment (concurrently removed or changed)"
                     );
                 }
             }
         } else {
             debug!(
-                "Segment {} size ok. Expected: {}, actual: {}",
-                segment_file_name, segment.size, total_actual_size
+                %segment_file_name,
+                expected = segment.size,
+                actual = total_actual_size,
+                "segment size ok"
             );
         }
     }
@@ -967,15 +968,20 @@ impl ReconcileJob {
             // The active segment may not have been flushed to disk yet. A zero
             // disk size against a non-zero manifest size yields a negative delta,
             // which is exactly the alert signal we want to surface.
-            debug!("Active segment file {:?} not present on disk", segment_path);
+            debug!(?segment_path, "active segment file not present on disk");
             0
         };
 
         let manifest_size = segment.size;
         let delta = disk_size as i64 - manifest_size as i64;
         debug!(
-            "Active segment {} for {}/{}: manifest_size={}, disk_size={}, delta={}",
-            segment_file_name, topic_name, partition_name, manifest_size, disk_size, delta
+            %segment_file_name,
+            %topic_name,
+            %partition_name,
+            manifest_size,
+            disk_size,
+            delta,
+            "active segment"
         );
 
         self.state.report.active.push(ActiveSegmentReport {
@@ -1003,17 +1009,10 @@ impl ReconcileJob {
         match fs::metadata(segment_path).await {
             Ok(metadata) => {
                 total_actual_size += metadata.len() as usize;
-                debug!(
-                    "Segment {} file size: {}",
-                    segment_file_name,
-                    metadata.len()
-                );
+                debug!(%segment_file_name, size = metadata.len(), "segment file size");
             }
             Err(e) => {
-                warn!(
-                    "Error getting metadata for segment {}: {:?}",
-                    segment_file_name, e
-                );
+                warn!(%segment_file_name, error = ?e, "error getting metadata for segment");
             }
         }
 
@@ -1028,14 +1027,14 @@ impl ReconcileJob {
                 match fs::metadata(&part_path).await {
                     Ok(metadata) => {
                         total_actual_size += metadata.len() as usize;
-                        debug!("Part {:?} size: {}", part_path, metadata.len());
+                        debug!(?part_path, size = metadata.len(), "part size");
                     }
                     Err(e) => {
-                        warn!("Error getting metadata for part {:?}: {:?}", part_path, e);
+                        warn!(?part_path, error = ?e, "error getting metadata for part");
                     }
                 }
             } else {
-                debug!("Part {:?} does not exist", part_path);
+                debug!(?part_path, "part does not exist");
             }
         }
 
@@ -1310,14 +1309,14 @@ mod tests {
         let topic_root = catalog.topic_root().join("test-topic");
         // Orphan files are created in the topic directory, not partition subdirectory
         let partition_path = topic_root.clone();
-        trace!("Topic root: {:?}", topic_root);
-        trace!("Partition path (topic directory): {:?}", partition_path);
-        trace!("Partition path exists: {}", partition_path.exists());
+        trace!(?topic_root);
+        trace!(?partition_path, "partition path (topic directory)");
+        trace!(exists = partition_path.exists(), "partition path exists");
 
         if partition_path.exists() {
             let mut entries = fs::read_dir(&partition_path).await?;
             while let Some(entry) = entries.next_entry().await? {
-                trace!("Existing file: {:?}", entry.file_name());
+                trace!(file_name = ?entry.file_name(), "existing file");
             }
         } else {
             // Create the directory if it doesn't exist

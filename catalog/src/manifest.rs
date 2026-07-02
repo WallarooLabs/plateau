@@ -197,7 +197,7 @@ static MIGRATOR: Migrator = sqlx::migrate!();
 impl Manifest {
     pub async fn current_prior_attach(current: PathBuf, prior: PathBuf) -> anyhow::Result<Self> {
         if prior.exists() && !current.exists() {
-            info!("migrating {prior:?} to {current:?}");
+            info!(?prior, ?current, "migrating");
             copy_existing(&shm_path(&prior)?, &shm_path(&current)?)?;
             copy_existing(&wal_path(&prior)?, &wal_path(&current)?)?;
             std::fs::copy(&prior, &current)?;
@@ -244,7 +244,7 @@ impl Manifest {
 
     /// Upserts data for a segment with the given identifier.
     pub(crate) async fn update(&self, id: &PartitionId, data: &SegmentData) {
-        trace!("update {:?}: {:?}", id, data);
+        trace!(%id, ?data, "update");
         sqlx::query(
             "
             INSERT INTO segments(
@@ -488,7 +488,7 @@ impl Manifest {
 
     /// Remove the identified segment from the manifest.
     pub async fn remove_segment(&self, id: SegmentId<&PartitionId>) {
-        trace!("remove segment {:?}", id);
+        trace!(%id, "remove segment");
         sqlx::query(
             "
             DELETE FROM segments
@@ -555,7 +555,7 @@ impl Manifest {
             let path = transformed.as_deref().unwrap_or(path);
             path.metadata()
                 .map(|meta| meta.size())
-                .inspect_err(|e| error!("error getting size of {path:?}: {e:?}"))
+                .inspect_err(|e| error!(?path, error = ?e, "error getting size of path"))
                 .unwrap_or(0) as usize
         }
 

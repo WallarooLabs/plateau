@@ -239,7 +239,7 @@ fn partition_records_url(
 
 fn assert_status(response: &Response, expected: &str) {
     let header = response.headers().get(ITERATION_STATUS_HEADER).unwrap();
-    trace!("{header:?}");
+    trace!(?header);
     let status: json::Value = json::from_str(header.to_str().unwrap()).unwrap();
     let status = status
         .as_object()
@@ -253,7 +253,7 @@ fn assert_status(response: &Response, expected: &str) {
 
 fn assert_partition_status(response: &Response, expected: &str) {
     let header = response.headers().get(ITERATION_STATUS_HEADER).unwrap();
-    trace!("{header:?}");
+    trace!(?header);
     assert_eq!(header.to_str().unwrap(), format!("{expected:?}"));
 }
 
@@ -452,7 +452,7 @@ async fn max_request_header() -> Result<()> {
 
     let status = resp.status();
     let headers = resp.headers().clone();
-    trace!("{status}, {:?}", resp.text().await);
+    trace!(%status, body = ?resp.text().await, "oversized append response");
     assert_eq!(413, status);
     assert_eq!(
         &max.to_string(),
@@ -1014,7 +1014,7 @@ async fn info_endpoint() -> Result<()> {
     let pretty_json = serde_json::to_string_pretty(&info_response)?;
     tracing::debug!("Info endpoint response:");
     for line in pretty_json.lines() {
-        tracing::debug!("{}", line);
+        tracing::debug!(%line, "info endpoint response line");
     }
 
     // Should have 2 topics

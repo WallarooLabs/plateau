@@ -94,10 +94,7 @@ pub async fn task_from_catalog_config(
         // joins the shutdown race here: when `stop` (or the server) wins the
         // `select_all`, this future is dropped, cleanly cancelling the loop.
         if let Some(reconcile_config) = config.reconcile.clone() {
-            tracing::info!(
-                "starting continuous reconciliation loop with config: {:?}",
-                reconcile_config
-            );
+            tracing::info!(?reconcile_config, "starting continuous reconciliation loop");
             tasks.push(catalog::ReconcileJob::run_loop(catalog.clone(), reconcile_config).boxed());
         }
 

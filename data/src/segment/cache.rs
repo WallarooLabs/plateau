@@ -98,7 +98,11 @@ pub struct Writer {
 
 impl Writer {
     pub fn new(path: PathBuf, initial: SchemaChunk<Schema>, chunk_ix: u32) -> Result<Self> {
-        trace!("start {:?} with {}", path, initial.chunk.len());
+        trace!(
+            ?path,
+            initial_rows = initial.chunk.len(),
+            "starting cache writer"
+        );
         let mut file = fs::File::create(&path)?;
         file.write_all(PLATEAU_HEADER.as_bytes())?;
 
@@ -131,7 +135,7 @@ impl Writer {
 
         let new_len = chunk.len();
         let additional = crate::chunk::slice(chunk.clone(), self.len(), new_len - self.len());
-        trace!("{} => {}", self.len(), chunk.len());
+        trace!(from = self.len(), to = chunk.len(), "updating cache");
         self.writer
             .write(&additional.to_record_batch(&self.partial.schema)?)?;
         self.partial.chunk = chunk;
@@ -142,7 +146,7 @@ impl Writer {
     pub(super) fn sync(&self) -> Result<()> {
         let now = Instant::now();
         self.file.sync_data()?;
-        debug!("cache sync elapsed: {:?}", now.elapsed());
+        debug!(elapsed = ?now.elapsed(), "cache sync elapsed");
 
         Ok(())
     }
@@ -174,10 +178,7 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
         let stream_reader = match StreamReader::try_new(&mut reader, None) {
             Ok(reader) => reader,
             Err(e) => {
-                error!(
-                    "Error creating stream reader for cache file {:?}: {}",
-                    path, e
-                );
+                error!(?path, %e, "error creating stream reader for cache file");
                 return Ok(None);
             }
         };
@@ -190,7 +191,7 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
                     chunks.push(SegmentChunk::from_record_batch(batch));
                 }
                 Err(e) => {
-                    error!("error reading cache segment: {:?}", e);
+                    error!(?e, "error reading cache segment");
                 }
             }
         }
@@ -199,14 +200,14 @@ pub fn read(path: PathBuf) -> Result<Option<Data>> {
             // This can really only happen if plateau / the system crashes while
             // writing the first chunk to the stream. That seems unlikely enough
             // to warn about.
-            warn!("could not read any chunks from cache at {:?}", path);
+            warn!(?path, "could not read any chunks from cache");
             return Ok(None);
         } else {
             let chunk = crate::chunk::concatenate(&chunks)?;
             trace!(
-                "read {} rows ({} chunks) from cache",
-                chunk.len(),
-                chunks.len()
+                rows = chunk.len(),
+                chunks = chunks.len(),
+                "read rows from cache"
             );
             chunk
         };

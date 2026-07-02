@@ -185,7 +185,7 @@ impl Catalog {
             let dst: PathBuf = topic_root.join(&topic);
 
             if src.exists() {
-                info!("migrating {src:?} to {dst:?}");
+                info!(?src, ?dst, "migrating");
                 std::fs::rename(src, dst)?;
             }
         }
@@ -208,11 +208,12 @@ impl Catalog {
         if let Ok(duration) = end.duration_since(start) {
             if duration > self.config.checkpoint_interval {
                 warn!(
-                    "full catalog checkpoint took {:?} (longer than interval ({:?})!)",
-                    duration, self.config.checkpoint_interval
+                    ?duration,
+                    interval = ?self.config.checkpoint_interval,
+                    "full catalog checkpoint took longer than interval"
                 );
             } else {
-                trace!("finished full catalog checkpoint in {:?}", duration);
+                trace!(?duration, "finished full catalog checkpoint");
             }
             gauge!("catalog_checkpoint_ms",).set((duration.as_micros() as f64) / 1000.0);
         } else {
@@ -261,7 +262,7 @@ impl Catalog {
             return;
         };
 
-        info!("startup reclaim: removing oldest segment {:?}", oldest);
+        info!(?oldest, "startup reclaim: removing oldest segment");
         let topic = self.get_topic(oldest.topic()).await;
         let partition = topic.get_partition(oldest.partition()).await;
         partition.reclaim_oldest().await;
@@ -312,10 +313,10 @@ impl Catalog {
             };
 
             info!(
-                "open topic limit hit ({} > {}), dropping \"{}\"",
-                topics.len(),
-                self.config.max_open_topics,
-                to_drop
+                open = topics.len(),
+                max_open = self.config.max_open_topics,
+                %to_drop,
+                "open topic limit hit, dropping topic"
             );
 
             if let Some(topic) = topics.remove(&to_drop) {
@@ -346,18 +347,23 @@ impl Catalog {
 
             // XXX - these errors should never happen as we hold the lock and just iterated above
             let Some(topic) = topics.get(&topic_name) else {
-                error!("invalid topic {topic_name}");
+                error!(%topic_name, "invalid topic");
                 continue;
             };
 
             let age = Utc::now().signed_duration_since(time).to_std();
             info!(
-                "closing {topic_name}/{partition_name} (age {age:?}, {bytes} > {max_bytes} bytes, \
-                 {} > {max_active} active)",
-                ages.len() + 1
+                %topic_name,
+                %partition_name,
+                ?age,
+                bytes,
+                max_bytes,
+                active = ages.len() + 1,
+                max_active,
+                "closing partition"
             );
             let Some(data) = topic.close_partition(&partition_name).await else {
-                error!("invalid partition {partition_name}");
+                error!(%partition_name, "invalid partition");
                 continue;
             };
 
@@ -409,12 +415,12 @@ impl Catalog {
     async fn over_retention_limit(&self) -> bool {
         let size = self.byte_size().await;
         let limit = self.total_byte_limit().await;
-        debug!(?limit, "catalog size: {}", size);
+        debug!(%size, %limit, "catalog size");
         gauge!("stored_size_bytes").set(size.as_u64() as f64);
         let over = size > limit;
 
         if over {
-            info!("over retention limit {} > {}", size, limit);
+            info!(%size, %limit, "over retention limit");
         }
 
         over
@@ -442,7 +448,7 @@ impl Catalog {
             Err(read) => {
                 drop(read);
                 let mut write = self.state.write().await;
-                info!("creating new topic: {}", name);
+                info!(%name, "creating new topic");
                 let topic = Topic::attach(
                     self.topic_root.clone(),
                     self.manifest.clone(),
@@ -493,9 +499,9 @@ impl Catalog {
             .await
         {
             error!(
-                "error while monitoring disk storage capacity for {}: {:?}",
-                std::fs::canonicalize(&self.root).unwrap().display(),
-                e
+                path = %std::fs::canonicalize(&self.root).unwrap().display(),
+                %e,
+                "error while monitoring disk storage capacity"
             );
             // we want to loop here; otherwise the select() in main exits early
             // this could allow the server to run without the disk watcher, but
@@ -530,7 +536,7 @@ impl Catalog {
     pub async fn close_arc(mut catalog: Arc<Self>) -> bool {
         let now = Instant::now();
         let secs = 30;
-        info!("waiting {secs}s for all pending operations to complete");
+        info!(secs, "waiting for all pending operations to complete");
         let mut exclusive = None;
         for _ in 0..secs {
             // gah, into_inner is 1.70 onward...
@@ -543,21 +549,21 @@ impl Catalog {
                     catalog = arc;
                 }
             }
-            trace!("outstanding: {}", Arc::strong_count(&catalog));
+            trace!(outstanding = Arc::strong_count(&catalog));
             time::sleep(Duration::from_secs(1)).await;
         }
 
         if let Some(exclusive) = exclusive {
-            info!("all pending operations completed in {:?}", now.elapsed());
+            info!(elapsed = ?now.elapsed(), "all pending operations completed");
             let now = Instant::now();
             info!("performing final checkpoint");
             exclusive.checkpoint().await;
-            info!("final checkpoint complete in {:?}", now.elapsed());
+            info!(elapsed = ?now.elapsed(), "final checkpoint complete");
 
             let now = Instant::now();
             info!("closing catalog");
             exclusive.close().await;
-            info!("catalog closed in {:?}", now.elapsed());
+            info!(elapsed = ?now.elapsed(), "catalog closed");
             true
         } else {
             warn!("operations still pending; could not close catalog");
@@ -942,7 +948,7 @@ mod test {
 
         for (ix, record) in records.iter().enumerate() {
             let name = format!("topic-{}", ix % 3);
-            trace!("{name} {}", ix / 3);
+            trace!(%name, record_ix = ix / 3, "checking record");
             {
                 let topic = catalog.get_topic(&name).await;
                 assert_eq!(

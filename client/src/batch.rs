@@ -81,7 +81,7 @@ impl BatchClient {
             .await
             .map_err(|e| match e {
                 ClientError::RequestTooLong(_, MaxRequestSize(Some(s))) => {
-                    warn!("detected new max plateau row size: {s}");
+                    warn!(max_row_size = %s, "detected new max plateau row size");
                     update_default_max_batch_bytes(s);
                     self.max_batch_bytes = s;
                     BatchSendError::Resize
@@ -152,7 +152,10 @@ pub trait Batch: Sized {
             if self.len() > 1 {
                 self.split_into(bytes / max_bytes + 1)
             } else if self.prune().is_none() {
-                error!("inference log batch is too large to send ({bytes} bytes), and cannot be reduced");
+                error!(
+                    %bytes,
+                    "inference log batch is too large to send, and cannot be reduced"
+                );
                 vec![]
             } else {
                 vec![self]
@@ -200,7 +203,7 @@ impl<T: Clone + Batch + Send + 'static, C: BatchSender<Batch = T>> WorkerPool<T,
             .sender
             .send(batch)
             .await
-            .unwrap_or_else(|e| error!("queueing batch to worker failed: {e}"));
+            .unwrap_or_else(|e| error!(error = %e, "queueing batch to worker failed"));
     }
 
     /// Flush all pending work and shut down workers

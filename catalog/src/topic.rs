@@ -75,7 +75,7 @@ impl Topic {
         &self,
         partition_filter: PartitionFilter,
     ) -> HashMap<String, Range<RecordIndex>> {
-        debug!("partition map: {:?}", self.partitions);
+        debug!(partitions = ?self.partitions, "partition map");
         self.map_partitions(
             |partition| async move { partition.readable_ids().await },
             partition_filter,

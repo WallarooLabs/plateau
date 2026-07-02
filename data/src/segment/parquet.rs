@@ -211,7 +211,7 @@ impl Writer {
             // footer is useless without the corresponding data it describes.
             checkpoint_file.sync_data()?;
             drop(checkpoint_file);
-            debug!("file sync elapsed: {:?}", now.elapsed());
+            debug!(elapsed = ?now.elapsed(), "file sync elapsed");
         }
 
         fs::rename(
@@ -224,7 +224,7 @@ impl Writer {
             // the checkpoint file
             let now = Instant::now();
             self.directory.sync_all()?;
-            debug!("dir sync elapsed: {:?}", now.elapsed());
+            debug!(elapsed = ?now.elapsed(), "dir sync elapsed");
         }
 
         Ok(())
@@ -246,7 +246,7 @@ fn recover(
 ) -> anyhow::Result<FileMetaData> {
     let path = path.as_ref();
     let checkpoint_path = checkpoint_path.as_ref();
-    warn!("attempting to recover checkpoint {:?}", checkpoint_path);
+    warn!(?checkpoint_path, "attempting to recover checkpoint");
 
     {
         let mut checkpoint = fs::File::open(checkpoint_path)?;
@@ -257,9 +257,9 @@ fn recover(
         checkpoint.read_exact(&mut buffer)?;
         let offset = u64::from_le_bytes(buffer);
         debug!(
-            "found valid v1 checkpoint at offset {} (file length {})",
             offset,
-            segment.metadata()?.len()
+            file_length = segment.metadata()?.len(),
+            "found valid v1 checkpoint"
         );
 
         #[allow(clippy::unbuffered_bytes)]
@@ -269,13 +269,13 @@ fn recover(
         segment.seek(SeekFrom::Start(offset))?;
         segment.write_all(&rest)?;
         segment.write_all(PARQUET_HEADER.as_bytes())?;
-        warn!("successfully recovered checkpoint {:?}", checkpoint_path);
+        warn!(?checkpoint_path, "successfully recovered checkpoint");
     }
 
     let mut f = fs::File::open(path)?;
     let metadata = read_metadata(&mut f)?;
 
-    debug!("recovered {} rows", metadata.num_rows);
+    debug!(rows = metadata.num_rows, "recovered rows");
 
     Ok(metadata)
 }
@@ -302,7 +302,7 @@ impl Reader {
                 })
             }
             Err(err) => {
-                error!("error opening segment file: {err:?}");
+                error!(?err, "error opening segment file");
                 cache
                     .map(|cache| Self {
                         schema: cache.rows.schema,
@@ -347,7 +347,7 @@ impl CachingReader {
         let mut f = fs::File::open(&segment.path)?;
 
         let metadata = read_metadata(&mut f).or_else(|err| {
-            debug!("error reading segment: {err:?}");
+            debug!(?err, "error reading segment");
             drop(f);
             anyhow::ensure!(
                 segment.checkpoint_path.exists(),
@@ -390,7 +390,7 @@ impl Iterator for CachingReader {
                 match self.reader.next() {
                     Some(Ok(chunk)) => self.chunks.push(chunk),
                     Some(Err(e)) => {
-                        error!("failed to read chunk from segment: {e}");
+                        error!(%e, "failed to read chunk from segment");
                         return Some(Err(e.into()));
                     }
                     None => {}

@@ -110,8 +110,11 @@ impl ReplicatePartitionJob {
 
             if let Some(insert) = insert {
                 debug!(
-                    "{} => {}: {} => {}",
-                    self.source, self.target, self.record_ix, insert.span.end
+                    source = %self.source,
+                    target = %self.target,
+                    from_ix = self.record_ix,
+                    to_ix = insert.span.end,
+                    "replicated records"
                 );
 
                 self.record_ix = insert.span.end;
@@ -122,8 +125,10 @@ impl ReplicatePartitionJob {
             Ok(false)
         } else {
             debug!(
-                "{} => {}: up to date at {}",
-                self.source, self.target, self.record_ix
+                source = %self.source,
+                target = %self.target,
+                record_ix = self.record_ix,
+                "partition up to date"
             );
 
             Ok(true)
@@ -280,7 +285,7 @@ impl ReplicationWorker {
             .await?;
 
         for (id, (url, _)) in &hosts {
-            info!("{} url: {}", id, url);
+            info!(host_id = %id, %url, "known host");
         }
 
         Ok(Self {
@@ -335,15 +340,22 @@ impl ReplicationWorker {
     pub async fn pump(&mut self) -> Result<(), Error> {
         for job in self.all_jobs() {
             info!(
-                "start: {} => {} @ {}",
-                job.source, job.target, job.record_ix
+                source = %job.source,
+                target = %job.target,
+                record_ix = job.record_ix,
+                "starting replication job"
             )
         }
 
         while !self.page_all().await? {}
 
         for job in self.all_jobs() {
-            info!("end: {} => {} @ {}", job.source, job.target, job.record_ix)
+            info!(
+                source = %job.source,
+                target = %job.target,
+                record_ix = job.record_ix,
+                "finished replication job"
+            )
         }
 
         Ok(())
@@ -383,9 +395,9 @@ impl ReplicationWorker {
                     tokio::time::sleep(period).await;
                 }
                 Err(e) => {
-                    error!("error in loop: {:?}", e);
+                    error!(error = %e, "error in loop");
                     let next = backoff.next_backoff();
-                    info!("waiting {:.1?} to retry", last_duration);
+                    info!(delay = ?last_duration, "waiting to retry");
                     tokio::time::sleep(last_duration).await;
                     last_duration = next.unwrap_or(last_duration)
                 }

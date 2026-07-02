@@ -240,26 +240,26 @@ impl MemorySegment {
                 let prior_start = start_ix;
                 start_ix = ix + 1;
                 trace!(
-                    "full chunk {:?} {}",
-                    prior_start..start_ix,
-                    partial.total_rows
+                    range = ?(prior_start..start_ix),
+                    rows = partial.total_rows,
+                    "full chunk"
                 );
                 match std::mem::take(&mut partial).concat() {
                     Ok((chunk, bytes)) => compact.push(chunk, bytes),
-                    Err(e) => error!("error building full chunk: {:?}", e),
+                    Err(e) => error!(error = ?e, "error building full chunk"),
                 }
             }
         }
 
         if !partial.is_empty() {
             trace!(
-                "compact active segment {:?} {}",
-                start_ix..(start_ix + partial.len()),
-                partial.total_rows
+                range = ?(start_ix..(start_ix + partial.len())),
+                rows = partial.total_rows,
+                "compact active segment"
             );
             match partial.concat() {
                 Ok((chunk, bytes)) => compact.push(chunk, bytes),
-                Err(e) => error!("error building final partial chunk: {:?}", e),
+                Err(e) => error!(error = ?e, "error building final partial chunk"),
             };
         }
 
@@ -437,9 +437,9 @@ impl Slog {
         let matches = active.as_ref().is_none_or(|s| &s.schema == other);
         if !matches {
             trace!(
-                "schema mismatch: {:?} != {:?}",
-                active.as_ref().map(|s| &s.schema),
-                other
+                active = ?active.as_ref().map(|s| &s.schema),
+                ?other,
+                "schema mismatch"
             );
         }
 
@@ -470,7 +470,7 @@ impl Slog {
     }
 
     pub(crate) async fn checkpoint(&self) -> bool {
-        trace!("checkpoint {:?}", self.root);
+        trace!(root = ?self.root, "checkpoint");
         self.state.write().await.checkpoint(false).await
     }
 
@@ -489,7 +489,7 @@ impl State {
         let bytes = match estimate_size(&d.chunk) {
             Ok(size) => size,
             Err(e) => {
-                error!("error estimating chunk size: {e:?}");
+                error!(error = ?e, "error estimating chunk size");
                 len
             }
         };
@@ -581,12 +581,12 @@ impl State {
                 };
 
                 trace!(
-                    "{:?}: {:?} (seal: {}, full chunks: {}, active rows: {})",
-                    segment.metadata.index,
-                    records,
+                    index = ?segment.metadata.index,
+                    ?records,
                     seal,
-                    full_chunks.len(),
-                    active_chunk.len()
+                    full_chunks = full_chunks.len(),
+                    active_rows = active_chunk.len(),
+                    "checkpoint segment"
                 );
 
                 if timeout(
@@ -618,7 +618,7 @@ impl State {
         if let Some(records) = self.active.as_ref().map(|s| s.record_count()) {
             if self.checkpoint(true).await {
                 let segment = self.active_checkpoint.segment;
-                trace!("rolling {:?}", segment);
+                trace!(?segment, "rolling");
                 self.active_checkpoint.segment = segment.next();
                 self.active_first_record_ix += records;
                 self.pending = self.active.take();
@@ -636,9 +636,9 @@ impl State {
         self.thread.tx_fin.send(()).ok();
         self.thread.tx.send(WriterMessage::Fin).await.ok();
         if let Err(e) = self.thread.handle.join() {
-            error!("error joining writer thread: {:?}", e);
+            error!(error = ?e, "error joining writer thread");
         }
-        info!("writer thread shutdown in {:?}", now.elapsed());
+        info!(elapsed = ?now.elapsed(), "writer thread shutdown");
     }
 }
 
@@ -674,11 +674,11 @@ fn spawn_slog_thread(
                     full_chunks,
                     active_chunk,
                 })) => {
-                    trace!("{}: received request for {:?}", name, records);
+                    trace!(%name, ?records, "received request");
                     let new_segment = Slog::segment_from_name(&root, &name, segment);
                     current = current.and_then(|(schema, writer, id)| {
                         if id != segment {
-                            trace!("{}: segment change {:?} {:?}", name, id, segment);
+                            trace!(%name, ?id, ?segment, "segment change");
                             writer.close().expect("sealed segment");
                             None
                         } else {
@@ -686,7 +686,7 @@ fn spawn_slog_thread(
                         }
                     });
                     let (schema, ref mut writer, _) = current.get_or_insert_with(|| {
-                        trace!("{}: opening segment {:?}", name, segment);
+                        trace!(%name, ?segment, "opening segment");
                         (
                             schema.clone(),
                             new_segment
@@ -704,13 +704,13 @@ fn spawn_slog_thread(
                     let mut size = writer.size_estimate().expect("segment size estimate");
                     let record_len = records.end.0 - records.start.0;
                     debug!(
-                        "{}: wrote to {:?} (end {:?}, len {}, size {}) in {:?}",
-                        name,
-                        segment,
-                        records.end,
-                        record_len,
-                        size - prior_size,
-                        now.elapsed()
+                        %name,
+                        ?segment,
+                        end = ?records.end,
+                        len = record_len,
+                        size = size - prior_size,
+                        elapsed = ?now.elapsed(),
+                        "wrote to segment"
                     );
                     prior_size = size;
                     counter!(
@@ -724,7 +724,7 @@ fn spawn_slog_thread(
                         if let Some((_, w, _)) = current.take() {
                             size = w.close().expect("segment close");
                         }
-                        trace!(%size, "{}: sealed {:?} {:?}", name, segment, records);
+                        trace!(%size, %name, ?segment, ?records, "sealed");
                     }
 
                     let response = WriteResult {
@@ -737,9 +737,9 @@ fn spawn_slog_thread(
                         },
                         sealed: seal,
                     };
-                    trace!("{}: commit {:?}/{:?} send", name, segment, records.end);
+                    trace!(%name, ?segment, end = ?records.end, "commit send");
                     tx_commits.blocking_send(response).expect("channel closed");
-                    trace!("{}: commit sent", name);
+                    trace!(%name, "commit sent");
                 }
                 Some(WriterMessage::Fin) | None => {
                     trace!("channel closed; shutting down");
@@ -754,7 +754,7 @@ fn spawn_slog_thread(
         }
 
         current.take().map(|(_, writer, _)| writer.close());
-        info!("writer for \"{}\" closed", name);
+        info!(%name, "writer closed");
     });
 
     (SlogThread { tx, tx_fin, handle }, rx_commits)

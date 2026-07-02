@@ -169,9 +169,9 @@ mod test {
         for _ in 0..1 {
             sampler.set_len(1);
             let data = sampler.generate(&mut random);
-            trace!("data: {:?}", data);
+            trace!(?data, "generated data");
         }
-        debug!("elapsed: {:?}", now.elapsed());
+        debug!(elapsed = ?now.elapsed(), "sampling complete");
 
         Ok(())
     }
