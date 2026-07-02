@@ -49,7 +49,7 @@ pub async fn run(mut config: Config, addr: SocketAddr) {
             error!(?result, "unexpectedly exited loop");
         }
         Err(e) => {
-            error!(%e, "config error")
+            error!(?e, "config error")
         }
     }
 }

@@ -500,7 +500,7 @@ impl Catalog {
         {
             error!(
                 path = %std::fs::canonicalize(&self.root).unwrap().display(),
-                %e,
+                ?e,
                 "error while monitoring disk storage capacity"
             );
             // we want to loop here; otherwise the select() in main exits early

@@ -395,7 +395,7 @@ impl ReplicationWorker {
                     tokio::time::sleep(period).await;
                 }
                 Err(e) => {
-                    error!(error = %e, "error in loop");
+                    error!(error = ?e, "error in loop");
                     let next = backoff.next_backoff();
                     info!(delay = ?last_duration, "waiting to retry");
                     tokio::time::sleep(last_duration).await;
