@@ -5,13 +5,17 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use axum::{
-    body::Body,
-    extract::{DefaultBodyLimit, FromRef, Path, State},
-    http::{header::ACCEPT, HeaderMap, Request},
-    routing::{get, post},
-    Json, Router, Server,
-};
+use axum::extract::DefaultBodyLimit;
+use axum::extract::FromRef;
+use axum::extract::Path;
+use axum::extract::Request;
+use axum::extract::State;
+use axum::http::header::ACCEPT;
+use axum::http::HeaderMap;
+use axum::routing::get;
+use axum::routing::post;
+use axum::Json;
+use axum::Router;
 
 use chrono::{DateTime, Utc};
 use futures::{Future, FutureExt};
@@ -136,19 +140,19 @@ pub async fn serve(
         .route("/ok", get(healthcheck))
         .route("/topics", get(get_topics))
         .route(
-            "/topic/:topic_name/partition/:partition_name/records",
+            "/topic/{topic_name}/partition/{partition_name}/records",
             get(partition_get_records),
         )
         .route(
-            "/topic/:topic_name/partition/:partition_name",
+            "/topic/{topic_name}/partition/{partition_name}",
             post(topic_append).layer(DefaultBodyLimit::max(config.http.max_append_bytes)),
         )
-        .route("/topic/:topic_name/records", post(topic_iterate_route))
-        .route("/topic/:topic_name", get(topic_get_info))
+        .route("/topic/{topic_name}/records", post(topic_iterate_route))
+        .route("/topic/{topic_name}", get(topic_get_info))
         .route("/info", get(get_info))
         .layer(
             TraceLayer::new(log_codes.into_make_classifier())
-                .make_span_with(|request: &Request<Body>| {
+                .make_span_with(|request: &Request| {
                     tracing::span!(
                         target: "plateau::http",
                         tracing::Level::INFO,
@@ -166,17 +170,20 @@ pub async fn serve(
         )
         .with_state(AppState(catalog, Arc::clone(&config)));
 
-    let server = Server::bind(&config.http.bind).serve(filter.into_make_service());
-    let addr = server.local_addr();
+    let listener = tokio::net::TcpListener::bind(&config.http.bind)
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
 
-    let fut = server.with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
+    let server =
+        axum::serve(listener, filter).with_graceful_shutdown(FutureExt::map(rx_shutdown, |_| ()));
     let span = tracing::info_span!("Server::run", ?addr);
     tracing::info!(parent: &span, %addr, "listening");
 
     (
         addr,
         tx_shutdown,
-        Box::pin(async move { fut.instrument(span).await.unwrap_or(()) }),
+        Box::pin(async move { server.await.unwrap_or(()) }.instrument(span)),
     )
 }
 
@@ -228,7 +235,7 @@ async fn get_topics(
     responses(
         (status = 200, description = "Span of inserted records", body = Inserted),
     ),
-    request_body(content = SchemaChunk<crate::transport::ArrowSchema>, content_type = "application/vnd.apache.arrow.file"),
+    request_body(content = Vec<u8>, content_type = "application/vnd.apache.arrow.file"),
   )]
 async fn topic_append(
     State(AppState(catalog, _config)): State<AppState>,
@@ -316,24 +323,25 @@ async fn topic_iterate_route(
     position: Option<Json<TopicIterator>>,
 ) -> Result<axum::response::Response, ErrorReply> {
     let max_page = config.http.max_page;
-    topic_iterate(topic_name, query, headers, position, catalog, max_page).await
+    let query = query.map(|Query(query)| query).unwrap_or_default();
+    let accept = headers.get(ACCEPT).and_then(|header| header.to_str().ok());
+    let position = position.map(|Json(value)| value).unwrap_or_default();
+    topic_iterate(topic_name, query, accept, position, catalog, max_page).await
 }
 
+// Takes plain domain types rather than axum extractors so this can be called
+// directly (e.g. from fitzroy) without depending on plateau-server's axum
+// version.
 pub async fn topic_iterate(
     topic_name: String,
-    query: Option<Query<TopicIterationQuery>>,
-    headers: HeaderMap,
-    position: Option<Json<TopicIterator>>,
+    query: TopicIterationQuery,
+    accept: Option<&str>,
+    position: TopicIterator,
     catalog: Arc<Catalog>,
     max_page: RowLimit,
 ) -> Result<axum::response::Response, ErrorReply> {
-    let query = query.map(|Query(query)| query).unwrap_or_default();
-    let content = headers.get(ACCEPT).and_then(|header| header.to_str().ok());
-    let position = position.map(|Json(value)| value);
-
     let topic = catalog.get_topic(&topic_name).await;
     let page_size = RowLimit::records(query.page_size.unwrap_or(1000)).min(max_page);
-    let position = position.unwrap_or_default();
     let partition_filter = query.partition_filter;
     let order: Ordering = query.order.unwrap_or(TopicIterationOrder::Asc).into();
 
@@ -364,7 +372,7 @@ pub async fn topic_iterate(
         );
     }
 
-    chunk::to_reply(content, result.batch, query.data_focus)
+    chunk::to_reply(accept, result.batch, query.data_focus)
 }
 
 #[utoipa::path(
@@ -599,7 +607,6 @@ async fn get_info(
             Inserted,
             Partitions,
             // PartitionFilter,
-            crate::transport::ArrowSchemaChunk,
             Span,
             Topic,
             Topics,

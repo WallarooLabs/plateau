@@ -23,7 +23,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 
+axum = "0.8"
 chrono = "0.4"
+headers = "0.4"
 reqwest = { version = "0.11", default-features = false, features = [
   "json",
   "rustls-tls",
@@ -32,7 +34,10 @@ reqwest = { version = "0.11", default-features = false, features = [
 ] }
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 thiserror = "2.0"
+tower-http = { version = "0.7", features = ["trace"] }
 tracing = "0.1"
+utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 plateau-catalog = { path = "./catalog" }
 plateau-cli = { path = "./cli" }
