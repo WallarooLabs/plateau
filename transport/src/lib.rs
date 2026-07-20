@@ -264,6 +264,7 @@ pub struct RecordQuery {
     pub data_focus: DataFocus,
     #[serde(default)]
     #[cfg_attr(feature = "clap", arg(skip))]
+    #[param(value_type = Vec<String>)]
     pub partition_filter: PartitionFilter,
 }
 
@@ -327,6 +328,7 @@ pub struct TopicIterationQuery {
     pub data_focus: DataFocus,
     #[serde(default)]
     #[cfg_attr(feature = "clap", clap(skip))]
+    #[param(value_type = Vec<String>)]
     pub partition_filter: PartitionFilter,
 }
 
@@ -336,7 +338,7 @@ pub struct TopicIterationQuery {
 /// begin with "regex:" to signify that any partition matching the following string can be converted.
 pub type PartitionFilter = Option<Vec<PartitionSelector>>;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(from = "String", into = "String")]
 pub enum PartitionSelector {
     /// The exact name of a partition.
@@ -533,8 +535,7 @@ pub const CONTENT_TYPE_JSON: &str = "application/json";
 pub type SegmentChunk = RecordBatch;
 
 /// A [SegmentChunk] packaged with its associated [ArrowSchema].
-#[derive(Debug, Clone, PartialEq, ToSchema)]
-#[aliases(ArrowSchemaChunk = SchemaChunk<ArrowSchema>)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SchemaChunk<S: Borrow<ArrowSchema> + Clone + PartialEq> {
     pub schema: S,
     pub chunk: SegmentChunk,

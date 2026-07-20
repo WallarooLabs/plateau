@@ -1,15 +1,14 @@
-use axum::{
-    async_trait,
-    body::{boxed, Full, HttpBody},
-    extract::{
-        rejection::{BytesRejection, FailedToBufferBody},
-        FromRef, FromRequest,
-    },
-    headers::ContentType,
-    http::{header::CONTENT_TYPE, Request, StatusCode},
-    response::Response,
-    BoxError, RequestExt as _,
-};
+use axum::body::Body;
+use axum::extract::rejection::BytesRejection;
+use axum::extract::rejection::FailedToBufferBody;
+use axum::extract::FromRef;
+use axum::extract::FromRequest;
+use axum::extract::Request;
+use axum::http::header::CONTENT_TYPE;
+use axum::http::StatusCode;
+use axum::response::Response;
+use axum::RequestExt as _;
+use headers::ContentType;
 
 use bytes::Bytes;
 use std::io::{Cursor, Write};
@@ -35,18 +34,14 @@ const CONTENT_TYPE_PANDAS_RECORD: &str = "application/json; format=pandas-record
 
 pub(crate) struct SchemaChunkRequest(pub(crate) SchemaChunk<Schema>);
 
-#[async_trait]
-impl<S, B> FromRequest<S, B> for SchemaChunkRequest
+impl<S> FromRequest<S> for SchemaChunkRequest
 where
-    B: HttpBody + Send + 'static,
-    B::Data: Send,
-    B::Error: Into<BoxError>,
     Config: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = ErrorReply;
 
-    async fn from_request(req: Request<B>, state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
         let config = Config::from_ref(state);
         let max_append_bytes = config.http.max_append_bytes;
 
@@ -59,20 +54,20 @@ where
             ))?;
 
         if content_type == CONTENT_TYPE_ARROW {
-            let bytes = match req.with_limited_body() {
-                Ok(req) => req.extract::<Bytes, _>(),
-                Err(req) => req.extract::<Bytes, _>(),
-            }
-            .await
-            .map_err(|e| {
-                if let BytesRejection::FailedToBufferBody(FailedToBufferBody::LengthLimitError(_)) =
-                    e
-                {
-                    return ErrorReply::PayloadTooLarge(max_append_bytes);
-                }
+            let bytes = req
+                .with_limited_body()
+                .extract::<Bytes, _>()
+                .await
+                .map_err(|e| {
+                    if let BytesRejection::FailedToBufferBody(
+                        FailedToBufferBody::LengthLimitError(_),
+                    ) = e
+                    {
+                        return ErrorReply::PayloadTooLarge(max_append_bytes);
+                    }
 
-                ErrorReply::Arrow(ArrowError::from_external_error(Box::new(e)))
-            })?;
+                    ErrorReply::Arrow(ArrowError::from_external_error(Box::new(e)))
+                })?;
 
             deserialize_request(bytes).await
         } else {
@@ -144,14 +139,14 @@ pub(crate) fn to_reply(
                 Response::builder()
                     .header("Content-Type", CONTENT_TYPE_ARROW)
                     .status(StatusCode::OK)
-                    .body(boxed(Full::new(Bytes::from(bytes))))
+                    .body(Body::from(bytes))
                     .map_err(|_| ErrorReply::Unknown)
             }
             None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
                 Response::builder()
                     .header("Content-Type", CONTENT_TYPE_PANDAS_RECORD)
                     .status(StatusCode::OK)
-                    .body(boxed(Full::new(Bytes::from("[]"))))
+                    .body(Body::from("[]"))
                     .map_err(|_| ErrorReply::Unknown)
             }
             Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),
@@ -196,7 +191,7 @@ pub(crate) fn to_reply(
                         .get("status")
                         .unwrap_or(&"{}".to_string()),
                 )
-                .body(boxed(Full::new(Bytes::from(bytes))))
+                .body(Body::from(bytes))
                 .map_err(|_| ErrorReply::Unknown)
         }
         None | Some("*/*") | Some(CONTENT_TYPE_JSON) | Some(CONTENT_TYPE_PANDAS_RECORD) => {
@@ -233,7 +228,7 @@ pub(crate) fn to_reply(
                         .unwrap_or(&"{}".to_string()),
                 )
                 .status(StatusCode::OK)
-                .body(boxed(Full::new(Bytes::from(bytes))))
+                .body(Body::from(bytes))
                 .map_err(|_| ErrorReply::Unknown)
         }
         Some(other) => Err(ErrorReply::CannotEmit(other.to_string())),

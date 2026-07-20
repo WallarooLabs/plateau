@@ -304,7 +304,7 @@ impl Client {
 
         Ok(match position.into() {
             Some(position) => base_request.json(&position),
-            None => base_request.json(&{}),
+            None => base_request.json(&TopicIterator::default()),
         })
     }
 

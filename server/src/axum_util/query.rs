@@ -12,7 +12,6 @@ pub enum QueryRejection {
     FailedToDeserializeQueryString,
 }
 
-#[axum::async_trait]
 impl<T, S> extract::FromRequestParts<S> for Query<T>
 where
     T: de::DeserializeOwned,
@@ -39,5 +38,24 @@ where
 impl response::IntoResponse for QueryRejection {
     fn into_response(self) -> response::Response {
         http::StatusCode::NOT_ACCEPTABLE.into_response()
+    }
+}
+
+impl<T, S> extract::OptionalFromRequestParts<S> for Query<T>
+where
+    T: de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = QueryRejection;
+
+    async fn from_request_parts(
+        parts: &mut http::request::Parts,
+        state: &S,
+    ) -> Result<Option<Self>, Self::Rejection> {
+        Ok(
+            <Self as extract::FromRequestParts<S>>::from_request_parts(parts, state)
+                .await
+                .ok(),
+        )
     }
 }
