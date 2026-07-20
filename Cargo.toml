@@ -34,7 +34,7 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 test-log = { version = "0.2", default-features = false, features = ["trace"] }
 thiserror = "2.0"
-tower-http = { version = "0.7", features = ["trace"] }
+tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
