@@ -27,7 +27,7 @@ arrow-cast = "55.2.0"
 arrow-json = "55.2.0"
 arrow-ipc = "55.2.0"
 strum = { version = "0.26", features = ["derive"] }
-thiserror = "1"
+thiserror.workspace = true
 regex = "1.10"
 chrono = { version = "0.4", features = ["serde"] }
 
