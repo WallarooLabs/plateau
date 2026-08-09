@@ -1,0 +1,20 @@
+# Sample batch-load configuration. Mounted into the Job via a ConfigMap.
+#
+# All range values (columns / partitions / rows) are drawn from a clamped
+# normal distribution. See `batch-load --help` for full field docs.
+
+speed = 200.0                 # compress time: 1h intervals fire every minute
+schemas_dir = "/data/batch-schemas"
+state_file = "/data/batch-state.json"
+
+[topics]
+count = 200                  # total topic pool
+active = 8                   # topics writing at once
+rotation_interval = "1h"     # how often the active window advances
+columns_min = 3
+columns_max = 35
+partitions_min = 1
+partitions_max = 8
+rows_min = 1000
+rows_max = 50000
+batch_interval = "1h"        # interval between batches per partition

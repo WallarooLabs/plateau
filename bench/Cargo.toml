@@ -10,8 +10,11 @@ authors.workspace = true
 [dependencies]
 anyhow = "1"
 async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 humantime-serde = "1"
+humantime = "2"
 
 sample-std = "0.2.1"
 sample-arrow-rs = "55.2.0"
@@ -38,3 +41,10 @@ plateau-client = { workspace = true, features = ["health"] }
 
 [[bin]]
 name = "cv"
+
+[[bin]]
+name = "load"
+
+[[bin]]
+name = "batch-load"
+path = "src/bin/batch_load.rs"

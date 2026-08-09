@@ -11,10 +11,11 @@ COPY . .
 RUN \
     if [ "${TARGETARCH}" = "amd64" ]; then ARCH=x86_64; elif [ "${TARGETARCH}" = "arm64" ]; then ARCH=aarch64; else exit 1; fi && \
     rustup target add ${ARCH}-unknown-linux-musl && \
-    cargo build --release --target ${ARCH}-unknown-linux-musl -p plateau && \
-    cp target/${ARCH}-unknown-linux-musl/release/plateau target/release/plateau
+    cargo build --release --target ${ARCH}-unknown-linux-musl -p plateau -p bench && \
+    cp target/${ARCH}-unknown-linux-musl/release/plateau target/release/plateau && \
+    cp target/${ARCH}-unknown-linux-musl/release/batch-load target/release/batch-load
 
-FROM scratch
+FROM scratch AS plateau
 
 LABEL org.opencontainers.image.vendor="Wallaroo Labs"
 LABEL org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
@@ -22,3 +23,12 @@ LABEL org.opencontainers.image.title="plateau"
 
 COPY --from=build /usr/src/plateau/target/release/plateau .
 CMD ["./plateau"]
+
+FROM scratch AS batch-load
+
+LABEL org.opencontainers.image.vendor="Wallaroo Labs"
+LABEL org.opencontainers.image.source="https://github.com/WallarooLabs/plateau/Dockerfile"
+LABEL org.opencontainers.image.title="plateau-bench"
+
+COPY --from=build /usr/src/plateau/target/release/batch-load .
+CMD ["./batch-load"]

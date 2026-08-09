@@ -76,6 +76,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
+          target: plateau
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
@@ -134,6 +135,7 @@ jobs:
         id: build
         uses: docker/build-push-action@v7
         with:
+          target: plateau
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
           build-args: |
@@ -199,3 +201,4 @@ jobs:
       - name: Inspect image
         run: |
           docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
+
