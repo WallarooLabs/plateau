@@ -336,14 +336,19 @@ pub struct TopicIterationQuery {
 /// begin with "regex:" to signify that any partition matching the following string can be converted.
 pub type PartitionFilter = Option<Vec<PartitionSelector>>;
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
-#[serde(from = "String", into = "String")]
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+#[serde(into = "String")]
 pub enum PartitionSelector {
     /// The exact name of a partition.
     String(String),
     /// A string beginning with `regex:`. The suffix will be matched against partition names.
     Regex(Regex),
 }
+
+/// Returned when a `regex:` prefixed [`PartitionSelector`] does not compile.
+#[derive(Clone, Debug, Error)]
+#[error("invalid partition selector: {0}")]
+pub struct PartitionSelectorError(String);
 
 #[cfg(feature = "rweb")]
 impl Entity for PartitionSelector {
@@ -377,25 +382,46 @@ impl From<PartitionSelector> for String {
     }
 }
 
+/// Note that this conversion cannot fail: a `regex:` selector that does not
+/// compile falls back to the exact partition name. Use
+/// [`PartitionSelector::parse`] to reject such a selector instead.
 impl<T> From<T> for PartitionSelector
 where
     T: AsRef<str>,
 {
     fn from(text: T) -> Self {
-        let build_regex = |pattern| {
-            regex::RegexBuilder::new(pattern)
-                .size_limit(2 << 12)
-                .build()
-                .ok()
-        };
-        text.as_ref()
-            .strip_prefix("regex:")
-            .and_then(build_regex)
-            .map_or_else(|| Self::String(text.as_ref().to_string()), Self::Regex)
+        let text = text.as_ref();
+        Self::parse(text).unwrap_or_else(|_| Self::String(text.to_string()))
+    }
+}
+
+impl<'de> Deserialize<'de> for PartitionSelector {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).map_err(serde::de::Error::custom)
     }
 }
 
 impl PartitionSelector {
+    /// Compiled size limit for a `regex:` selector.
+    const REGEX_SIZE_LIMIT: usize = 2 << 12;
+
+    /// Build a selector from its string form, reporting a `regex:` pattern that
+    /// does not compile rather than silently treating it as a partition name.
+    pub fn parse(text: &str) -> Result<Self, PartitionSelectorError> {
+        match text.strip_prefix("regex:") {
+            Some(pattern) => regex::RegexBuilder::new(pattern)
+                .size_limit(Self::REGEX_SIZE_LIMIT)
+                .build()
+                .map(Self::Regex)
+                .map_err(|e| PartitionSelectorError(e.to_string())),
+            None => Ok(Self::String(text.to_string())),
+        }
+    }
+
     pub fn matches(&self, name: &str) -> bool {
         match self {
             Self::String(s) => s == name,
@@ -1078,6 +1104,8 @@ impl fmt::Display for PartitionId {
 mod tests {
     use super::*;
     use arrow_array::{Int32Array, Int64Array};
+    use serde::de::value::{Error as ValueError, StrDeserializer};
+    use serde::de::IntoDeserializer;
 
     fn nested_chunk() -> (
         SchemaChunk<SchemaRef>,
@@ -1250,6 +1278,42 @@ mod tests {
         let ps = PartitionSelector::from(r"regex:\p{Greek}");
         assert!(matches!(ps, PartitionSelector::Regex(_)));
         assert_eq!(ps.to_string(), r"regex:\p{Greek}");
+    }
+
+    #[test]
+    fn partition_selector_reports_uncompilable_regex() {
+        // look-around is unsupported, and this pattern is far past the size limit
+        for pattern in [
+            "regex:(?=alpha)",
+            "regex:alpha(",
+            &format!("regex:{}", "a{100}".repeat(100)),
+        ] {
+            assert!(
+                PartitionSelector::parse(pattern).is_err(),
+                "expected {pattern} to be rejected"
+            );
+
+            let deserializer: StrDeserializer<'_, ValueError> = pattern.into_deserializer();
+            assert!(
+                PartitionSelector::deserialize(deserializer).is_err(),
+                "expected {pattern} to fail deserialization"
+            );
+
+            // the infallible conversion keeps its documented fallback
+            assert!(matches!(
+                PartitionSelector::from(pattern),
+                PartitionSelector::String(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn partition_selector_deserializes_valid_selectors() {
+        for (pattern, name) in [("alpha", "alpha"), ("regex:^alpha$", "alpha")] {
+            let deserializer: StrDeserializer<'_, ValueError> = pattern.into_deserializer();
+            let selector = PartitionSelector::deserialize(deserializer).unwrap();
+            assert!(selector.matches(name));
+        }
     }
 
     #[test]

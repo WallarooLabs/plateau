@@ -771,6 +771,130 @@ async fn topic_time_query() -> Result<()> {
     Ok(())
 }
 
+/// Fill two partitions of `topic_name` with `count` records each.
+async fn append_two_partitions(
+    client: &Client,
+    server: &TestServer,
+    topic_name: &str,
+    count: usize,
+) {
+    for partition in ["alpha", "beta"] {
+        repeat_append(
+            client,
+            append_url(server, topic_name, partition).as_str(),
+            TEST_MESSAGE,
+            count,
+        )
+        .await;
+    }
+    server.catalog.checkpoint().await;
+}
+
+async fn assert_error_reply(response: Response, expected: reqwest::StatusCode) {
+    assert_eq!(response.status(), expected);
+    let body: json::Value = response.json().await.unwrap();
+    let body = body.as_object().expect("expected an error object");
+    assert_eq!(
+        body.get("code").and_then(json::Value::as_u64),
+        Some(expected.as_u16() as u64)
+    );
+    assert!(body.contains_key("message"), "expected a message: {body:?}");
+}
+
+#[test_log::test(tokio::test)]
+async fn topic_iterate_partition_filter() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+    append_two_partitions(&client, &server, &topic_name, 5).await;
+    let url = topic_records_url(&server, &topic_name);
+
+    // no query string at all: every partition is iterated
+    let response = client.post(&url).json(&json::json!({})).send().await?;
+    assert_response_length(response.error_for_status()?, 10).await;
+
+    // an exact partition name, and the equivalent regex, select one partition
+    for filter in ["alpha", "regex:^alpha$"] {
+        let response = client
+            .post(&url)
+            .query(&[("partition_filter[]", filter)])
+            .json(&json::json!({}))
+            .send()
+            .await?;
+        assert_response_length(response.error_for_status()?, 5).await;
+    }
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn topic_iterate_rejects_malformed_query() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+    append_two_partitions(&client, &server, &topic_name, 5).await;
+    let url = topic_records_url(&server, &topic_name);
+
+    // `descending` is not a valid order. Rejecting the request keeps the
+    // partition filter that came with it from being silently discarded, which
+    // would widen the query to every partition.
+    let response = client
+        .post(&url)
+        .query(&[("partition_filter[]", "alpha"), ("order", "descending")])
+        .json(&json::json!({}))
+        .send()
+        .await?;
+    assert_error_reply(response, reqwest::StatusCode::BAD_REQUEST).await;
+
+    // the same request with a valid order still reads just that partition
+    let response = client
+        .post(&url)
+        .query(&[("partition_filter[]", "alpha"), ("order", "desc")])
+        .json(&json::json!({}))
+        .send()
+        .await?;
+    assert_response_length(response.error_for_status()?, 5).await;
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn topic_iterate_rejects_uncompilable_partition_regex() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+    append_two_partitions(&client, &server, &topic_name, 5).await;
+    let url = topic_records_url(&server, &topic_name);
+
+    // look-around is not supported by the regex crate, so this selector cannot
+    // compile: report it rather than matching it as a literal partition name,
+    // which reads as an empty topic.
+    for filter in ["regex:(?=alpha)", "regex:alpha("] {
+        let response = client
+            .post(&url)
+            .query(&[("partition_filter[]", filter)])
+            .json(&json::json!({}))
+            .send()
+            .await?;
+        assert_error_reply(response, reqwest::StatusCode::BAD_REQUEST).await;
+    }
+
+    Ok(())
+}
+
+#[test_log::test(tokio::test)]
+async fn partition_records_rejects_malformed_query() -> Result<()> {
+    let (client, topic_name, server) = setup().await;
+    append_two_partitions(&client, &server, &topic_name, 5).await;
+    let url = partition_records_url(&server, &topic_name, "alpha");
+
+    let response = client
+        .get(&url)
+        .query(&[("start", "0"), ("page_size", "many")])
+        .send()
+        .await?;
+    assert_error_reply(response, reqwest::StatusCode::BAD_REQUEST).await;
+
+    let response = client.get(&url).query(&[("start", "0")]).send().await?;
+    assert_response_length(response.error_for_status()?, 5).await;
+
+    Ok(())
+}
+
 #[test_log::test(tokio::test)]
 async fn topic_iterate_pandas_records() -> Result<()> {
     let (client, topic_name, server) = setup().await;

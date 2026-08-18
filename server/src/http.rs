@@ -311,12 +311,20 @@ async fn topic_get_info(
 async fn topic_iterate_route(
     State(AppState(catalog, config)): State<AppState>,
     Path(topic_name): Path<String>,
-    query: Option<Query<TopicIterationQuery>>,
+    query: Query<TopicIterationQuery>,
     headers: HeaderMap,
     position: Option<Json<TopicIterator>>,
 ) -> Result<axum::response::Response, ErrorReply> {
     let max_page = config.http.max_page;
-    topic_iterate(topic_name, query, headers, position, catalog, max_page).await
+    topic_iterate(
+        topic_name,
+        Some(query),
+        headers,
+        position,
+        catalog,
+        max_page,
+    )
+    .await
 }
 
 pub async fn topic_iterate(

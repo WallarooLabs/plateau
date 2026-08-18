@@ -11,6 +11,7 @@ pub enum ErrorReply {
     EmptyBody,
     WriterBusy,
     InvalidQuery,
+    InvalidQueryString(String),
     InvalidSchema,
     NullTypes,
     BadEncoding,
@@ -30,6 +31,9 @@ impl axum::response::IntoResponse for ErrorReply {
             Self::Chunk(e) => (StatusCode::BAD_REQUEST, format!("chunk error: {e}")),
             Self::Path(e) => (StatusCode::BAD_REQUEST, format!("invalid path: {e}")),
             Self::InvalidQuery => (StatusCode::BAD_REQUEST, "invalid query".to_string()),
+            Self::InvalidQueryString(detail) => {
+                (StatusCode::BAD_REQUEST, format!("invalid query: {detail}"))
+            }
             Self::InvalidSchema => (StatusCode::BAD_REQUEST, "invalid schema".to_string()),
             Self::NullTypes => (
                 StatusCode::BAD_REQUEST,

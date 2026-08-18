@@ -3,13 +3,15 @@ use axum::http;
 use axum::response;
 use serde::de;
 
+use crate::http::ErrorReply;
+
 #[derive(Debug)]
 pub struct Query<T>(pub T);
 
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum QueryRejection {
-    FailedToDeserializeQueryString,
+    FailedToDeserializeQueryString(String),
 }
 
 #[axum::async_trait]
@@ -24,20 +26,20 @@ where
         parts: &mut http::request::Parts,
         _state: &S,
     ) -> Result<Self, Self::Rejection> {
-        let query = parts
-            .uri
-            .query()
-            .ok_or(QueryRejection::FailedToDeserializeQueryString)?;
+        // A request without a query string carries the same information as one
+        // with an empty query string: every parameter takes its default.
+        let query = parts.uri.query().unwrap_or_default();
         let config = serde_qs::Config::new(2, false);
         config
             .deserialize_str(query)
             .map(Query)
-            .map_err(|_| QueryRejection::FailedToDeserializeQueryString)
+            .map_err(|e| QueryRejection::FailedToDeserializeQueryString(e.to_string()))
     }
 }
 
 impl response::IntoResponse for QueryRejection {
     fn into_response(self) -> response::Response {
-        http::StatusCode::NOT_ACCEPTABLE.into_response()
+        let Self::FailedToDeserializeQueryString(detail) = self;
+        ErrorReply::InvalidQueryString(detail).into_response()
     }
 }
